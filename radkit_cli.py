@@ -49,7 +49,7 @@ def get_single_output_genie(hostname, command: str, service):
         except:
             return None
     except ValueError:
-        print ("Error when getting the following command: {}".format(command))
+        sys.exit("Error when getting the following command: {}".format(command))
     return output   
 
 def get_catc_api(dnac, api_url: str,service):

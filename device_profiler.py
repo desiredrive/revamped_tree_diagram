@@ -177,13 +177,16 @@ class device:
                 self.eborder = True
 
         #Internal Border Validation
-        route_import_state = lisp.lisp_route_import("*",self.hostname)
-        rdbstate = route_import_state.ridb_state(service)
-        for i in rdbstate:
-            flag = rdbstate[i]['configured']
-            if flag is True:
-                self.iborder = True
-        
+        fabric_role_border = ['Border Node']
+        if  any(x  in fabric_role for x in fabric_role_border):
+            route_import_state = lisp.lisp_route_import("*",self.hostname)
+            rdbstate = route_import_state.ridb_state(service)
+            if rdbstate != None:
+                for i in rdbstate:
+                    flag = rdbstate[i]['configured']
+                    if flag is True:
+                        self.iborder = True
+                
 
             
 

@@ -33,6 +33,4 @@ class lisp_route_import:
             if "EID table not" in line:
                 configflag.append(False)
                 limits.append(False)
-        print (iids)
-        print (configflag)
-        print (limits)
+
