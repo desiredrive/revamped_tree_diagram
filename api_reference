@@ -1,0 +1,141 @@
+'''
+Samples of Various APIS collected by this script for future reference
+'''
+# Network-Device /dna/intent/api/v1/network-device/ip-address/{}
+
+{
+  "response": {
+    "family": "Switches and Hubs",
+    "lastUpdateTime": 1726992921085,
+    "roleSource": "MANUAL",
+    "macAddress": "6c:71:0d:44:f6:80",
+    "softwareType": "IOS-XE",
+    "softwareVersion": "17.9.3",
+    "deviceSupportLevel": "Supported",
+    "serialNumber": "FJC2342U02X",
+    "inventoryStatusDetail": "<status><general code=\"SUCCESS\"/></status>",
+    "syncRequestedByApp": "",
+    "collectionInterval": "Global Default",
+    "dnsResolvedManagementAddress": "172.19.1.67",
+    "lastManagedResyncReasons": "Periodic",
+    "managementState": "Managed",
+    "pendingSyncRequestsCount": "0",
+    "reasonsForDeviceResync": "Periodic",
+    "reasonsForPendingSyncRequests": "",
+    "description": "Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.3, RELEASE SOFTWARE (fc6) Technical Support: http://www.cisco.com/techsupport Copyright (c) 1986-2023 by Cisco Systems, Inc. Compiled Tue 14-Mar-23 18:26 by mcpre netconf enabled",
+    "type": "Cisco Catalyst 9300 Switch",
+    "memorySize": "NA",
+    "location": null,
+    "associatedWlcIp": "",
+    "apEthernetMacAddress": null,
+    "errorCode": null,
+    "errorDescription": null,
+    "lastDeviceResyncStartTime": "2024-09-22 08:14:16",
+    "lineCardCount": "0",
+    "lineCardId": "",
+    "managedAtleastOnce": true,
+    "tagCount": "0",
+    "tunnelUdpPort": null,
+    "uptimeSeconds": 139849,
+    "vendor": "Cisco",
+    "waasDeviceMode": null,
+    "locationName": null,
+    "managementIpAddress": "172.19.1.67",
+    "platformId": "C9300-24UX",
+    "reachabilityFailureReason": "",
+    "reachabilityStatus": "Reachable",
+    "series": "Cisco Catalyst 9300 Series Switches",
+    "snmpContact": "",
+    "snmpLocation": "",
+    "lastUpdated": "2024-09-22 08:15:21",
+    "bootDateTime": "2024-09-21 06:39:21",
+    "apManagerInterfaceIp": "",
+    "collectionStatus": "Managed",
+    "hostname": "Edge-1.jalejand.cisco.com",
+    "upTime": "1 day, 1:36:07.86",
+    "interfaceCount": "0",
+    "role": "ACCESS",
+    "instanceUuid": "7058bf7c-b5e4-4fec-bd85-3c5d5d696abc",
+    "instanceTenantId": "667b860112e2eb25bfe1f529",
+    "id": "7058bf7c-b5e4-4fec-bd85-3c5d5d696abc"
+  },
+  "version": "1.0"
+}
+
+#Fabric Role /dna/intent/api/v1/business/sda/device?deviceManagementIpAddress={}
+
+{
+    "name": "Edge-1.jalejand.cisco.com",
+    "roles": [
+      "Edge Node"
+    ],
+    "deviceManagementIpAddress": "172.19.1.67",
+    "siteNameHierarchy": "Global/US - Jalejand/San Jose/FL1",
+    "status": "success",
+    "description": "Fabric device info successfully retrieved from sda fabric.",
+    "executionId": "d464da18-6428-49e3-8770-0cdfc0ee733f"
+  }
+
+#Interface Details
+{
+  "response": {
+      "addresses": [
+          {
+              "address": {
+                  "ipAddress": {
+                      "address": "172.19.1.67"
+                  },
+                  "ipMask": {
+                      "address": "255.255.255.255"
+                  },
+                  "isInverseMask": false
+              },
+              "type": "IPV4_PRIMARY"
+          }
+      ],
+      "adminStatus": "UP",
+      "className": null,
+      "deviceId": "7058bf7c-b5e4-4fec-bd85-3c5d5d696abc",
+      "duplex": "AutoNegotiate",
+      "ifIndex": "54",
+      "interfaceType": "Virtual",
+      "ipv4Address": "172.19.1.67",
+      "ipv4Mask": "255.255.255.255",
+      "isisSupport": "true",
+      "lastIncomingPacketTime": 1726992887000,
+      "lastOutgoingPacketTime": 1726989378000,
+      "lastUpdated": null,
+      "macAddress": "",
+      "mappedPhysicalInterfaceId": null,
+      "mappedPhysicalInterfaceName": null,
+      "mediaType": null,
+      "mtu": "1514",
+      "nativeVlanId": "",
+      "ospfSupport": "false",
+      "pid": "C9300-24UX",
+      "portMode": "routed",
+      "portName": "Loopback0",
+      "portType": "Service Module Interface",
+      "serialNo": "FJC2342U02X",
+      "series": "Cisco Catalyst 9300 Series Switches",
+      "speed": "8000000",
+      "status": "up",
+      "vlanId": "0",
+      "voiceVlan": "",
+      "description": "Fabric Node Router ID",
+      "name": null,
+      "instanceUuid": "493571a5-2bc1-47cc-9893-7111f97f7bf8",
+      "instanceTenantId": "667b860112e2eb25bfe1f529",
+      "id": "493571a5-2bc1-47cc-9893-7111f97f7bf8"
+  },
+  "version": "1.0"
+}
+if Failure
+{
+  "response": {
+      "errorCode": "Not found",
+      "message": "Request data not found",
+      "detail": "No resource found with deviceId: 69bfdb27-23aa-4419-93b4-da87a1f1b996 and interfaceName:Loopback0"
+  },
+  "version": "1.0"
+}
