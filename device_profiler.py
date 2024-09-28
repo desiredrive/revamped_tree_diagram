@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import re
 import sys
 import radkit_cli
-import json
 from routingmodules import lisp
 
 def rloc_definition(hostname, uuid, dnac, service):
@@ -90,6 +89,7 @@ class device:
         self.edge = False
         self.iborder = False
         self.eborder = False
+        self.l2handoff = False
         self.cp = False
         self.platform = None
         self.version = None 
@@ -186,7 +186,18 @@ class device:
                     flag = rdbstate[i]['configured']
                     if flag is True:
                         self.iborder = True
-                
+            #L2Handof Definition
 
-            
+        #Edge Role Assignment
+        fabric_role_edge = ['Edge Node']
+        if  any(x  in fabric_role for x in fabric_role_edge):
+            self.edge = True
+    
+        #L2HandoffValidation
+        l2handoff_api = "/dna/intent/api/v1/sda/fabricDevices/layer2Handoffs/count?fabricId={}&networkDeviceId={}".format(self.fabric_id,self.deviceuuid)
+        l2handoff_response = radkit_cli.get_catc_api(self.dnac, l2handoff_api,service)['response']
+        if l2handoff_response['count'] == 1:
+            self.l2handoff = True
+        else:
+            self.l2handoff = False
 
