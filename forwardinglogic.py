@@ -2,6 +2,7 @@ import re
 import ipverifications
 import sys
 import traffic_flows.l2_lisp_interxtr
+from routingmodules.lisp import l2lisp_info
 from pprint import pformat
 
 #Switching Flow  : From one LISP XTR to Another
@@ -34,16 +35,32 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service):
         print("Determining if flow is Inter-XTR or Intra-XTR")
         
         #Step 1: Profile L2 LISP parameters for the Source Endpoint
-        l2lispsrc = traffic_flows.l2_lisp_interxtr.l2lisp_info()
+        l2lispsrc = l2lisp_info()
         l2lispsrc.l2_lisp_parameters(sourcextr, sourceep, service)
         print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
 
         #Step 2: Identify AR-Request, find the endpoint in Control Plane 
-        l2lisp_ar = traffic_flows.l2_lisp_interxtr.ar_relay_resolution()
-        l2lisp_ar.ar_resolution_cp(l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac)
+        l2lisp_ar = traffic_flows.l2_lisp_interxtr.ar_relay_resolution(destip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy)
+
+        #Step 3: Identify L2 EID / MAC-Address, extract destination RLOC
+        l2lisp_mac = traffic_flows.l2_lisp_interxtr.mac_rloc_resolution(l2lisp_ar[0],l2lispsrc.l2lispiid,l2lisp_ar[1],service)
+
+        sourcerloc = sourcextr.loopback
+        dstrloc = l2lisp_mac
+
+        if sourcerloc==dstrloc:
+            print ("Host {} and {} are in the same XTR {}, performing local checks \n".format(sourceep.sourceip,destip,dstrloc))
+            print ("Starting Intra-XTR Switching Flow (L2), Flow is Same-Device")
+        else:
+            print ("Host {} is in RLOC {} and Host {} is in RLOC {} \n".format(sourceep.sourceip, sourcerloc, destip ,dstrloc))
+            print ("Starting Inter-XTR Switching Flow (L2), Flow is East-West\n")
+
+            
 
     return None
 
+def inter_xtr():
+    return None
 def site_flow():
     return None
 

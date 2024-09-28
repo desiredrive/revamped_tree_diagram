@@ -1,8 +1,8 @@
 import re
 import sys
 import radkit_cli
-from ipverifications import stringvalidator
 from routingmodules.lisp import controlplane_eid
+from pprint import pformat
 from catalystcenterapi.catcapi import get_device_from_lo0, get_network_device_byuuid, validate_cp_infabric
 
 
@@ -35,41 +35,63 @@ def ar_relay_resolution(dstip, iid, l2cps, service, dnac, fabricsite):
             ar_query = controlplane_eid(dstip, iid, queriedcpname)
             ar_query.address_q(service)
             address_resolution.append(ar_query)
-        print (address_resolution)
+        
+        macs = []
+        etrs = []
+        if len(address_resolution) == None:
+            sys.exit("No MAC address were found in any of the local Control Planes")
+        print ("Address-Resolution Binding results: \n")
 
+        for i in address_resolution:
+            mac = i.arbinding
+            etr = i.etrs
+            print (pformat(vars(i), indent=4, width =1, sort_dicts=False))
+            macs.append(mac)
+            etrs.append(etr)
+        print ("\n")
+        macs = list(set(macs))
+        macs = [x for x in macs if x is not None]
+        if len (macs) > 1:
+            sys.exit("The destination IP {} has more than 1 MAC address: {} from {} \n".format(dstip, macs, etrs))
+        
+        if len (macs) == 0:
+            sys.exit("No MAC address were found in any of the local Control Planes")
+        return (macs[0], local_cps_mgmtips)   
 
-
-'''
-    print ("Querying site Control Planes for LISP AR for {} \n".format(dstip))
-    ar_res = []
+def mac_rloc_resolution(dstmac, iid, l2cps, service):
+    print ("Querying site Control Planes for L2LISP MAC for {} \n".format(dstmac))
+    l2_res = []
     for i in l2cps:
         queriedcp = i
-        ar_q = controlplane.cp_eid(dstip,iid,queriedcp)
-        ar_q.address_q(service)
-        ar_res.append(ar_q)
-
-    macs = []
-    etrs = []
-
-    if ar_res == None:
-        sys.exit("No MAC address were found in any of the local Control Planes")
-    print ("Address-Resolution Binding results: \n")
-
-    for i in ar_res:
-        mac = i.arbinding
-        etr = i.etrs
+        queriedcpname = radkit_cli.get_hostname_from_mgmtip(queriedcp,service)
+        #eid, iid, queriedcp):
+        mac_query = controlplane_eid(dstmac,iid,queriedcpname)
+        mac_query.ethernet_q(service)
+        l2_res.append(mac_query)
+        wlcs = []    
+        etrs = []
+    if l2_res == None:
+        sys.exit ("There were no RLOCs binded to this MAC address in any of the local Control Planes")
+    print ("L2 LISP MAC Control Plane results: \n")
+    for i in l2_res:
         print (pformat(vars(i), indent=4, width =1, sort_dicts=False))
-        macs.append(mac)
-        etrs.append(etr)
+        try:
+            for j in i.etrs:
+                if j != None:
+                    etrs.append(j)
+        except:
+            pass
+        try:
+            for k in i.wlcip:
+                if k != None:
+                    wlcs.append(k)
+        except:
+            pass
     print ("\n")
-    macs = list(set(macs))
-    macs = [x for x in macs if x is not None]
-    if len (macs) > 1:
-        sys.exit("The destination IP {} has more than 1 MAC address: {} from {} \n".format(dstip, macs, etrs))
-    
-    if len (macs) == 0:
-        sys.exit("No MAC address were found in any of the local Control Planes")
-    return (macs[0])
-
-'''
+    wlcs = list(set(wlcs))
+    etrs = list(set(etrs))
+    etrs = [x for x in etrs if x  not in wlcs]
+    if len (etrs) > 1:
+        sys.exit("The destination MAC {} has more than 1 RLOCs: {} \n".format(dstmac, etrs))          
+    return (etrs[0])
             
