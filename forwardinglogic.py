@@ -38,6 +38,9 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service):
         l2lispsrc.l2_lisp_parameters(sourcextr, sourceep, service)
         print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
 
+        #Step 2: Identify AR-Request, find the endpoint in Control Plane 
+        l2lisp_ar = traffic_flows.l2_lisp_interxtr.ar_relay_resolution()
+        l2lisp_ar.ar_resolution_cp(l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac)
 
     return None
 
