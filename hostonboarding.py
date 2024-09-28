@@ -10,7 +10,6 @@ class endpoint_info:
         self.sourcevlan = None
         self.sourcevlanname = None
         self.sourcevrf = None
-        self.sourcevrf_index = None
         self.sourceport = None
         self.ipdtmethod = None
         self.ipdtstate = None

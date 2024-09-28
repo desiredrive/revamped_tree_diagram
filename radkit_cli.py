@@ -35,7 +35,9 @@ def get_any_single_output(hostname,command: str,service):
         except:
             return None
     except ValueError:
-        print ("Error when getting the following command: {}".format(commands))
+        sys.exit("Error when getting the following command: {}".format(command))
+    except KeyError as e:
+        sys.exit("Error: {} in RADKIT Inventory, Device: {} ".format(e, hostname))
     return output
 
 def get_single_output_genie(hostname, command: str, service):
@@ -50,6 +52,8 @@ def get_single_output_genie(hostname, command: str, service):
             return None
     except ValueError:
         sys.exit("Error when getting the following command: {}".format(command))
+    except KeyError as e:
+        sys.exit("Error: {} in RADKIT Inventory, Device: {} ".format(e, hostname))
     return output   
 
 def get_catc_api(dnac, api_url: str,service):
@@ -76,3 +80,15 @@ def get_catc_name(service):
         #If the Device does not exist  
         except (IndexError, ValueError):
             sys.exit("Catalyst Center {} not in RADKIT inventory!!") 
+
+def get_hostname_from_mgmtip(mgmtip,service):
+        try:
+            device_inventory = service.inventory.filter('host', '^{}$'.format(mgmtip))
+            device_name = list(device_inventory.keys())
+            hostname = device_name[0]
+            device_inventory = service.inventory[hostname]
+            return (hostname)
+
+        #Does not exist  
+        except (IndexError, ValueError):
+            sys.exit("Device {} not in RADKIT inventory".format(mgmtip))  
