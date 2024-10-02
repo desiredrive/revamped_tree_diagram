@@ -108,7 +108,7 @@ class physical_recursion():
         #VRF Is needed for ARP recursion
 
         
-        print("Calculating Physical Interfaces")
+        print("Calculating Physical Interfaces\n")
 
         #Current state supports the following Next Hop parsing form CEF: L3 Port-Channel, SVI and Physical (L2 or L3)
         #Support for Tunnel, Apphosting, VTI, LISP and NVE interfaces is not yet considered...
