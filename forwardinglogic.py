@@ -1,8 +1,10 @@
-import re
 import ipverifications
 import sys
 import traffic_flows.l2_lisp_interxtr
-from routingmodules.lisp import l2lisp_info
+from routingmodules import lisp
+from routingmodules import iprouting
+from catalystcenterapi import catcapi
+from device_profiler import device
 from pprint import pformat
 
 #Switching Flow  : From one LISP XTR to Another
@@ -35,7 +37,7 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service):
         print("Determining if flow is Inter-XTR or Intra-XTR")
         
         #Step 1: Profile L2 LISP parameters for the Source Endpoint
-        l2lispsrc = l2lisp_info()
+        l2lispsrc = lisp.l2lisp_info()
         l2lispsrc.l2_lisp_parameters(sourcextr, sourceep, service)
         print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
 
@@ -46,7 +48,8 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service):
         l2lisp_mac = traffic_flows.l2_lisp_interxtr.mac_rloc_resolution(l2lisp_ar[0],l2lispsrc.l2lispiid,l2lisp_ar[1],service)
 
         sourcerloc = sourcextr.loopback
-        dstrloc = l2lisp_mac
+        dstrloc = l2lisp_mac[0]
+        mac = l2lisp_mac[1]
 
         if sourcerloc==dstrloc:
             print ("Host {} and {} are in the same XTR {}, performing local checks \n".format(sourceep.sourceip,destip,dstrloc))
@@ -54,12 +57,27 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service):
         else:
             print ("Host {} is in RLOC {} and Host {} is in RLOC {} \n".format(sourceep.sourceip, sourcerloc, destip ,dstrloc))
             print ("Starting Inter-XTR Switching Flow (L2), Flow is East-West\n")
-
-            
-
+            inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, service)
     return None
 
-def inter_xtr():
+def inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, service):
+    #Execution of L2LISP Map Cache
+    #Get the hostname of the destination RLOC and then Management IP:
+
+    dstxtruuid= catcapi.get_device_from_lo0(dstrloc, sourcextr.dnac, service)[0]['deviceUUID']
+    dstxtrmgmtip = catcapi.get_network_device_byuuid(dstxtruuid,sourcextr.dnac,service)
+
+    #Profiling Destination XTR:
+    #[Object: Destination XTR]
+    dstxtr = device(dstxtrmgmtip,sourcextr.dnac)
+    dstxtr.profile_device(service)
+    print (pformat(vars(dstxtr), indent=4, width =1, sort_dicts=False))
+
+    #Remote Map-Cache Calculation
+    #[Object: L2LISP Map Cache]
+    l2mapcache = traffic_flows.l2_lisp_interxtr.l2lisp_map_cache_validation(l2lispsrc, dstrloc, sourcextr.hostname, service)
+    print (pformat(vars(l2mapcache), indent=4, width =1, sort_dicts=False))
+
     return None
 def site_flow():
     return None

@@ -94,15 +94,16 @@ def mac_rloc_resolution(dstmac, iid, l2cps, service):
     etrs = [x for x in etrs if x  not in wlcs]
     if len (etrs) > 1:
         sys.exit("The destination MAC {} has more than 1 RLOCs: {} \n".format(dstmac, etrs))          
-    return (etrs[0], dstmac)
+    return (etrs[0])
             
-def l2lisp_map_cache_validation(l2lispinfo, calculated_rloc, querieddev, service):
-    l2mapcache = l2_map_cache(l2lispinfo.sourcemac, l2lispinfo.l2lispiid, querieddev)
-    print(l2mapcache)
-    l2mapcache.l2map(service)
+def l2lisp_map_cache_validation(eid, l2lispinfo, calculated_rloc, querieddev):
+    l2mapcache = l2_map_cache(eid, l2lispinfo.l2lispiid, querieddev)
+    l2mapcache.l2map
 
     l2rloc = l2mapcache.rloc
     state= l2mapcache.rlocstate
+
+    print (pformat(vars(l2mapcache), indent=4, width =1, sort_dicts=False)) 
 
     bad_states = ['route-reject', 'own', 'admin']
     if any(x  in state for x in bad_states):
@@ -117,5 +118,4 @@ def l2lisp_map_cache_validation(l2lispinfo, calculated_rloc, querieddev, service
     else:
         print ("SMR verifications comming soon \n")
         sys.exit("L2 Map-cache {} does not match CP registered RLOC {} \n").format(l2rloc, calculated_rloc)
-    
-    return l2mapcache
+ 

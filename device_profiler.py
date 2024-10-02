@@ -94,7 +94,6 @@ class device:
         self.platform = None
         self.version = None 
         self.mgmtip = mgmtip
-        self.cdpneighbors = None
         self.rlocdef = None
         self.dnac = catc
         self.serialnubmers = None
