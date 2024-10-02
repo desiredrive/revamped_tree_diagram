@@ -8,6 +8,7 @@ from routingmodules import cef
 from switchingmodules.interfaces import interfaces
 from catalystcenterapi import catcapi
 from device_profiler import device
+from hostonboarding import endpoint_info
 from pprint import pformat
 
 #Switching Flow  : From one LISP XTR to Another
@@ -60,10 +61,10 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service):
         else:
             print ("Host {} is in RLOC {} and Host {} is in RLOC {} \n".format(sourceep.sourceip, sourcerloc, destip ,dstrloc))
             print ("Starting Inter-XTR Switching Flow (L2), Flow is East-West\n")
-            inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, mac, service)
+            l2_inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, mac, service)
     return None
 
-def inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
+def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     #Execution of L2LISP Map Cache
     #Get the hostname of the destination RLOC and then Management IP:
 
@@ -72,6 +73,7 @@ def inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
 
     #Profiling Destination XTR:
     #[Object: Destination XTR]
+    print ("Profiling device where the Destination is located...\n")
     dstxtr = device(dstxtrmgmtip,srcxtr.dnac)
     dstxtr.profile_device(service)
     print (pformat(vars(dstxtr), indent=4, width =1, sort_dicts=False))
@@ -151,6 +153,15 @@ def inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
         print ("WARNING! : Packet Loss from {} to {} is below threshold of 70%, current value is {} % with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
     else:
         print ("ICMP Connectivity from {} to {} is good at {} % success rate with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
+
+    #Profiling Endpoint in Remote XTR
+    print ("Gathering information about the source endpoint...\n")
+    dstep = endpoint_info(dstip)
+    dstep.host_onboarding_validation(dstxtr,service)
+    print (pformat(vars(dstep), indent=4, width =1, sort_dicts=False))
+
+    #Performing CTS evaluations...
+    print ("Gathering CTS information between SGTs...\n")
 
     return None
 def site_flow():
