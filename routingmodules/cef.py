@@ -20,7 +20,7 @@ class ip_cef_internal():
             vrf_mode = "vrf "+self.vrf+" "
         
         #show ip route command:
-        ipcefint_cmd = "show ip route {} {}".format(self.ip, vrf_mode, self.vrf)
+        ipcefint_cmd = "show ip cef {} {} internal".format(self.ip, vrf_mode, self.vrf)
         ipcefint_op = radkit_cli.get_single_output_genie(self.hostname,ipcefint_cmd,service)
         
         #VRF utilization
