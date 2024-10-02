@@ -1,4 +1,3 @@
-import re
 import sys
 import radkit_cli
 from routingmodules.lisp import controlplane_eid

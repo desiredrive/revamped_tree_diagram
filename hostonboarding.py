@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 import sys
 import radkit_cli
 from ipverifications import stringvalidator

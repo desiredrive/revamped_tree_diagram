@@ -1,9 +1,11 @@
 import ipverifications
 import sys
 import traffic_flows.l2_lisp_interxtr
+from traffic_flows.operational_tests import ping
 from routingmodules import lisp
 from routingmodules import iprouting
 from routingmodules import cef
+from switchingmodules.interfaces import interfaces
 from catalystcenterapi import catcapi
 from device_profiler import device
 from pprint import pformat
@@ -95,13 +97,60 @@ def inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     #RLOC reachability for L2 requires /32 másk
     if int(rlocroute.mask) != 32:
         sys.exit("WARNING!: LISP Layer 2 Extension requires a /32 for each RLOC, RLOC {} is known via route {} with mask {} which is not exact!".format(l2mapcache.rloc, rlocroute.prefix, rlocroute.mask)) 
+    
     #[CEF: Route to Underlay]:
+    #[Object: CEF Internal Information]
     rloccef = cef.ip_cef_internal(l2mapcache.rloc,None,srcxtr.hostname)
     rloccef.get_cef_internal(service)
     print (pformat(vars(rloccef), indent=4, width =1, sort_dicts=False))
 
     #Resolving Virtual Interfaces and Layer 2 Interfaces
+    #[Object: RLOC Physical Interfaces]
+    rlocintfs = cef.physical_recursion(rloccef, srcxtr.hostname)
+    rlocintfs.get_physical_interfaces(service)
+    print (pformat(vars(rlocintfs), indent=4, width =1, sort_dicts=False))
 
+    #Underlay Interface Parsing
+    #[Object: Interface Information and Counters - interfaceobjects]
+    nexthops = rlocintfs.nexthops
+    interfaceobjects = []
+    mtus = []
+    for i in nexthops:
+        nhinterface = i['oif']
+        nhinterfaceinfo = interfaces(nhinterface, srcxtr.hostname)
+        nhinterfaceinfo.show_interface(service)
+        interfaceobjects.append(nhinterfaceinfo)
+    for i in interfaceobjects:
+            print (pformat(vars(i), indent=4, width =1, sort_dicts=False))
+            mtus.append(i.mtu)
+            print ("\n")
+    
+    #Minimum MTU calculation
+    mtus.sort()
+    minimum = mtus[0]
+    print ("The lowest MTU between underlay interfaces for device: {} is {}".format(srcxtr.hostname, minimum))
+
+    #RLOC to RLOC Ping Validation
+    #1) Without MTU
+    print ("RLOC to RLOC results with low MTU")
+    normal_ping = ping(rloccef.ip, srcxtr.hostname)
+    normal_ping.ping_with_source(None,"Lo0",None,False,service)
+    print (pformat(vars(normal_ping), indent=4, width =1, sort_dicts=False))
+    #2) With MTU
+    print ("RLOC to RLOC results with {} MTU".format(minimum))
+    mtu_ping = ping(rloccef.ip, srcxtr.hostname)
+    mtu_ping.ping_with_source(None,"Lo0",minimum,True,service)
+    print (pformat(vars(mtu_ping), indent=4, width =1, sort_dicts=False))
+
+    if int(normal_ping.result) <= 70:
+        print ("WARNING! : Packet Loss from {} to {} is below threshold of 70%, current value is {} % with low MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result))
+    else:
+        print ("ICMP Connectivity from {} to {} is good at {} % success rate with low MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result))
+    
+    if int(mtu_ping.result) <= 70:
+        print ("WARNING! : Packet Loss from {} to {} is below threshold of 70%, current value is {} % with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
+    else:
+        print ("ICMP Connectivity from {} to {} is good at {} % success rate with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
 
     return None
 def site_flow():

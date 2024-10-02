@@ -1,7 +1,9 @@
-from dataclasses import dataclass
-import re
 import sys
 import radkit_cli
+from switchingmodules import etherchannel
+from switchingmodules.arp import arp_modules
+from switchingmodules.maclearning import mac_learning
+from re import compile
 
 class ip_cef_internal():
 
@@ -93,5 +95,67 @@ class ip_cef_internal():
             #Empty next hop! (Special Adjacency???)
             sys.exit("No next hop founds in CEF for prefix {} in vrf {} on Device: {}".format(self.ip,vrf,self.hostname))
 
+
+class physical_recursion():
+
+    def __init__(self, cef_hops, device):
+        self.hostname = device
+        self.vrf = cef_hops.vrf
+        self.nexthops = cef_hops.nexthops
+    
+    def get_physical_interfaces(self,service):
+
+        #VRF Is needed for ARP recursion
+
+        
+        print("Calculating Physical Interfaces")
+
+        #Current state supports the following Next Hop parsing form CEF: L3 Port-Channel, SVI and Physical (L2 or L3)
+        #Support for Tunnel, Apphosting, VTI, LISP and NVE interfaces is not yet considered...
+        
+        total_phys = []
+        for i in self.nexthops:
+            nhphys = []
+            interface = i['oif']
+            #Layer 3 Port-Channel as Next Hop
+            if "channel" in interface:
+                phys = etherchannel.etherchannel_parse(interface,self.hostname)
+                nhphys.append(phys)
+            #SVI as next as hop
+            elif "Vlan" in interface:
+                nhop = i['nexthop']
+                intf = i['oif']
+                vid = compile("(?<=Vlan)[0-9]{4}(?=)").search(intf).group().strip()
+                arp = arp_modules(self.vrf, self.hostname)
+                arp.arp_resolution_single_ip(nhop, intf, service)
+                try:
+                    mac = arp.mac
+                except:
+                    sys.exit("ARP Is Incomplete for next hop {}".format(nhop))
+                
+                mac_ports = mac_learning(self.hostname)
+                mac_ports.mac_learning_mac(mac, vid, service)
+
+                if mac_ports == None:
+                    sys.exit("MAC not learned for ARP {}".format(nhop))
+                
+                for i in mac_ports.port:
+                    if "Po" in i:
+                        phys = etherchannel.etherchannel_parse(i, self.hostname)
+                        nhphys.append(phys)
+                    else:
+                        nhphys.append(i)
+            #Physical Interfaces 
+            else:
+                nhphys.append(interface)
+            if len(nhphys)==0:
+                sys.exit("Unable to find the outgoing physical interfaces for next_hop {}, confirm the outgoing interface on the device itself.".format(self.route))
+            else:
+                total_phys.append(nhphys)
+            
+            
+
+
+                
 
 

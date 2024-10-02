@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 import re
 import sys
 import radkit_cli
