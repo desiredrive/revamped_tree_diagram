@@ -96,9 +96,8 @@ def mac_rloc_resolution(dstmac, iid, l2cps, service):
         sys.exit("The destination MAC {} has more than 1 RLOCs: {} \n".format(dstmac, etrs))          
     return (etrs[0], dstmac)
             
-def l2lisp_map_cache_validation(l2lispinfo, calculated_rloc, querieddev, service):
-    l2mapcache = l2_map_cache(l2lispinfo.sourcemac, l2lispinfo.l2lispiid, querieddev)
-    print(l2mapcache)
+def l2lisp_map_cache_validation(l2lispinfo, calculated_rloc, querieddev, mac, service):
+    l2mapcache = l2_map_cache(mac, l2lispinfo.l2lispiid, querieddev)
     l2mapcache.l2map(service)
 
     l2rloc = l2mapcache.rloc

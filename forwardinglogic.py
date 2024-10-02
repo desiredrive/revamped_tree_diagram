@@ -3,6 +3,7 @@ import sys
 import traffic_flows.l2_lisp_interxtr
 from routingmodules import lisp
 from routingmodules import iprouting
+from routingmodules import cef
 from catalystcenterapi import catcapi
 from device_profiler import device
 from pprint import pformat
@@ -57,26 +58,48 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service):
         else:
             print ("Host {} is in RLOC {} and Host {} is in RLOC {} \n".format(sourceep.sourceip, sourcerloc, destip ,dstrloc))
             print ("Starting Inter-XTR Switching Flow (L2), Flow is East-West\n")
-            inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, service)
+            inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, mac, service)
     return None
 
-def inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, service):
+def inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     #Execution of L2LISP Map Cache
     #Get the hostname of the destination RLOC and then Management IP:
 
-    dstxtruuid= catcapi.get_device_from_lo0(dstrloc, sourcextr.dnac, service)[0]['deviceUUID']
-    dstxtrmgmtip = catcapi.get_network_device_byuuid(dstxtruuid,sourcextr.dnac,service)
+    dstxtruuid= catcapi.get_device_from_lo0(dstrloc, srcxtr.dnac, service)[0]['deviceUUID']
+    dstxtrmgmtip = catcapi.get_network_device_byuuid(dstxtruuid,srcxtr.dnac,service)
 
     #Profiling Destination XTR:
     #[Object: Destination XTR]
-    dstxtr = device(dstxtrmgmtip,sourcextr.dnac)
+    dstxtr = device(dstxtrmgmtip,srcxtr.dnac)
     dstxtr.profile_device(service)
     print (pformat(vars(dstxtr), indent=4, width =1, sort_dicts=False))
 
+    #Determining Inter or Intra Site:
+    dstsite = dstxtr.fabric_site_hierarchy
+    srcsite = srcxtr.fabric_site_hierarchy
+    if (srcsite == dstsite):
+        print ("Source XTR {} in Fabric: {}, is in the same Fabric Site as Destination XTR {}".format(srcxtr.hostname, srcsite, dstxtr.hostname))
+    else:
+        print ("Source XTR {} in Fabric: {}, not int the same  Fabric Site: {} as Destination XTR {}".format(srcxtr.hostname, srcsite, dstsite, dstxtr.hostname))
     #Remote Map-Cache Calculation
     #[Object: L2LISP Map Cache]
-    l2mapcache = traffic_flows.l2_lisp_interxtr.l2lisp_map_cache_validation(l2lispsrc, dstrloc, sourcextr.hostname, service)
+    l2mapcache = traffic_flows.l2_lisp_interxtr.l2lisp_map_cache_validation(l2lispsrc, dstrloc, srcxtr.hostname, mac, service)
     print (pformat(vars(l2mapcache), indent=4, width =1, sort_dicts=False))
+
+    #Underlay Routing Modules:
+    #[Object: Recursed Route]
+    rlocroute = iprouting.ip_route_get(l2mapcache.rloc,None,srcxtr.hostname)
+    rlocroute.iproute_prefix(service)
+    print (pformat(vars(rlocroute), indent=4, width =1, sort_dicts=False))
+
+    #RLOC reachability for L2 requires /32 másk
+    if int(rlocroute.mask) != 32:
+        sys.exit("WARNING!: LISP Layer 2 Extension requires a /32 for each RLOC, RLOC {} is known via route {} with mask {} which is not exact!".format(l2mapcache.rloc, rlocroute.prefix, rlocroute.mask)) 
+    #[CEF: Route to Underlay]:
+    rloccef = cef.ip_cef_internal(l2mapcache.rloc,None,srcxtr.hostname)
+    rloccef.get_cef_internal(service)
+    print (pformat(vars(rloccef), indent=4, width =1, sort_dicts=False))
+
 
     return None
 def site_flow():

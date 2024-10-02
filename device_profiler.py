@@ -83,26 +83,9 @@ def fabric_sites(siteNameHierarchy, dnac, service):
 class device:
 
     def __init__(self,mgmtip,catc):
-        self.hostname = None
-        self.loopback = None
-        self.mask = None
-        self.edge = False
-        self.iborder = False
-        self.eborder = False
-        self.l2handoff = False
-        self.cp = False
-        self.platform = None
-        self.version = None 
         self.mgmtip = mgmtip
-        self.rlocdef = None
         self.dnac = catc
-        self.serialnubmers = None
-        self.deviceuuid = None
-        self.siteNameHierarchy = None
-        self.ispubsub = None
-        self.fabric_id = None
-        self.fabric_site_id = None
-        self.fabric_site_hierarchy = None
+
 
     def find_device(self, service):
             

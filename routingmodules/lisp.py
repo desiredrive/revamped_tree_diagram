@@ -7,10 +7,6 @@ class lisp_route_import:
 
     def __init__(self, iid, device):
         self.iid = iid
-        self.configured_iids = None 
-        self.sourceprotocol = None
-        self.limit = None
-        self.rlocs = None
         self.hostname  = device
     
     def ridb_state(self, service):
@@ -40,28 +36,14 @@ class controlplane_eid:
         #self.qtype = qtype  #Types: L3v4, L3v6, L2, L2AR
         self.eid = eid      #Can be : IPv4, MAC address (IPv6 not needed for now)
         self.iid = iid      #LISP Instance ID for the request
-        self.etrs = None    #List of ETRs registering this EID
-        self.etrsessions = None #LISP Session Port (if any)
         self.protocol = "UDP" #Was this registered using UDP or TCP?
-        self.isfewap = None #Is this EID an AP Radio MAC? True or False
-        self.wlcip = None    #IP of the WLC if any
-        self.regbywlc = None #Is this EID registered by a WLC? True or False? If so, whats the WLC IP?
-        self.domainid = None #Domain ID for this registration
-        self.multidomain =  None #Multihoming ID for this registration
-        self.arbinding = None #What is the MAC address of this IP binding if any?
-        self.authenfailures = None #Are there any authentication failures?
         self.queriedcp = queriedcp #What is the IP address of this queried CP?
 
     def address_q(self, service):
             cmd = "sh lisp instance-id {} ethernet server address-resolution {}".format(self.iid, self.eid)
             cp_server_output = radkit_cli.get_single_output_genie(self.queriedcp,cmd,service)
             #Address resolution is always registered using TCP
-            self.protocol = "TCP"
-            self.domainid = "NA"
-            self.multidomain = "NA" 
-            self.isfewap = "NA"
-            self.regbywlc = "NA"
-            
+            self.protocol = "TCP"            
             #Parsing:
             if cp_server_output == None:
                 print("ARP Registration not found in CP {}".format(self.queriedcp))
@@ -121,14 +103,6 @@ class controlplane_eid:
         self.etrs = etrs_list
 
 class l2lisp_info:
-
-    def __init__(self):
-        self.sourcemac = None
-        self.l2lispiid = None
-        self.l2dynstate = False
-        self.l2lispdbstate = False
-        self.l2lispminmask = None
-        self.l2cps = [] 
 
     def l2_lisp_parameters(self, xtr, ep, service):
         self.mgmtip = xtr.mgmtip
@@ -232,14 +206,6 @@ class l2_map_cache:
     def __init__(self,eid, iid, queriedev):
         self.eid = eid              #Can be : IPv4, MAC address (IPv6 not needed for now)
         self.iid = iid              #LISP Instance ID for the request
-        self.mask = None            #Mask of the EID, MAC addresses are /48 always
-        self.uptime = None          #Uptime of the map-cache
-        self.expiration = None      #Expiration 
-        self.source = None          #Via which method? Map-reply? Static? Publication?  
-        self.rloc = None            #RLOC IP
-        self.rlocstate = None       #What is the state, up, route-reject, admin-down, no-route? self?, list of RLOCs, dict
-        self.priority = None        #LISP priority
-        self.weight = None          #LISP weight
         self.queriedev = queriedev
 
     def l2map(self, service):
