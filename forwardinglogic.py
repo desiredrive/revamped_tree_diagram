@@ -100,6 +100,8 @@ def inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     rloccef.get_cef_internal(service)
     print (pformat(vars(rloccef), indent=4, width =1, sort_dicts=False))
 
+    #Resolving Virtual Interfaces and Layer 2 Interfaces
+
 
     return None
 def site_flow():
