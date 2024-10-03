@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 import radkit_client
 import sys
 import json
@@ -20,6 +21,19 @@ def main(service: radkit_client.Service):
     :param service: radkit_client.Service object
     """
     
+def loggin_file():
+    currenttime = datetime.now()
+    f = open("collection_logfile.txt", "w")
+    f.write("File Created on {}".format(currenttime))
+    f.write("\n-------------------------------------------------------------- \n")
+    f.close()
+
+def append_to_logging_file(content):
+    f = open("collection_logfile.txt", "a")
+    f.write(content)
+    f.write("\n-------------------------------------------------------------- \n")
+    f.close()
+
 def radkit_login(email: str, domain: str, serial: str):
     # Connect to the given service, using SSO login.
     client = certificate_login(identity=email, domain=domain)
@@ -32,6 +46,7 @@ def get_any_single_output(hostname,command: str,service):
         commands = device_inventory.exec([command]).wait()
         try:
             output = commands.result["{}".format(command)].data
+            append_to_logging_file(output)
         except:
             return None
     except ValueError:
@@ -45,8 +60,11 @@ def get_single_output_genie(hostname, command: str, service):
     type = 'iosxe'
     try:
         device_inventory = service.inventory[hostname]
-        execution = radkit_genie.parse(device_inventory.exec(command).wait(), os=type)
+        raw = device_inventory.exec(command).wait()
+        execution = radkit_genie.parse(raw, os=type)
         try:
+            raw_output = raw.result.data
+            append_to_logging_file(raw_output)
             output = execution[hostname][command].data
         except:
             return None

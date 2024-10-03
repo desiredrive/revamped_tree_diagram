@@ -9,6 +9,8 @@ from switchingmodules.interfaces import interfaces
 from catalystcenterapi import catcapi
 from device_profiler import device
 from hostonboarding import endpoint_info
+from securitymodules.ciscotrustsec import cts_endpoint_info
+
 from pprint import pformat
 
 #Switching Flow  : From one LISP XTR to Another
@@ -162,8 +164,13 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
 
     #Performing CTS evaluations...
     print ("Gathering CTS information between SGTs...\n")
+    ctsinfo = cts_endpoint_info(srcep.sourceip,srcep.sourcevrf, srcxtr.hostname)
+    ctsinfo.cts_sgt_mapping(service)
+    ctsbinding = {'ip':ctsinfo.endpoint_ip, 'sgt': ctsinfo.sgt, 'source': ctsinfo.source}
+    ctsinfo.cts_class_method(srcep.sourceport, ctsbinding, service)
+    ctsinfo.cts_enforcement(srcep.sourcevlan, srcep.sourceport,service)
+    print (pformat(vars(ctsinfo), indent=4, width =1, sort_dicts=False))
 
-    return None
 def site_flow():
     return None
 

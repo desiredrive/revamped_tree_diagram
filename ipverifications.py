@@ -100,3 +100,10 @@ def ip_validator(ip_type: str):
             #valid IP input
             break
     return ip_address
+
+def ipsubnet_validator_no_return(ip_type: str):
+    try:
+        ip_address = ipaddress.IPv4Network(ip_type)
+        return True
+    except ValueError:
+            return False  
