@@ -39,6 +39,17 @@ def cts_all_parser(output):
             bindings.append(binding)
     return bindings
 
+def rbaclparser(aclop):
+    aces=[]
+    matches = ["#", "show", "ACEs:"]
+    for line in aclop.splitlines():
+        if not any(x  in line for x in matches):
+            line = line.strip()
+            if line != '':
+                aces.append(line)
+    return (aces)
+
+
 def cts_inside_subnet(bind,ip):
     #Validate if Destinatip IP is inside a subnet rather than a host binding
     valid_mappings = []
@@ -71,7 +82,6 @@ def cts_inside_subnet(bind,ip):
 
 
 def cts_interface_parser(output):
-
     for i in output['interfaces']:
         interface = i
     cts_path = output['interfaces'][interface]
@@ -115,11 +125,10 @@ class cts_endpoint_info():
         #CTS For /32 Hosts
         ctssgtmap_cmd = "show cts role-based sgt-map {} {}".format(vrf_mode, self.endpoint_ip)
         ctssgtmap_op = radkit_cli.get_single_output_genie(self.hostname, ctssgtmap_cmd, service)
-
         if ctssgtmap_op is not None:
-            ctspath = ctssgtmap_op['ip']
+            ctspath = ctssgtmap_op[self.endpoint_ip]
             self.sgt = ctspath['sgt']
-            self.type = ctspath['source']
+            self.source = ctspath['source']
         else:
             #RAW CTS Processing:
             ctssgtmap_cmd = "show cts role-based sgt-map {} all".format(vrf_mode)
@@ -131,18 +140,26 @@ class cts_endpoint_info():
                 elected_binding = cts_inside_subnet(bindings,self.endpoint_ip)
                 if elected_binding is None:
                     self.sgt = 0
-                    self.type = None
+                    self.source = None
                 else:
                     self.sgt = elected_binding['sgt']
                     self.source = elected_binding['source']
-    
+        
+        #CEF SGT Perspective (manual parsing)
+        cefinternal_cmd = "show ip cef {} {} internal | i SGT".format(vrf_mode, self.endpoint_ip)
+        cefinternal_op = radkit_cli.get_any_single_output(self.hostname, cefinternal_cmd, service)
+        self.cefsgt = 0
+        for line in cefinternal_op.splitlines():
+            if "RBAC" in line:
+                self.cefsgt = re.compile("(?<=SGT).*(?=S)").search(line).group().strip()
+
     def cts_class_method(self,interface, binding, service):
         #Binding format must be:     #Binding Format = {'ip': x.x.x.x, 'sgt': x, 'source' : }
         if binding['source'] == 'LOCAL':
             #Parser for LOCAL mode (CTS Manual or RADIUS)
             ctssgtmap_cmd = "show cts interface {}".format(interface)
-            ctssgtmap_op = radkit_cli.get_any_single_output(self.hostname, ctssgtmap_cmd, service)
-            cts_interface_states = cts_interface_parser(ctssgtmap_op, interface)
+            ctssgtmap_op = radkit_cli.get_single_output_genie(self.hostname, ctssgtmap_cmd, service)
+            cts_interface_states = cts_interface_parser(ctssgtmap_op)
             self.ctsintf_state = cts_interface_states[0]
             self.sgt_classificaiton = cts_interface_states[1]
             self.propagation = cts_interface_states[2]
@@ -200,4 +217,51 @@ class cts_endpoint_info():
         else:
             self.vlanenforcement = False
 
+class cts_rules():
+    
+    def __init__(self, device):
+        self.hostname = device
+    
+    def cts_rbac_permissions(self, sgt, dgt, service):
         
+        ctsrbacperm_cmd = "show cts role-based permissions from {} to {}".format(sgt,dgt)
+        ctsrbacperm_op = radkit_cli.get_single_output_genie(self.hostname, ctsrbacperm_cmd, service)
+
+        if ctsrbacperm_op is not None:
+            ctsrbacpath = ctsrbacperm_op['indexes']
+            matches = ["#"]
+            for i in ctsrbacpath:
+                if type(i) == int:
+                    index = i
+                    self.srcsgt = ctsrbacpath[index]['src_grp_id']
+                    self.dstsgt = ctsrbacpath[index]['dst_group_id']
+                    self.sgtname = ctsrbacpath[index]['src_grp_name']
+                    self.dgtname = ctsrbacpath[index]['dst_group_name']
+                    rbacls = ctsrbacpath[index]['policy_groups']
+                    self.isdefaultrule = False
+                    for j in rbacls:
+                        if not any (x in j for x in matches):
+                            try:
+                                rbacl = re.compile(".*(?=-[0-9]+)").search(j).group().strip()
+                            except:
+                                pass
+                    self.rbacl = rbacl
+        else:
+            ctsrbacperm_cmd = "show cts role-based permissions default"
+            ctsrbacperm_op = radkit_cli.get_single_output_genie(self.hostname, ctsrbacperm_cmd, service)
+            ctsrbacpath = ctsrbacperm_op['indexes']
+            for i in ctsrbacpath:
+                if type(i) == int:
+                    index = i
+                    self.srcsgt = sgt
+                    self.dstsgt = dgt
+                    self.isdefaultrule = True
+                    self.rbacl = ctsrbacpath[index]['action_policy']+" IP"
+
+    def cts_rbac_rbacls(self, rbacl, service):
+        rbaclcmd = "show cts rbacl \"{}\" | se ACEs".format(rbacl)
+        rbaclop = radkit_cli.get_any_single_output(self.hostname, rbaclcmd,service)
+        aces = rbaclparser(rbaclop)
+        self.aces = aces
+        
+                    

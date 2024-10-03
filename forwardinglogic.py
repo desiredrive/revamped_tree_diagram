@@ -10,6 +10,7 @@ from catalystcenterapi import catcapi
 from device_profiler import device
 from hostonboarding import endpoint_info
 from securitymodules.ciscotrustsec import cts_endpoint_info
+from securitymodules.ciscotrustsec import cts_rules
 
 from pprint import pformat
 
@@ -162,14 +163,32 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     dstep.host_onboarding_validation(dstxtr,service)
     print (pformat(vars(dstep), indent=4, width =1, sort_dicts=False))
 
-    #Performing CTS evaluations...
+    #Performing CTS evaluations for the Source
     print ("Gathering CTS information between SGTs...\n")
-    ctsinfo = cts_endpoint_info(srcep.sourceip,srcep.sourcevrf, srcxtr.hostname)
-    ctsinfo.cts_sgt_mapping(service)
-    ctsbinding = {'ip':ctsinfo.endpoint_ip, 'sgt': ctsinfo.sgt, 'source': ctsinfo.source}
-    ctsinfo.cts_class_method(srcep.sourceport, ctsbinding, service)
-    ctsinfo.cts_enforcement(srcep.sourcevlan, srcep.sourceport,service)
-    print (pformat(vars(ctsinfo), indent=4, width =1, sort_dicts=False))
+    srcctsinfo = cts_endpoint_info(srcep.sourceip,srcep.sourcevrf, srcxtr.hostname)
+    srcctsinfo.cts_sgt_mapping(service)
+    ctsbinding = {'ip':srcctsinfo.endpoint_ip, 'sgt': srcctsinfo.sgt, 'source': srcctsinfo.source}
+    srcctsinfo.cts_class_method(srcep.sourceport, ctsbinding, service)
+    srcctsinfo.cts_enforcement(srcep.sourcevlan, srcep.sourceport,service)
+    print (pformat(vars(srcctsinfo), indent=4, width =1, sort_dicts=False))
+    #Performing CTS evaluations for the Destination
+    dstctsinfo = cts_endpoint_info(dstep.sourceip,dstep.sourcevrf, dstxtr.hostname)
+    dstctsinfo.cts_sgt_mapping(service)
+    ctsbinding = {'ip':dstctsinfo.endpoint_ip, 'sgt': dstctsinfo.sgt, 'source': dstctsinfo.source}
+    dstctsinfo.cts_class_method(dstep.sourceport, ctsbinding, service)
+    dstctsinfo.cts_enforcement(dstep.sourcevlan, dstep.sourceport,service)
+    print (pformat(vars(dstctsinfo), indent=4, width =1, sort_dicts=False))
+
+    sgt = srcctsinfo.cefsgt
+    dgt = dstctsinfo.cefsgt
+
+    #CTS Rules on Destination XTR
+    ctsrules = cts_rules(dstxtr.hostname)
+    ctsrules.cts_rbac_permissions(sgt, dgt, service)
+    rbacl = ctsrules.rbacl
+    ctsrules.cts_rbac_rbacls(rbacl,service)
+    print (pformat(vars(ctsrules), indent=4, width =1, sort_dicts=False))
+
 
 def site_flow():
     return None
