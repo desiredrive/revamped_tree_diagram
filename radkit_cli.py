@@ -9,7 +9,7 @@ from radkit_client.sync import (
     # For the creation of the context.
     create_context,
     # Cloud-based login methods.
-    certificate_login,
+    #certificate_login,
     access_token_login,
     sso_login,
     # Direct login method.
@@ -36,7 +36,7 @@ def append_to_logging_file(content):
 
 def radkit_login(email: str, domain: str, serial: str):
     # Connect to the given service, using SSO login.
-    client = certificate_login(identity=email, domain=domain)
+    client = sso_login(identity=email, domain=domain)
     service = client.service(serial).wait()
     return service
 
