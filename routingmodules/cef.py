@@ -43,8 +43,14 @@ class ip_cef_internal():
             subblocks = []
 
         #LISP SMR detection
-        if any (x in "LISP" for x in subblocks):
-            self.lispsmr = (cefpath['subblocks']['LISP']['smr_enabled'])
+        try:
+            if any(x in "LISP" for x in subblocks):
+                self.lispsmr = (cefpath['subblocks']['LISP']['smr_enabled'])
+        except TypeError:
+            for i in subblocks:
+                new_subblock = i
+            if any(x in "LISP" for x in subblocks[new_subblock]):
+                self.lispsmr = (cefpath['subblocks'][new_subblock]['LISP']['smr_enabled'])
 
         #Ifnums readily available?
         try:

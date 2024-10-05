@@ -280,10 +280,12 @@ class cts_rules():
         else:
             ctsrbaccounter_cmd = "show cts role-based counters default".format()
             ctsrbaccounter_op = radkit_cli.get_single_output_genie(self.hostname, ctsrbaccounter_cmd, service)
-            self.sw_denied_count = ctscount_path[i]['sw_denied_count']
-            self.hw_denied_count = ctscount_path[i]['hw_denied_count']
-            self.sw_permit_count = ctscount_path[i]['sw_permit_count']
-            self.hw_permit_count = ctscount_path[i]['hw_permit_count']
-            self.sw_monitor_count = ctscount_path[i]['sw_monitor_count']
-            self.hw_monitor_count = ctscount_path[i]['hw_monitor_count']
+            ctscount_path = ctsrbaccounter_op['cts_rb_count']
+            for i in ctscount_path:
+                self.sw_denied_count = ctscount_path[i]['sw_denied_count']
+                self.hw_denied_count = ctscount_path[i]['hw_denied_count']
+                self.sw_permit_count = ctscount_path[i]['sw_permit_count']
+                self.hw_permit_count = ctscount_path[i]['hw_permit_count']
+                self.sw_monitor_count = ctscount_path[i]['sw_monitor_count']
+                self.hw_monitor_count = ctscount_path[i]['hw_monitor_count']
  
