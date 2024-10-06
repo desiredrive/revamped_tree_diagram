@@ -193,11 +193,11 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     print (pformat(vars(ctsrules), indent=4, width =1, sort_dicts=False))
 
     if ctsrules.isdefaultrule is True:
-        print ("No specific rule found for SGT {} and Destination SGT {} on device {}, using default rule\n".format(sgt,dgt,dstxtr))
+        print ("No specific rule found for SGT {} and Destination SGT {} on device {}, using default rule\n".format(sgt,dgt,dstxtr.hostname))
         print ("Default rule information is: {}\n".format(ctsrules.rbacl))
         print ("ACEs for the default rule: {}\n".format(ctsrules.aces))
     else:
-        print ("Specific rule found for SGT {} and Destination SGT {} on device {}, using RBACL: \n".format(sgt,dgt,dstxtr, ctsrules.rbacl))
+        print ("Specific rule found for SGT {} and Destination SGT {} on device {}, using RBACL: \n".format(sgt,dgt,dstxtr.hostname, ctsrules.rbacl))
         print ("ACEs for the default rule: {}\n".format(ctsrules.aces))
     if (ctsrules.hw_denied_count > 0) or (ctsrules.sw_denied_count > 0):
         print ("WARNING! : CTS Counters found for rule from SGT {} to SGT {} on device: {}".format(sgt, dgt, dstxtr.hostname))

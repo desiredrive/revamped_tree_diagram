@@ -9,8 +9,12 @@ class arp_modules():
     def arp_resolution_single_ip(self, ip, interface, service):
         
         #Identify if VRF is in use or not:
-        if self.vrf == "default" or self.vrf is None:
+        if self.vrf == "default":
             vrf_mode = ""
+            vrf = ''
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = ''
         else:
             vrf_mode = "vrf "+self.vrf+" "
 

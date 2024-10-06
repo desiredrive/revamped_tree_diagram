@@ -7,7 +7,10 @@ class multicast_configuration():
         self.vrf = vrf
 
     def multicast_enabled(self, service):
-        if self.vrf == "default" or self.vrf is None:
+        if self.vrf == "default":
+            vrf_mode = ""
+            vrf = ''
+        elif self.vrf is None:
             vrf_mode = ""
             vrf = ''
         else:

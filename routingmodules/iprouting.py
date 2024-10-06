@@ -12,8 +12,12 @@ class ip_route_get:
         #Route_Inspection:
         print("Processing RIB Information")
 
-        if self.vrf == "default" or self.vrf is None:
+        if self.vrf == "default":
             vrf_mode = ""
+            vrf = ''
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = ''
         else:
             vrf_mode = "vrf "+self.vrf+" "
     

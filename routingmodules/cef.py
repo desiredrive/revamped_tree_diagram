@@ -16,8 +16,12 @@ class ip_cef_internal():
         #Route_Inspection:
         print("Processing CEF Internal Information")
 
-        if self.vrf == "default" or self.vrf is None:
+        if self.vrf == "default":
             vrf_mode = ""
+            vrf = ''
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = ''
         else:
             vrf_mode = "vrf "+self.vrf+" "
         

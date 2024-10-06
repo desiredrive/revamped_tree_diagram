@@ -117,8 +117,12 @@ class cts_endpoint_info():
     def cts_sgt_mapping(self,service):
 
         #Identify if VRF is in use or not:
-        if self.vrf == "default" or self.vrf is None:
+        if self.vrf == "default":
             vrf_mode = ""
+            vrf = ''
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = ''
         else:
             vrf_mode = "vrf "+self.vrf+" "
         

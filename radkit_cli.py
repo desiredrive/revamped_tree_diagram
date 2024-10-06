@@ -15,6 +15,7 @@ from radkit_client.sync import (
     direct_login,
 )
 
+
 def main(service: radkit_client.Service):
     """
     :param service: radkit_client.Service object
