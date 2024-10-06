@@ -8,7 +8,6 @@ import radkit_genie
 from radkit_client.sync import (
     # For the creation of the context.
     create_context,
-    # Cloud-based login methods.
     #certificate_login,
     access_token_login,
     sso_login,
