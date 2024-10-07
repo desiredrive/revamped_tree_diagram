@@ -3,6 +3,7 @@ import ipaddress
 import radkit_cli
 from pprint import pformat
 from catalystcenterapi.catcapi import get_device_from_lo0, get_network_device_byuuid, validate_cp_infabric
+from ipverifications import ipaddress_validator_no_return, mac_address_validator
 
 #Order of operations for verifying multicast
 def text():
@@ -90,8 +91,16 @@ def multicast_ranges(mcast_group):
     if mcastflag is True:
         llmcastflag = ipaddress.ip_address(mcast_group) in ipaddress.ip_network("224.0.0.0/24")
         return mcastflag, llmcastflag
-def is_l2_flooding(mcast_group, ttl, is_ip):
-    if is_ip is True:
-        mcasttype = multicast_ranges(mcast_group)
-        ismcast = multicast_ranges(mcast_group)
-        isllmcast = multicast_ranges
+
+def is_l2_flooding(mcast_group, ttl, isl2only: bool):
+    #Step 1, is this L3 or L2 Flooding?
+    isip = ipaddress_validator_no_return(mcast_group)
+    if isip is True:
+        #mcasttype = multicast_ranges(mcast_group)
+        #ismcast = multicast_ranges(mcast_group)
+        #isllmcast = multicast_rangesmac_validator
+        return None
+    if isip is False:
+        mactype = mac_address_validator(mcast_group)
+        print (mactype)
+

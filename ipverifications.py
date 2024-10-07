@@ -1,6 +1,7 @@
 import ipaddress
 import sys
 import re
+import binascii
 
 #Function to Validate if the IP is a valid UNICAST IP address, returns True or False.
 def subnet_validator(sourceip,destip,mask):
@@ -106,4 +107,49 @@ def ipsubnet_validator_no_return(ip_type: str):
         ip_address = ipaddress.IPv4Network(ip_type)
         return True
     except ValueError:
-            return False  
+            return False
+
+def ipaddress_validator_no_return(ip_type: str):
+    try:
+        ip_address = ipaddress.ip_address(ip_type)
+        return True
+    except ValueError:
+            return False
+
+def mac_address_validator(mac: str):
+    mac_address_pattern = re.compile(
+        r'([0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4})|'  # aaaa.bbbb.cccc
+        r'([0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5})|'  # aa:aa:bb:bb:cc:cc
+        r'([0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5})|'  # aa-aa-bb-bb-cc-cc
+        r'([0-9A-Fa-f]{12})|'  # aaaabbbbcccc
+        r'([0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})'  # aaaa-bbbb-cccc
+    )
+    try:
+        match = mac_address_pattern.match(mac).group()
+        print(f"'{mac}' is a valid MAC address")
+        i = mac
+        if "." in i:
+            macbytes = binascii.unhexlify(i.replace('.', ''))
+        elif ":" in i:
+            macbytes = binascii.unhexlify(i.replace(':', ''))
+        elif "-" in i:
+            macbytes = binascii.unhexlify(i.replace('-', ''))
+        else:
+            macbytes = binascii.unhexlify(i)
+        first_octet_bits = "{0:b}".format(macbytes[0])
+        last_bit = (first_octet_bits[-1])
+        if int(last_bit) == 1:
+            if i == 'ffffffffffff':
+                print("MAC Address {} is a Broadcast MAC address".format(i))
+                mactype = 'Broadcast'
+            else:
+                print("MAC Address {} is a Multicast MAC address".format(i))
+                mactype = 'Multicast'
+        else:
+            mactype = 'Unicast'
+        return (True, mactype)
+
+    except AttributeError:
+        print(f"'{mac}' is NOT a valid MAC address")
+        mactype = None
+        return (False, mactype)
