@@ -14,6 +14,7 @@ from ipverifications import (
     issubnetbroadcast
 )
 from device_profiler import device
+from routingmodules.lisp import L2LISPInterface, L2LISPConfiguration
 from routingmodules.multicastrouting import (
     MulticastConfiguration
 )
@@ -32,11 +33,11 @@ def text():
     *) PIM enabled in Loopback0 Interfaces
     MAYBE....) Multicast enabled in upstream interfaces (what are upstream interfaces?) (the ones used by the upstream protocol)
         - This requires per-protocol enablement and neighbor validation; for now: OSPF and ISIS
-    -) PIM neighbor validations
-    -) PIM enablement on L2 interfaces
-    -) PIM DR election (Lo0 must be DR)
-    -) L2LISP validations (already made)
-    -) Determining Multicast Group for the required L2 Instance
+    *) PIM neighbor validations
+    *) PIM enablement on L2 interfaces
+    *) PIM DR election (Lo0 must be DR)
+    *) L2LISP validations (already made)
+    * Determining Multicast Group for the required L2 Instance
     -) Determining RP to the required group
     -) Determining RP source interface = warning if lo0 is not the source
     -) Determining RP reachability and Tunnel encap (and decap if eligible)
@@ -223,11 +224,27 @@ class UnderlayMulticastDevice:
         print("Validating Loopback0 PIM configuration for device: {} ...\n".format(hostname))
         self.islo0pimenabled = loopback0_pim_status(intflist,hostname)
 
+    def pim_neighbors(self,service):
+        hostname = self.profiled_device.hostname
+        print("Retrieving PIM Neighbors for device: {} ...\n".format(hostname))
+        pimneighbors = PimConfiguration(None, hostname)
+        pimneighbors.pim_neighbors(service)
+        self.pimneighbors = pimneighbors
 
+    def l2lispinterface(self,vlan, service):
+        hostname = self.profiled_device.hostname
+        #L2LISP interface Status:
+        print("Validating L2LISP Interface Parameters for device: {} ...\n".format(hostname))
+        l2lispinterfacestatus = L2LISPInterface(vlan,hostname)
+        l2lispinterfacestatus.l2lispinterfacestatus(service)
+        self.l2lispinterfacestatus = l2lispinterfacestatus
 
-
-
-
+    def broadcast_underlay_properties(self,iid,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying L2Flooding Configuration for instance {} in device: {} ...\n".format(iid,hostname))
+        l2floodingproperties = L2LISPConfiguration(iid, hostname)
+        l2floodingproperties.l2flooding_configuration(service)
+        self.l2floodingproperties = l2floodingproperties
 
 
 

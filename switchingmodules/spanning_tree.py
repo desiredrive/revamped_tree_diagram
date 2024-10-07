@@ -1,5 +1,7 @@
 import re
 import sys
+from os.path import split
+
 import radkit_cli
 
 #Platform Independent = IOS 
@@ -74,7 +76,7 @@ class stp_intf:
         else:
             sys.exit("\n Unsupported interface type, interface name is: {}\n".format(self.port))
 
-class stp_vlan:
+class stp_vlan_regex:
 
     def __init__(self, vlan, device):
         self.vlan = vlan 
@@ -125,3 +127,62 @@ class stp_vlan:
                     self.tcnlastintf = re.compile("(?<=from ).*").search(line).group().strip()           
                 except:
                     pass
+
+class SpanningTree:
+    def __init__(self,device):
+        self.hostname = device
+
+    def spt_vlan_active(self,vlan,service):
+        #Get Information about a specific VLAN
+        stpact_cmd = "show spanning-tree vlan {} active".format(vlan)
+        stpact_op = radkit_cli.get_single_output_genie(self.hostname, stpact_cmd, service)
+        if stpact_op is not None:
+            for i in stpact_op:
+                if 'exclude' not in i:
+                    self.stp_mode = i
+
+            stppath = stpact_op[self.stp_mode]['vlans'][vlan]
+            #Root Information:
+            self.root_address = stppath['root']['address']
+            self.root_priority = stppath['root']['priority']
+            self.root_hellotime = stppath['root']['hello_time']
+            self.root_max_age = stppath['root']['max_age']
+            self.root_forward_delay = stppath['root']['forward_delay']
+            #Local Switch Information
+            self.bridge_address = stppath['bridge']['address']
+            self.bridge_priority = stppath['bridge']['priority']
+            self.bridge_configured_priority = stppath['bridge']['configured_bridge_priority']
+            self.bridge_hellotime = stppath['bridge']['hello_time']
+            self.bridge_max_age = stppath['bridge']['max_age']
+            self.bridge_forward_delay = stppath['bridge']['forward_delay']
+            #Interafce Information:
+            stpintfpath = stpact_op[self.stp_mode]['vlans'][vlan]['interfaces']
+            interface_list = []
+            for interface in stpintfpath:
+                interfacename = interface
+                cost = stpintfpath[interfacename]['cost']
+                port_priority = stpintfpath[interfacename]['port_priority']
+                port_num = stpintfpath[interfacename]['port_num']
+                role = stpintfpath[interfacename]['role']
+                port_state = stpintfpath[interfacename]['port_state']
+                port_type = stpintfpath[interfacename]['type']
+                stp_interface = {
+                    'interface': interface,
+                    'cost' : cost,
+                    'port_priority' : port_priority,
+                    'port_num'  : port_num,
+                    'role' : role,
+                    'port_state' : port_state,
+                    'type' : type
+                }
+                interface_list.append(stp_interface)
+            self.interfaces = interface_list
+
+            self.number_of_fwd_interfaces = 0
+            self.number_of_blk_interfaces = 0
+            for i in interface_list:
+                if i['port_state'] == 'forwarding':
+                    self.number_of_fwd_interfaces+=1
+                if i['port_state'] == 'blocking':
+                    self.number_of_blk_interfaces+=1
+

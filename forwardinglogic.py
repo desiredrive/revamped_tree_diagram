@@ -5,7 +5,7 @@ from traffic_flows.operational_tests import ping
 from routingmodules import lisp
 from routingmodules import iprouting
 from routingmodules import cef
-from switchingmodules.interfaces import interfaces
+from switchingmodules.interfaces import Interfaces
 from catalystcenterapi import catcapi
 from device_profiler import device
 from hostonboarding import endpoint_info
@@ -84,7 +84,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     #Determining Inter or Intra Site:
     dstsite = dstxtr.fabric_site_hierarchy
     srcsite = srcxtr.fabric_site_hierarchy
-    if (srcsite == dstsite):
+    if srcsite == dstsite:
         print ("Source XTR {} in Fabric: {}, is in the same Fabric Site as Destination XTR {}".format(srcxtr.hostname, srcsite, dstxtr.hostname))
     else:
         print ("Source XTR {} in Fabric: {}, not int the same  Fabric Site: {} as Destination XTR {}".format(srcxtr.hostname, srcsite, dstsite, dstxtr.hostname))
@@ -122,7 +122,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     mtus = []
     for i in nexthops:
         nhinterface = i['oif']
-        nhinterfaceinfo = interfaces(nhinterface, srcxtr.hostname)
+        nhinterfaceinfo = Interfaces(nhinterface, srcxtr.hostname)
         nhinterfaceinfo.show_interface(service)
         interfaceobjects.append(nhinterfaceinfo)
     for i in interfaceobjects:

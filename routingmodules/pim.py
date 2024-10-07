@@ -55,3 +55,37 @@ class PimConfiguration:
                 interface_list.append(pim_interface)
             self.piminterfaces = interface_list
 
+    def pim_neighbors(self,service):
+        #For now this module does not support LISP interfaces/Overlay Multicast
+        vrf = None
+        if self.vrf == "default":
+            vrf_mode = ""
+            vrf = 'default'
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = 'default'
+        else:
+            vrf_mode = "vrf "+self.vrf+" "
+        # Information about PIM interfaces on a device:
+        pimneig_cmd = "show ip pim {} neighbor".format(vrf_mode)
+        pimneig_op = radkit_cli.get_single_output_genie(self.hostname,pimneig_cmd,service)
+        pimneighlist = []
+        if pimneig_op is not None:
+            pimneighpath = pimneig_op['vrf']['default']['interfaces']
+            for interface in pimneighpath:
+                interfacename = interface
+                pimintfneighpath = pimneighpath[interfacename]['address_family']['ipv4']['neighbors']
+                for neighbor in pimintfneighpath:
+                    neighbor_ip = neighbor
+                    dr_priority = pimintfneighpath[neighbor]['dr_priority']
+                    up_time = pimintfneighpath[neighbor]['up_time']
+                    interface = pimintfneighpath[neighbor]['interface']
+                    neighbor = {
+                        'interface': interface,
+                        'neighbor_ip': neighbor_ip,
+                        'dr_priority': dr_priority,
+                        'up_time': up_time,
+                    }
+                    pimneighlist.append(neighbor)
+            self.pimneighbors = (pimneighpath)
+        self.neighborcount = len(pimneighlist)

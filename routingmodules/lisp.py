@@ -1,6 +1,12 @@
 import re
 import sys
+from os import access
+
 import radkit_cli
+from switchingmodules.interfaces import Interfaces
+from switchingmodules.spanning_tree import SpanningTree
+from switchingmodules.vlan import VlanInformation
+
 
 class lisp_route_import:
 
@@ -198,7 +204,106 @@ class l2lisp_info:
                 self.l2lispdbstate = True
             else:
                 sys.exit("Source MAC {} in IPDT/ DynEID but not in LISP {} Database? Debug LISP".format(self.sourcemac,self.l2lispiid))
-            
+
+class L2LISPInterface:
+    def __init__(self,vlan,device):
+        self.hostname = device
+        self.vlan = vlan
+
+    def l2lispinterfacestatus(self,service):
+        #STP Status for the VLAN
+        stpstatus = SpanningTree(self.hostname)
+        stpstatus.spt_vlan_active(self.vlan,service)
+        if stpstatus is None:
+            sys.exit("WARNING!: No Spanning Tree Information for VLAN {} in device: {} , is the VLAN created? There are no active in this VLAN".format(self.vlan, self.hostname))
+        if stpstatus.number_of_fwd_interfaces == 0:
+            sys.exit("WARNING!: No FWD enabled ports in VLAN {} in device: {} , are the ports assigned to the correct VLAN and connected?".format(self.vlan, self.hostname))
+        self.stpstatus = stpstatus
+
+        #VLAN Status and L2LISP type
+        vlanstatus = VlanInformation(self.vlan,self.hostname)
+        vlanstatus.vlanbrief(service)
+        l2lispparentintf = None
+        l2lispparenttype = None
+        l2lispiid = None
+        for port in vlanstatus.ports:
+            if "Tu" in port:
+                l2lispparentintf = port
+                l2lispparenttype = 'Tunnel'
+            elif "L2LI0" in port:
+                l2lispparentintf = port
+                l2lispparenttype = 'L2LISP0'
+                l2lispsubinterfacesplit = port.split(":")
+                l2lispiid = l2lispsubinterfacesplit[1]
+        if l2lispparentintf is None:
+            sys.exit("WARNING!: No L2LISP (or Tunnel) interface found attached to VLAN {} in device: {}! - This might be the result of an unexpected switchover or ISSU upgrade; remove the affected L2LISP instance and create it again".format(self.vlan, self.hostname))
+        self.vlanstatus = vlanstatus
+        self.l2lispparenttype = l2lispparenttype
+
+        #L2LISP0 Main Interface and L2LISP Subinterface (if applicable)
+        if l2lispparenttype == 'L2LISP0':
+            l2lisp0interface = Interfaces('L2LISP0', self.hostname)
+            l2lisp0interface.show_interface(service)
+            if l2lisp0interface.linestate != 'up':
+                sys.exit("WARNING!: L2LISP Interface is DOWN in device: {}".format(self.hostname))
+            l2lispsubintf = "L2LISP0."+l2lispiid
+            l2lispsubinterface = Interfaces(l2lispsubintf,self.hostname)
+            l2lispsubinterface.show_interface(service)
+            if l2lispsubinterface.linestate != 'up':
+                sys.exit("WARNING!: {} Interface is DOWN in device: {}".format(l2lispsubintf,self.hostname))
+            self.l2lispparenstatus = l2lisp0interface
+            self.l2lispsubinterfacestatus = l2lispsubinterface
+        if l2lispparenttype == 'Tunnel':
+            tunnelinterface = Interfaces(l2lispparentintf, self.hostname)
+            tunnelinterface.show_interface(service)
+            if tunnelinterface.linestate != 'up':
+                sys.exit("WARNING!: l2lispparentintf Interface is DOWN in device: {}".format(self.hostname))
+            self.l2lispparenstatus = tunnelinterface
+
+        #L2LISP statistics
+
+class L2LISPConfiguration:
+    def __init__(self,iid,device):
+        self.hostname = device
+        self.iid = iid
+
+    def l2flooding_configuration(self,service):
+        hostname = self.hostname
+        iid = self.iid
+        matches = ['#', 'show']
+        self.floodunknownunicast = False
+        self.broadcastunderlay = None
+        self.floodarpnd = False
+        self.floodaccesstunnel = False
+
+        #Structure is {Type: Unicast|Multicast, Multicast Group : Group, Vlan: Vlan
+        l2floodingconfig_cmd = "show run | se instance-id {}".format(iid)
+        l2floodingconfig_op = radkit_cli.get_any_single_output(hostname,l2floodingconfig_cmd,service)
+        if l2floodingconfig_op is not None:
+            for line in l2floodingconfig_op.splitlines():
+                if not any(x in line for x in matches):
+                    if "broadcast-underlay" in line:
+                        self.broadcastunderlay = re.compile("(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})").search(line).group().strip()
+                    if "flood unknown-unicast" in line:
+                        self.floodunknownunicast = True
+                    if "flood arp-nd" in line:
+                        self.floodarpnd = True
+                    if "flood access-tunnel" in line:
+                        self.floodaccesstunnel = True
+                        try:
+                            mcasttunnelip = re.compile("(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})").search(line).group().strip()
+                            self.floodaccesstunneltype = 'Multicast'
+                            self.floodaccesstunnelgroup = mcasttunnelip
+                            floodatmcaststringvlan = re.compile("vlan [0-9]{4}").search(line).group()
+                            self.floodaccesstunnelvlan = int(floodatmcaststringvlan.split("vlan")[1].strip())
+                        except:
+                            pass
+
+
+
+
+
+
 
 class l2_map_cache:
 
@@ -208,12 +313,11 @@ class l2_map_cache:
         self.queriedev = queriedev
 
     def l2map(self, service):
-
+            eid = None
             map_cache_cmd = "sh lisp instance-id {} ethernet map-cache {}".format(self.iid, self.eid)
             map_cache_output = radkit_cli.get_single_output_genie(self.queriedev,map_cache_cmd,service)
             if map_cache_output == None:
                 sys.exit("WARNING!: No map-cache found for EID {} in IID {} in device {}, maybe ARP is not working?".format(self.eid, self.iid, self.queriedev) )
-                return None
             else:
                 mapcache_path = map_cache_output['lisp_id'][0]['instance_id'][self.iid]['eid_prefix']
                 self.mask = 48
@@ -222,6 +326,7 @@ class l2_map_cache:
                 self.uptime = mapcache_path[eid]['uptime']
                 self.expiration = mapcache_path[eid]['expiry_time']
                 self.source = mapcache_path[eid]['source_type']
+                i = None
                 for i in mapcache_path[eid]['rloc_set']:
                     self.rloc = i
                 self.rlocstate = mapcache_path[eid]['rloc_set'][i]['rloc_state']
