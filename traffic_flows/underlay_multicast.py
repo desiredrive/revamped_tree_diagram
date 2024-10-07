@@ -13,7 +13,13 @@ from ipverifications import (
     ipsubnet_validator_no_return,
     issubnetbroadcast
 )
-
+from device_profiler import device
+from routingmodules.multicastrouting import (
+    MulticastConfiguration
+)
+from routingmodules.pim import (
+    PimConfiguration
+)
 #Order of operations for verifying multicast
 def text():
     '''
@@ -167,3 +173,62 @@ def is_l2_flooding(destination, ttl, isl2only: bool, overlaymcast: bool):
         if any(x in mac_info[1] for x in flood_types):
             isl2flood = True
         return isl2flood
+
+def loopback0_pim_status(interface_list,hostname):
+    for i in interface_list:
+        interfacename = i['interface_name']
+        if interfacename == 'Loopback0':
+            if i['oper_status'] != 'up':
+                print("Loopback0 not in UP state in device {}".format(hostname))
+                return False
+            elif i['enabled'] is not True:
+                print("Loopback0 not in PIM enabled state in device {}".format(hostname))
+                return False
+            elif i['pim_mode'] == 'dense':
+                print("Loopback0  is configured for DENSE mode! Configure it for sparse-mode {}".format(hostname))
+                return False
+            else:
+                print("Loopback0 is configured for PIM Sparse (or sparse-dense) in device: {}".format(hostname))
+                return True
+
+class UnderlayMulticastDevice:
+    def __init__(self,vrf, mgmtip):
+        self.mgmtip = mgmtip
+        self.vrf = vrf
+
+    def device_profiler(self, catc,service):
+        devprof = device(self.mgmtip,catc)
+        devprof.profile_device(service)
+        self.profiled_device = devprof
+
+    def existing_profiled(self, profiled_device):
+        self.profiled_device = profiled_device
+
+    def multicast_enablement(self,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying Global Underlay Multicast Status for device: {} ...\n".format(hostname))
+        mcaststatus = MulticastConfiguration(None, hostname)
+        mcaststatus.multicast_enabled(service)
+        self.mcastconfig = mcaststatus
+
+    def pim_interfaces (self, service):
+        hostname = self.profiled_device.hostname
+        print("Retrieving PIM interfaces for device: {} ...\n".format(hostname))
+        pimintfstatus = PimConfiguration(None, hostname)
+        pimintfstatus.pim_interfaces(service)
+        self.piminterfaces = pimintfstatus
+
+    def islo0up(self,intflist):
+        hostname = self.profiled_device.hostname
+        print("Validating Loopback0 PIM configuration for device: {} ...\n".format(hostname))
+        self.islo0pimenabled = loopback0_pim_status(intflist,hostname)
+
+
+
+
+
+
+
+
+
+

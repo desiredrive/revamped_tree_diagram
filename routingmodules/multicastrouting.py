@@ -17,7 +17,6 @@ class MulticastConfiguration:
 
         ipmcast_cmd = "show ip multicast {}".format(vrf_mode)
         ipmcast_op = radkit_cli.get_single_output_genie(self.hostname,ipmcast_cmd,service)
-        print (ipmcast_op)
         mcast_path = ipmcast_op['vrf'][vrf]
         self.multicastenabled = mcast_path['enable']
         self.multipath = mcast_path['multipath']
