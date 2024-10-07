@@ -12,24 +12,24 @@ def subnet_validator(sourceip,destip,mask):
     morereserved = ipaddress.ip_address(destip) in ipaddress.ip_network("240.0.0.0/4")
     reserved0 = ipaddress.ip_address(destip) in ipaddress.ip_network("0.0.0.0/8")
     localhost = ipaddress.ip_address(destip) in ipaddress.ip_network("127.0.0.0/8")
-    if mcastflag==True:
+    if mcastflag is True:
         llmcastflag = ipaddress.ip_address(destip) in ipaddress.ip_network("224.0.0.0/24")
-        if llmcastflag==True:
+        if llmcastflag is True:
             sys.exit("Destination IP is Link Local Multicast IP, unsupported flow")
-        if llmcastflag==False:
+        if llmcastflag is False:
             sys.exit("Destination IP is Private Group Multicast IP, unsupported flow")
-    if reserved0==True:
+    if reserved0 is True:
         sys.exit("Destination IP is reserved range 0.0.0.0/8, unsupported flow")
-    if localhost==True:
+    if localhost is True:
         sys.exit("Destination IP is reserved Loopback 127.0.0.0/8, unsupported flow")
-    if morereserved==True:
+    if morereserved is True:
         sys.exit("Destination IP is reserved 240.0.0.0/8, unsupported flow")
 
     validation = ipaddress.ip_address(destip) in ipaddress.ip_network(network)
-    if validation==True:
-        if destip==str(network[-1]) or destip==str(network[0]):
+    if validation is True:
+        if destip is str(network[-1]) or destip==str(network[0]):
             sys.exit("Destination IP is a directed broadcast or subnet name, unsupported flow")
-    return (validation)
+    return validation
 
 def subnetvalidation(subnet,mask):
     if subnet=="255.255.255.255":
@@ -39,28 +39,26 @@ def subnetvalidation(subnet,mask):
     morereserved = ipaddress.ip_address(subnet) in ipaddress.ip_network("240.0.0.0/4")
     reserved0 = ipaddress.ip_address(subnet) in ipaddress.ip_network("0.0.0.0/8")
     localhost = ipaddress.ip_address(subnet) in ipaddress.ip_network("127.0.0.0/8")
-    if mcastflag==True:
+    if mcastflag is True:
         llmcastflag = ipaddress.ip_address(subnet) in ipaddress.ip_network("224.0.0.0/24")
-        if llmcastflag==True:
+        if llmcastflag is True:
             sys.exit("Subnet IP is Link Local Multicast IP, unsupported flow")
-        if llmcastflag==False:
+        if llmcastflag is False:
             sys.exit("Subnet IP is Private Group Multicast IP, unsupported flow")
-    if reserved0==True:
+    if reserved0 is True:
         sys.exit("Subnet IP is reserved range 0.0.0.0/8, unsupported flow")
-    if localhost==True:
+    if localhost is True:
         sys.exit("Subnet IP is reserved Loopback 127.0.0.0/8, unsupported flow")
-    if morereserved==True:
+    if morereserved is True:
         sys.exit("Subnet IP is reserved 240.0.0.0/8, unsupported flow")
-    return (network)
-
+    return network
 
 def inside_subnet(subnetstring, inputip):
     if subnetstring=="0.0.0.0/0":
         sys.exit("Using a default route can result in profiling all devices in Cisco DNA Center, please do not use it")
     network = ipaddress.IPv4Network(subnetstring, strict=False)
     validation = ipaddress.ip_address(inputip) in ipaddress.ip_network(network)
-    return (validation)
-
+    return validation
 
 def stringvalidator(subnetstring):
     list_of_subnets = []
@@ -74,7 +72,7 @@ def stringvalidator(subnetstring):
         mask = pair[1]
         verifiedsubnet =  (subnetvalidation(subnet,mask))
         list_of_subnets.append(verifiedsubnet)
-    return (list_of_subnets)
+    return list_of_subnets
 
 #Function to Validate if the IP is a valid IP address (any type) for input process
 def ip_validator_input (ip_type: str):
@@ -153,3 +151,12 @@ def mac_address_validator(mac: str):
         print(f"'{mac}' is NOT a valid MAC address")
         mactype = None
         return (False, mactype)
+
+def issubnetbroadcast(subnetstring):
+    subnet = ipaddress.IPv4Network(subnetstring, strict=False)
+    networkbroadcast = subnet.broadcast_address
+    prefix = subnetstring.split("/")[0]
+    if prefix == str(networkbroadcast):
+        return True
+    else:
+        return False

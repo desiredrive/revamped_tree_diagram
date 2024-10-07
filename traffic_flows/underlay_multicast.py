@@ -2,21 +2,29 @@ import sys
 import ipaddress
 import radkit_cli
 from pprint import pformat
-from catalystcenterapi.catcapi import get_device_from_lo0, get_network_device_byuuid, validate_cp_infabric
-from ipverifications import ipaddress_validator_no_return, mac_address_validator
+
+from catalystcenterapi.catcapi import (
+    get_device_from_lo0,
+    get_network_device_byuuid,
+    validate_cp_infabric
+)
+from ipverifications import (
+    mac_address_validator,
+    ipsubnet_validator_no_return,
+    issubnetbroadcast
+)
 
 #Order of operations for verifying multicast
 def text():
     '''
     Main Local Verifications
-    -) Which traffic are you troubleshooting?
-    -) Is it L2 Only VN?
+    *)Which traffic are you troubleshooting?
+    *) Is it L2 Only VN?
     -) Is IGMP snooping enabled? - This controls IGMP verifications
-    -) Is L3 multicast enabled?
-    -) Is 17.6 or higher?
-    -) Multicast Routing global enablement
-    -) PIM enabled in Loopback0 Interfaces
-    -) Multicast enabled in upstream interfaces (what are upstream interfaces?) (the ones used by the upstream protocol)
+    *) Is 17.6 or higher?
+    *) Multicast Routing global enablement
+    *) PIM enabled in Loopback0 Interfaces
+    MAYBE....) Multicast enabled in upstream interfaces (what are upstream interfaces?) (the ones used by the upstream protocol)
         - This requires per-protocol enablement and neighbor validation; for now: OSPF and ISIS
     -) PIM neighbor validations
     -) PIM enablement on L2 interfaces
@@ -87,20 +95,75 @@ FHR Validations
     return None
 
 def multicast_ranges(mcast_group):
+    mcastflag = False
+    llmcastflag = False
     mcastflag: bool = ipaddress.ip_address(mcast_group) in ipaddress.ip_network("224.0.0.0/4")
     if mcastflag is True:
         llmcastflag = ipaddress.ip_address(mcast_group) in ipaddress.ip_network("224.0.0.0/24")
         return mcastflag, llmcastflag
+    return mcastflag,llmcastflag
 
-def is_l2_flooding(mcast_group, ttl, isl2only: bool):
-    #Step 1, is this L3 or L2 Flooding?
-    isip = ipaddress_validator_no_return(mcast_group)
-    if isip is True:
-        #mcasttype = multicast_ranges(mcast_group)
-        #ismcast = multicast_ranges(mcast_group)
-        #isllmcast = multicast_rangesmac_validator
-        return None
-    if isip is False:
-        mactype = mac_address_validator(mcast_group)
-        print (mactype)
+def is_l2_flooding(destination, ttl, isl2only: bool, overlaymcast: bool):
+    isl2flood = False
+    # Subnet_string in correct format:
+    # Step 1: Is the prefix an IP subnet?
+    is_subnet = ipsubnet_validator_no_return(destination)
+    if is_subnet is True:
+        subnetstring = destination.split("/")
+        if len(subnetstring) == 2:
+            prefix = subnetstring[0]
+            mask = subnetstring[1]
+        else:
+            prefix = destination
+            mask = "32"
 
+        if prefix == '255.255.255.255':
+            isl2flood = True
+            return isl2flood
+        else:
+            # Step 2: Is the prefix a Multicast IP?
+            mcast_result = multicast_ranges(prefix)
+            mcasttype = mcast_result[0]
+            linklocalmcast = mcast_result[1]
+            # If the destination IP is a multicast group then:
+            if mcasttype is True:
+                # If the destination IP is part of 224.0.0.0/24 it is flooded regardles of the TTL
+                if linklocalmcast is True:
+                    isl2flood = True
+                    return isl2flood
+                else:
+                    # If the destination IP is part of non-link local multicast range, TTL must be evaluated
+                    # If TTL of the traffic is 1, it can only be flooded
+                    if ttl == 1:
+                        isl2flood = True
+                        return isl2flood
+                    else:
+                        # If TTL of the traffic is not 1, it can only be flooded if the pool is L2 only (or if Overlay Multicast is NOT enabled)
+                        if isl2only is True:
+                            isl2flood = True
+                            return isl2flood
+                        elif overlaymcast is False:
+                            isl2flood = True
+                            return isl2flood
+                        # If the TTL is not 1, and the pool is not L2 only or if Overlay Multicast is enabled, traffic cannot be flooded.
+                        else:
+                            isl2flood = False
+                            return isl2flood
+            else:
+                # Step 3 If the Prefix is an IP directed Brodacast
+                if mask == "32":
+                    print("Host Routes (Mask 32) have no broadcast address, not flooding")
+                    return isl2flood
+                elif mask == "31":
+                    print("Host Routes (Mask 30) have no broadcast address not flooding")
+                    return isl2flood
+                else:
+                    is_ipdb = issubnetbroadcast(destination)
+                    isl2flood = is_ipdb
+                    return isl2flood
+    else:
+        mac_info = mac_address_validator(destination)
+        flood_types = ['Broadcast', 'Multicast']
+        if any(x in mac_info[1] for x in flood_types):
+            isl2flood = True
+        return isl2flood

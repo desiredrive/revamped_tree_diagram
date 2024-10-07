@@ -53,5 +53,5 @@ class PimConfiguration:
                     'jp_interval': jp_interval
                 }
                 interface_list.append(pim_interface)
-
+            self.piminterfaces = interface_list
 
