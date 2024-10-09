@@ -181,6 +181,7 @@ class PimConfiguration:
             vrf_mode = "vrf "+self.vrf+" "
 
         #Identify the RPF neighbor for a source
+        self.rpfip = ip
         rpf_cmd = "show ip rpf {} {}".format(vrf_mode,ip)
         rpf_op = radkit_cli.get_single_output_genie(self.hostname, rpf_cmd, service)
         if rpf_op is not None:
