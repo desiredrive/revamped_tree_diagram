@@ -87,7 +87,9 @@ class PimConfiguration:
                         'up_time': up_time,
                     }
                     pimneighlist.append(neighbor)
-            self.pimneighbors = (pimneighpath)
+            self.pimneighbors = (pimneighlist)
+        else:
+            self.pimneighbors = None
         self.neighborcount = len(pimneighlist)
 
     def pim_rp(self,group,service):
@@ -121,7 +123,7 @@ class PimConfiguration:
             cef_route = IPCef(self.rp, vrf, self.hostname)
             cef_route.get_cef_internal(service)
             self.rproute = rp_route
-            self.rpcef = rp_cef
+            self.rpcef = cef_route
 
             #Tunnel To IP
             pimtunnels = []
@@ -148,18 +150,50 @@ class PimConfiguration:
                         'tunnel_uptime': tunnel_uptime
                     }
                     pimtunnels.append(tunnel_info)
-
+                self.pimtunnels = pimtunnels
             #Ping to RP IP using TunnelSource IP:
             #RP IP identification:
             electedsource = None
             if len(pimtunnels) !=0:
                 for tunnel in pimtunnels:
-                  if (tunnel['tunnel_rp'] == '172.19.1.66*') and (tunnel['tunnel_type'] == 'PIM Encap'):
-                    electedsource = tunnel['tunnel_source']
+                    if (tunnel['tunnel_rp'] == self.rp+'*') and (tunnel['tunnel_type'] == 'PIM Encap'):
+                        electedsource = tunnel['tunnel_source']
+                        self.isrplocal = True
+                        self.maintunnel = tunnel['tunnel_interface']
+                    if (tunnel['tunnel_rp'] == self.rp) and (tunnel['tunnel_type'] == 'PIM Encap'):
+                        electedsource = tunnel['tunnel_source']
+                        self.isrplocal = False
+                        self.maintunnel = tunnel['tunnel_interface']
 
             pingstatus = Ping(self.rp,self.hostname)
             pingstatus.ping_with_source(None,electedsource,None,False,service)
             self.pingstatus = pingstatus
 
+    def pim_rpf_neighbor(self,ip,service):
+        vrf = None
+        if self.vrf == "default":
+            vrf_mode = ""
+            vrf = ''
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = ''
+        else:
+            vrf_mode = "vrf "+self.vrf+" "
 
-
+        #Identify the RPF neighbor for a source
+        rpf_cmd = "show ip rpf {} {}".format(vrf_mode,ip)
+        rpf_op = radkit_cli.get_single_output_genie(self.hostname, rpf_cmd, service)
+        if rpf_op is not None:
+            path = rpf_op['vrf'][vrf]['path']
+            for i in path:
+                ip_path = i
+            path = path[ip_path]
+            self.rpfinterface = path['interface_name']
+            self.rpfneighborip = path['neighbor_address']
+            prefix = path['route_mask'].split("/")
+            self.rpfprefix = prefix[0]
+            self.rpfmask = prefix[1]
+            self.rpfinterface = path['interface_name']
+            self.rpffailure = False
+        else:
+            self.rpffailure = True

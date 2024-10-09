@@ -37,9 +37,20 @@ class IPRoute:
             self.protocol = route_path['known_via']
             paths = route_path['paths']
             nexthops = []
-            for i in paths:
-                nexthops.append(paths[i]['nexthop'])  
-            self.nexthop = nexthops
+            try:
+                for i in paths:
+                    index = i
+                interface = paths[index]['interface']
+                specialintf = interface
+            except KeyError:
+                specialintf = True
+
+            if specialintf != "Null0":
+                for i in paths:
+                    nexthops.append(paths[i]['nexthop'])
+                self.nexthop = nexthops
+            else:
+                self.nexthop = "Null0"
         else:
          #If specific route does not exist: aka, validate if default route exists:
             prefix = "0.0.0.0 0.0.0.0"
@@ -58,7 +69,16 @@ class IPRoute:
                 self.protocol = route_path['known_via']
                 paths = route_path['paths']
                 nexthops = []
-                for i in paths:
-                    nexthops.append(paths[i]['nexthop'])  
-                self.nexthop = nexthops           
-       
+                try:
+                    for i in paths:
+                        index = i
+                    interface = paths[index]['interface']
+                    specialintf = interface
+                except KeyError:
+                    specialintf = True
+                if specialintf != "Null0":
+                    for i in paths:
+                        nexthops.append(paths[i]['nexthop'])
+                    self.nexthop = nexthops
+                else:
+                    self.nexthop = "Null0"

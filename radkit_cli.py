@@ -25,13 +25,13 @@ def loggin_file():
     currenttime = datetime.now()
     f = open("collection_logfile.txt", "w")
     f.write("File Created on {}".format(currenttime))
-    f.write("\n-------------------------------------------------------------- \n")
+    f.write("\n----------------------------------------------------------------------------------------------------------------------------\n")
     f.close()
 
 def append_to_logging_file(content):
     f = open("collection_logfile.txt", "a")
     f.write(content)
-    f.write("\n-------------------------------------------------------------- \n")
+    f.write("\n----------------------------------------------------------------------------------------------------------------------------\n")
     f.close()
 
 def radkit_login(email: str, domain: str, serial: str):

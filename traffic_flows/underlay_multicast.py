@@ -246,7 +246,18 @@ class UnderlayMulticastDevice:
         l2floodingproperties.l2flooding_configuration(service)
         self.l2floodingproperties = l2floodingproperties
 
-    def rp_identification(self,):
+    def rp_identification(self,group, service):
+        hostname = self.profiled_device.hostname
+        print("Verifying RP information in device: {} ...\n".format(hostname))
+        rpinformation = PimConfiguration(None,hostname)
+        rpinformation.pim_rp(group,service)
+        self.rpinformation = rpinformation
 
+    def rpf_to_rp(self,rp,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying RPF information for RP {} in device: {} ...\n".format(rp, hostname))
+        rpfinformation = PimConfiguration(None,hostname)
+        rpfinformation.pim_rpf_neighbor(rp,service)
+        self.rpfinformation = rpfinformation
 
 

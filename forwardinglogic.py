@@ -198,7 +198,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
         print ("ACEs for the default rule: {}\n".format(ctsrules.aces))
     else:
         print ("Specific rule found for SGT {} and Destination SGT {} on device {}, using RBACL: \n".format(sgt,dgt,dstxtr.hostname, ctsrules.rbacl))
-        print ("ACEs for the default rule: {}\n".format(ctsrules.aces))
+        print ("ACEs for the specific rule: {}\n".format(ctsrules.aces))
     if (ctsrules.hw_denied_count > 0) or (ctsrules.sw_denied_count > 0):
         print ("WARNING! : CTS Counters found for rule from SGT {} to SGT {} on device: {}".format(sgt, dgt, dstxtr.hostname))
     else:
