@@ -38,7 +38,7 @@ def text():
     *) PIM DR election (Lo0 must be DR)
     *) L2LISP validations (already made)
     * Determining Multicast Group for the required L2 Instance
-    -) Determining RP to the required group
+    *) Determining RP to the required group
     -) Determining RP source interface = warning if lo0 is not the source
     -) Determining RP reachability and Tunnel encap (and decap if eligible)
     -) Determining if SSM is enabled using the default group 232.0.0.0/8
