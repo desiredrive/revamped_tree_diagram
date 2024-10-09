@@ -1,7 +1,7 @@
 import ipverifications
 import sys
 import traffic_flows.l2_lisp_interxtr
-from traffic_flows.operational_tests import ping
+from traffic_flows.operational_tests import Ping
 from routingmodules import lisp
 from routingmodules import iprouting
 from routingmodules import cef
@@ -95,7 +95,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
 
     #Underlay Routing Modules:
     #[Object: Recursed Route]
-    rlocroute = iprouting.ip_route_get(l2mapcache.rloc,None,srcxtr.hostname)
+    rlocroute = iprouting.IPRoute(l2mapcache.rloc,None,srcxtr.hostname)
     rlocroute.iproute_prefix(service)
     print (pformat(vars(rlocroute), indent=4, width =1, sort_dicts=False))
 
@@ -105,7 +105,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     
     #[CEF: Route to Underlay]:
     #[Object: CEF Internal Information]
-    rloccef = cef.ip_cef_internal(l2mapcache.rloc,None,srcxtr.hostname)
+    rloccef = cef.IPCef(l2mapcache.rloc,None,srcxtr.hostname)
     rloccef.get_cef_internal(service)
     print (pformat(vars(rloccef), indent=4, width =1, sort_dicts=False))
 
@@ -138,12 +138,12 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     #RLOC to RLOC Ping Validation
     #1) Without MTU
     print ("RLOC to RLOC results with low MTU")
-    normal_ping = ping(rloccef.ip, srcxtr.hostname)
+    normal_ping = Ping(rloccef.ip, srcxtr.hostname)
     normal_ping.ping_with_source(None,"Lo0",None,False,service)
     print (pformat(vars(normal_ping), indent=4, width =1, sort_dicts=False))
     #2) With MTU
     print ("RLOC to RLOC results with {} MTU".format(minimum))
-    mtu_ping = ping(rloccef.ip, srcxtr.hostname)
+    mtu_ping = Ping(rloccef.ip, srcxtr.hostname)
     mtu_ping.ping_with_source(None,"Lo0",minimum,True,service)
     print (pformat(vars(mtu_ping), indent=4, width =1, sort_dicts=False))
 

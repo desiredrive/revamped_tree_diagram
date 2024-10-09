@@ -1,7 +1,7 @@
 import sys
 import radkit_cli
 
-class ip_route_get:
+class IPRoute:
     def __init__(self,route,vrf,device):
         self.hostname = device        #Device Name
         self.route = route            #IPv4 RLOC 

@@ -5,7 +5,7 @@ from switchingmodules.arp import arp_modules
 from switchingmodules.maclearning import mac_learning
 from re import compile
 
-class ip_cef_internal:
+class IPCef:
 
     def __init__(self, ip, vrf, device):
         self.ip = ip

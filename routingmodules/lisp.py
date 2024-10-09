@@ -158,6 +158,15 @@ class l2lisp_info:
             self.ipv4minmask = lispservicepath['locator_status_algorithms']['ipv4_rloc_min_mask_len']
             self.ipv6minmask = lispservicepath['locator_status_algorithms']['ipv6_rloc_min_mask_len']
 
+            proxyeteronly_cmd = "show run | i ipv4 locator reachability"
+            proxyeteronly_op = radkit_cli.get_any_single_output(hostname,proxyeteronly_cmd,service)
+
+            self.ipv4reachpetronly = False
+            if proxyeteronly_op is not None:
+                for line in proxyeteronly_op.splitlines():
+                    if 'proxy-etr-only' in line:
+                        self.ipv4reachpetronly = True
+
             self.l2mapcache_current = lispservicepath['map_cache']['size']
             self.l2mapcache_limit = lispservicepath['map_cache']['limit']
 

@@ -7,7 +7,7 @@ def ping_validation(ping_output):
                 percent = re.compile("(?<=is).*(?=percent)").search(line).group().strip()
         return percent
 
-class ping():
+class Ping():
 
     def __init__ (self, dstip, device):
         self.hostname = device

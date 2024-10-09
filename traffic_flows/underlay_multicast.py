@@ -246,6 +246,7 @@ class UnderlayMulticastDevice:
         l2floodingproperties.l2flooding_configuration(service)
         self.l2floodingproperties = l2floodingproperties
 
+    def rp_identification(self,):
 
 
 

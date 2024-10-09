@@ -1,8 +1,8 @@
 import radkit_cli
-from switchingmodules import etherchannel
-from switchingmodules.arp import arp_modules
-from switchingmodules.maclearning import mac_learning
-from re import compile
+import re
+from routingmodules.iprouting import  IPRoute
+from routingmodules.cef import IPCef
+from traffic_flows.operational_tests import Ping
 
 class PimConfiguration:
 
@@ -56,8 +56,8 @@ class PimConfiguration:
             self.piminterfaces = interface_list
 
     def pim_neighbors(self,service):
-        #For now this module does not support LISP interfaces/Overlay Multicast
         vrf = None
+        #For now this module does not support LISP interfaces/Overlay Multicast
         if self.vrf == "default":
             vrf_mode = ""
             vrf = 'default'
@@ -89,3 +89,77 @@ class PimConfiguration:
                     pimneighlist.append(neighbor)
             self.pimneighbors = (pimneighpath)
         self.neighborcount = len(pimneighlist)
+
+    def pim_rp(self,group,service):
+        vrf = None
+        if self.vrf == "default":
+            vrf_mode = ""
+            vrf = 'default'
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = 'default'
+        else:
+            vrf_mode = "vrf "+self.vrf+" "
+        #Identify the RP using non-dns lookup command:
+        pimrp_cmd = "show ip pim {} rp {}".format(vrf_mode,group)
+        pimrp_op = radkit_cli.get_any_single_output(self.hostname, pimrp_cmd, service)
+
+        self.rp = None
+        matches = ['#', 'show']
+        for rps in pimrp_op.splitlines():
+            if not any(x in rps for x in matches):
+                if "uptime" in rps:
+                    rp_ip = re.compile("(?<=RP: )(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?=, uptime)").search(rps).group().strip()
+                    self.rp = rp_ip
+
+        if self.rp is None:
+            return None
+        else:
+            #Route to RP:
+            rp_route = IPRoute(self.rp, vrf,self.hostname)
+            rp_route.iproute_prefix(service)
+            cef_route = IPCef(self.rp, vrf, self.hostname)
+            cef_route.get_cef_internal(service)
+            self.rproute = rp_route
+            self.rpcef = rp_cef
+
+            #Tunnel To IP
+            pimtunnels = []
+            pimtunnel_cmd = "show ip pim {} tunnel".format(vrf_mode)
+            pimtunne_op = radkit_cli.get_single_output_genie(self.hostname,pimtunnel_cmd,service)
+            if pimtunne_op is not None:
+                path = pimtunne_op['tunnels']
+                pimtunnels = []
+                for i in path:
+                    index = i
+                    tunnelpath = path[i]
+                    tunnel_interface = 'Tunnel'+index
+                    tunnel_type = tunnelpath['type']
+                    tunnel_rp = tunnelpath['rp']
+                    tunnel_source = tunnelpath['source']
+                    tunnel_state = tunnelpath['state']
+                    tunnel_uptime = tunnelpath['uptime']
+                    tunnel_info = {
+                        'tunnel_interface' : tunnel_interface,
+                        'tunnel_type': tunnel_type,
+                        'tunnel_rp': tunnel_rp,
+                        'tunnel_source': tunnel_source,
+                        'tunnel_state': tunnel_state,
+                        'tunnel_uptime': tunnel_uptime
+                    }
+                    pimtunnels.append(tunnel_info)
+
+            #Ping to RP IP using TunnelSource IP:
+            #RP IP identification:
+            electedsource = None
+            if len(pimtunnels) !=0:
+                for tunnel in pimtunnels:
+                  if (tunnel['tunnel_rp'] == '172.19.1.66*') and (tunnel['tunnel_type'] == 'PIM Encap'):
+                    electedsource = tunnel['tunnel_source']
+
+            pingstatus = Ping(self.rp,self.hostname)
+            pingstatus.ping_with_source(None,electedsource,None,False,service)
+            self.pingstatus = pingstatus
+
+
+
