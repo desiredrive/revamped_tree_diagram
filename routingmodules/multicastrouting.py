@@ -75,10 +75,10 @@ class MulticastRoutes:
 
         mroute_cmd = "show ip mroute {} {} {}".format(vrf_mode,group,source)
         mroute_op = radkit_cli.get_single_output_genie(self.hostname, mroute_cmd,service)
-
+        print (mroute_op)
         if mroute_op is not None:
             output = mroute_op
-            group = '239.0.17.6'
+            group = group
             try:
                 mroute_path = output['vrf'][vrf]['address_family']['ipv4']['multicast_group'][group]['source_address']
                 mroute_exists = True
@@ -129,3 +129,5 @@ class MulticastRoutes:
                     }
                     mroutes.append(mroute_info)
                 self.mrouteinfo = mroutes
+            else:
+                self.mrouteinfo = None
