@@ -1,4 +1,7 @@
 import sys
+
+from ncclient.xml_ import new_ele
+
 import radkit_cli
 from switchingmodules import etherchannel
 from switchingmodules.arp import arp_modules
@@ -14,7 +17,7 @@ class IPCef:
 
     def get_cef_internal(self,service):
         #Route_Inspection:
-        print("Processing CEF Internal Information")
+        print("Processing CEF Internal Information for prefix: {}\n".format(self.ip))
 
         if self.vrf == "default":
             vrf_mode = ""
@@ -23,6 +26,7 @@ class IPCef:
             vrf_mode = ""
             vrf = ''
         else:
+            vrf = self.vrf
             vrf_mode = "vrf "+self.vrf+" "
         
         #show ip route command:
@@ -30,6 +34,7 @@ class IPCef:
         ipcefint_op = radkit_cli.get_single_output_genie(self.hostname,ipcefint_cmd,service)
         
         #VRF utilization
+        prefix = None
         if vrf_mode == "":
             vrf = 'default'
         addipv4 = 'ipv4'
@@ -47,10 +52,12 @@ class IPCef:
             subblocks = []
 
         #LISP SMR detection
+
         try:
             if any(x in "LISP" for x in subblocks):
                 self.lispsmr = (cefpath['subblocks']['LISP']['smr_enabled'])
         except TypeError:
+            new_subblock = None
             for i in subblocks:
                 new_subblock = i
             if any(x in "LISP" for x in subblocks[new_subblock]):
@@ -104,7 +111,6 @@ class IPCef:
         else:
             #Empty next hop! (Special Adjacency???)
             sys.exit("No next hop founds in CEF for prefix {} in vrf {} on Device: {}".format(self.ip,vrf,self.hostname))
-
 
 class physical_recursion():
 

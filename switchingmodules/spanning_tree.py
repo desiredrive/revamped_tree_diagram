@@ -134,6 +134,7 @@ class SpanningTree:
 
     def spt_vlan_active(self,vlan,service):
         #Get Information about a specific VLAN
+        self.vlan = vlan
         stpact_cmd = "show spanning-tree vlan {} active".format(vlan)
         stpact_op = radkit_cli.get_single_output_genie(self.hostname, stpact_cmd, service)
         if stpact_op is not None:
@@ -185,4 +186,6 @@ class SpanningTree:
                     self.number_of_fwd_interfaces+=1
                 if i['port_state'] == 'blocking':
                     self.number_of_blk_interfaces+=1
-
+        else:
+            self.number_of_fwd_interfaces = 0
+            self.number_of_blk_interfaces = 0

@@ -10,7 +10,7 @@ class IPRoute:
     def iproute_prefix(self,service):
 
         #Route_Inspection:
-        print("Processing RIB Information")
+        print("Collecting RIB Information for prefix: {}\n".format(self.route))
 
         if self.vrf == "default":
             vrf_mode = ""
@@ -24,7 +24,6 @@ class IPRoute:
         #show ip route command:
         iproute_cmd = "show ip route {} {}".format(self.route, vrf_mode, self.vrf)
         iproute_output = radkit_cli.get_single_output_genie(self.hostname,iproute_cmd,service)
-
         #If specific route exists:
         if iproute_output is not None:
             route_path = iproute_output['entry']

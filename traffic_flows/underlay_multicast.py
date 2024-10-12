@@ -1,26 +1,25 @@
 import sys
 import ipaddress
-import radkit_cli
 from pprint import pformat
 
-from catalystcenterapi.catcapi import (
-    get_device_from_lo0,
-    get_network_device_byuuid,
-    validate_cp_infabric
-)
 from ipverifications import (
     mac_address_validator,
     ipsubnet_validator_no_return,
-    issubnetbroadcast
+    issubnetbroadcast,
+    inside_subnet,
+    wildcard_converter
 )
 from device_profiler import device
 from routingmodules.lisp import L2LISPInterface, L2LISPConfiguration
 from routingmodules.multicastrouting import (
-    MulticastConfiguration
+    MulticastConfiguration, MulticastRoutes
 )
 from routingmodules.pim import (
     PimConfiguration
 )
+from securitymodules.accesslists import AccessList
+from switchingmodules.cdp import CDPinfo
+
 #Order of operations for verifying multicast
 def text():
     '''
@@ -30,6 +29,7 @@ def text():
     -) Is IGMP snooping enabled? - This controls IGMP verifications
     *) Is 17.6 or higher?
     *) Multicast Routing global enablement
+    -) Multicast Limits and Counts (Pending
     *) PIM enabled in Loopback0 Interfaces
     MAYBE....) Multicast enabled in upstream interfaces (what are upstream interfaces?) (the ones used by the upstream protocol)
         - This requires per-protocol enablement and neighbor validation; for now: OSPF and ISIS
@@ -39,17 +39,18 @@ def text():
     *) L2LISP validations (already made)
     * Determining Multicast Group for the required L2 Instance
     *) Determining RP to the required group
-    -) Determining RP source interface = warning if lo0 is not the source
-    -) Determining RP reachability and Tunnel encap (and decap if eligible)
-    -) Determining if SSM is enabled using the default group 232.0.0.0/8
-    -) *,G Creation based on L2LISP interface availability
+    *) Determining RP source interface = warning if lo0 is not the source
+    *) Determining RP reachability and Tunnel encap (and decap if eligible)
+    *) Determining if SSM is enabled using the default group 232.0.0.0/8
+    *) PIM drops
+    *) *,G Creation based on L2LISP interface availability
+    -) L2LISP ACL (Parse if the required traffic is blocked or allowed by the L2LISP ACL 17.3 and 17.6)
     -) S,G Creation based on traffic:
         what constitutes traffic? - BUM traffic traversing L2 interfaces in the L2LISP domain/VLAN
             - STP verification
             - AcX exclusion
-    -) L2LISP ACL (Parse if the required traffic is blocked or allowed by the L2LISP ACL 17.3 and 17.6)
-    -) Multicast Limits and Counts
-    -) PIM drops
+
+
 
 LHR Validations:
 
@@ -175,21 +176,21 @@ def is_l2_flooding(destination, ttl, isl2only: bool, overlaymcast: bool):
             isl2flood = True
         return isl2flood
 
-def loopback0_pim_status(interface_list,hostname):
+def anyinterface_pim_status(inputinterface,interface_list,hostname):
     for i in interface_list:
         interfacename = i['interface_name']
-        if interfacename == 'Loopback0':
+        if interfacename == inputinterface:
             if i['oper_status'] != 'up':
-                print("Loopback0 not in UP state in device {}".format(hostname))
+                print("{} not in UP state in device {}\n".format(inputinterface,hostname))
                 return False
             elif i['enabled'] is not True:
-                print("Loopback0 not in PIM enabled state in device {}".format(hostname))
+                print("{} not in PIM enabled state in device {}\n".format(inputinterface,hostname))
                 return False
             elif i['pim_mode'] == 'dense':
-                print("Loopback0  is configured for DENSE mode! Configure it for sparse-mode {}".format(hostname))
+                print("{}  is configured for DENSE mode! Configure it for sparse-mode {}\n".format(inputinterface,hostname))
                 return False
             else:
-                print("Loopback0 is configured for PIM Sparse (or sparse-dense) in device: {}".format(hostname))
+                print("{} is configured for PIM Sparse (or sparse-dense) in device: {}\n".format(inputinterface,hostname))
                 return True
 
 class UnderlayMulticastDevice:
@@ -208,26 +209,21 @@ class UnderlayMulticastDevice:
     def multicast_enablement(self,service):
         hostname = self.profiled_device.hostname
         print("Verifying Global Underlay Multicast Status for device: {} ...\n".format(hostname))
-        mcaststatus = MulticastConfiguration(None, hostname)
+        mcaststatus = MulticastConfiguration(self.vrf, hostname)
         mcaststatus.multicast_enabled(service)
         self.mcastconfig = mcaststatus
 
     def pim_interfaces (self, service):
         hostname = self.profiled_device.hostname
         print("Retrieving PIM interfaces for device: {} ...\n".format(hostname))
-        pimintfstatus = PimConfiguration(None, hostname)
+        pimintfstatus = PimConfiguration(self.vrf, hostname)
         pimintfstatus.pim_interfaces(service)
         self.piminterfaces = pimintfstatus
-
-    def islo0up(self,intflist):
-        hostname = self.profiled_device.hostname
-        print("Validating Loopback0 PIM configuration for device: {} ...\n".format(hostname))
-        self.islo0pimenabled = loopback0_pim_status(intflist,hostname)
 
     def pim_neighbors(self,service):
         hostname = self.profiled_device.hostname
         print("Retrieving PIM Neighbors for device: {} ...\n".format(hostname))
-        pimneighbors = PimConfiguration(None, hostname)
+        pimneighbors = PimConfiguration(self.vrf, hostname)
         pimneighbors.pim_neighbors(service)
         self.pimneighbors = pimneighbors
 
@@ -241,6 +237,7 @@ class UnderlayMulticastDevice:
 
     def broadcast_underlay_properties(self,iid,service):
         hostname = self.profiled_device.hostname
+        self.iid = iid
         print("Verifying L2Flooding Configuration for instance {} in device: {} ...\n".format(iid,hostname))
         l2floodingproperties = L2LISPConfiguration(iid, hostname)
         l2floodingproperties.l2flooding_configuration(service)
@@ -249,15 +246,451 @@ class UnderlayMulticastDevice:
     def rp_identification(self,group, service):
         hostname = self.profiled_device.hostname
         print("Verifying RP information in device: {} ...\n".format(hostname))
-        rpinformation = PimConfiguration(None,hostname)
+        rpinformation = PimConfiguration(self.vrf,hostname)
         rpinformation.pim_rp(group,service)
         self.rpinformation = rpinformation
 
     def rpf_to_rp(self,rp,service):
         hostname = self.profiled_device.hostname
+        self.rp = rp
         print("Verifying RPF information for RP {} in device: {} ...\n".format(rp, hostname))
-        rpfinformation = PimConfiguration(None,hostname)
+        rpfinformation = PimConfiguration(self.vrf,hostname)
         rpfinformation.pim_rpf_neighbor(rp,service)
         self.rpfinformation = rpfinformation
 
+    def ssm_underlay_group(self,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying SSM configuration in device: {} ...\n".format(hostname))
+        ssminformation = PimConfiguration(self.vrf,hostname)
+        ssminformation.pim_ssm_range(service)
+        self.ssminformation = ssminformation
+        #Verifying if the Underlay Group is within the SSM group
+        l2floodinggroup = self.l2floodingproperties.broadcastunderlay
+        try:
+            ssmacl = ssminformation.ssmacl
+        except AttributeError:
+            ssmacl = None
+        ssmstatus = ssminformation.ssmenabled
+        self.isssmgroup = False
+        if ssmstatus is True:
+            if ssmacl is None:
+                ssmrange = ssminformation.ssmrange
+                self.isssmgroup = inside_subnet(ssmrange,l2floodinggroup)
+            else:
+                acl = AccessList(hostname)
+                acl.aclbyidname(ssmacl,service)
+                acltype = acl.acltype
+                aclaces = acl.aces
+                if acltype == 'extended':
+                    for ace in aclaces:
+                        destinationnet = ace['ace_destination']
+                        forwarding = ace['forwarding']
+                        if forwarding == 'permit':
+                            if "host" in destinationnet:
+                                destinationip = destinationnet.split(" ")[1]
+                                if l2floodinggroup == destinationip:
+                                    self.isssmgroup = True
+                            elif 'any' in destinationnet:
+                                self.isssmgroup = True
+                            else:
+                                destinationnetwork = destinationnet.split(" ")
+                                destinationip = destinationnetwork[0]
+                                destinationwc = destinationnetwork[1]
+                                subnet_range = wildcard_converter(destinationip, destinationwc)
+                                for subnet in subnet_range:
+                                    result = inside_subnet(subnet, l2floodinggroup)
+                                    if result is True:
+                                        self.isssmgroup = True
+                if acltype == 'standard':
+                    for ace in aclaces:
+                        sourcenet = ace['ace_source']
+                        forwarding = ace['forwarding']
+                        if forwarding == 'permit':
+                            if "host" in sourcenet:
+                                sourceip = sourcenet.split(" ")[1]
+                                if l2floodinggroup == sourceip:
+                                    self.isssmgroup = True
+                            elif 'any' in sourcenet:
+                                self.isssmgroup = True
+                            else:
+                                sourcenetwork = sourcenet.split(" ")
+                                sourceip = sourcenetwork[0]
+                                sourcewc = sourcenetwork[1]
+                                print(sourcenetwork)
+                                subnet_range = wildcard_converter(sourceip, sourcewc)
+                                for subnet in subnet_range:
+                                    result = inside_subnet(subnet, l2floodinggroup)
+                                    if result is True:
+                                        self.isssmgroup = True
+        else:
+            self.isssmgroup = False
 
+    def multicast_range(self,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying if multicast range is allowing the L2 Flooding Group\n".format(hostname))
+        mcastrangeinfo = MulticastConfiguration(self.vrf,hostname)
+        mcastrangeinfo.multicast_ranges(service)
+        self.mcastrangestatus = mcastrangeinfo.mcastrange
+        mcastrangeacl = mcastrangeinfo.mcastrangeacl
+        l2floodinggroup = self.l2floodingproperties.broadcastunderlay
+        self.mcastrangeinfo = mcastrangeinfo
+        self.isblockedbymcastrange = False
+        if self.mcastrangestatus is False:
+            self.isblockedbymcastrange = False
+        else:
+            acl = AccessList(hostname)
+            acl.aclbyidname(mcastrangeacl, service)
+            acltype = acl.acltype
+            aclaces = acl.aces
+            if acltype == 'extended':
+                for ace in aclaces:
+                    destinationnet = ace['ace_destination']
+                    forwarding = ace['forwarding']
+                    if forwarding == 'permit':
+                        if "host" in destinationnet:
+                            destinationip = destinationnet.split(" ")[1]
+                            if l2floodinggroup == destinationip:
+                                self.isblockedbymcastrange = True
+                        elif "any" in destinationnet:
+                            self.isblockedbymcastrange = True
+                        else:
+                            destinationnetwork = destinationnet.split(" ")
+                            destinationip = destinationnetwork[0]
+                            destinationwc = destinationnetwork[1]
+                            subnet_range = wildcard_converter(destinationip, destinationwc)
+                            for subnet in subnet_range:
+                                result = inside_subnet(subnet, l2floodinggroup)
+                                if result is True:
+                                    self.isblockedbymcastrange = True
+            if acltype == 'standard':
+                for ace in aclaces:
+                    sourcenet = ace['ace_source']
+                    forwarding = ace['forwarding']
+                    if forwarding == 'permit':
+                        if "host" in sourcenet:
+                            sourceip = sourcenet.split(" ")[1]
+                            if l2floodinggroup == sourceip:
+                                self.isblockedbymcastrange = True
+                        elif 'any' in sourcenet:
+                            self.isblockedbymcastrange = True
+                        else:
+                            sourcenetwork = sourcenet.split(" ")
+                            sourceip = sourcenetwork[0]
+                            sourcewc = sourcenetwork[1]
+                            print(sourcenetwork)
+                            subnet_range = wildcard_converter(sourceip, sourcewc)
+                            for subnet in subnet_range:
+                                result = inside_subnet(subnet, l2floodinggroup)
+                                if result is True:
+                                    self.isblockedbymcastrange = True
+
+    def pim_statistics(self,service):
+        hostname = self.profiled_device.hostname
+        print ("Collecting Global PIM statistics on this node: {}\n".format(hostname))
+        pimstatistics = PimConfiguration(None,hostname)
+        pimstatistics.ip_pim_statistics(service)
+        self.pimstatistics = pimstatistics
+        if pimstatistics.pimchecksum_errors != 0:
+            print ("WARNING!: PIM Checksum Errors found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
+        if pimstatistics.pimformat_errors != 0:
+            print("WARNING!: PIM Format Errors found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
+        if pimstatistics.pimqueuedrops != 0:
+            print("WARNING!: PIM Queue Drops found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
+
+    def local_star_g(self,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying *,G multicast route on this node: {} ...\n".format(hostname))
+        l2floodinggroup = self.l2floodingproperties.broadcastunderlay
+        source = '255.255.255.255'
+        stargmroute = MulticastRoutes(None,hostname)
+        stargmroute.mroute_get(l2floodinggroup,source,service)
+        starginfo = stargmroute.mrouteinfo
+        self.stargmroute = None
+        for source in starginfo:
+            if source['source'] == "*":
+                print ("*,G Mroute Found!\n")
+                self.stargmroute = source
+
+    def anypiminterface(self,interface,intflist):
+        hostname = self.profiled_device.hostname
+        print("Validating {} PIM configuration for device: {} ...\n".format(interface,hostname))
+        self.isinterfacepimenabled = anyinterface_pim_status(interface,intflist,hostname)
+
+    def floodingacls(self, interface, service):
+        hostname = self.profiled_device.hostname
+        print("Retrieving ACLs on Interface: {} for device: {} ...\n".format(interface, hostname))
+        if interface == 'L2LISP0':
+            acls = AccessList(hostname)
+            acls.aclbyinterface(interface,service)
+            accesslists = acls.aclnames
+            aclcontents = []
+            if len(accesslists) != 0:
+                for acl in accesslists:
+                    acls.aclbyidname(acl,service)
+                    aces = acls.aces
+                    aclname = acls.aclname
+                    acltype = acls.acltype
+                    aclaftype = acls.aclaftype
+                    aclinfo = {
+                        'aclname' : aclname,
+                        'acltype' : acltype,
+                        'aclaftype' : aclaftype,
+                        'aces': aces
+                    }
+                    aclcontents.append(aclinfo)
+            self.l2floodacls = aclcontents
+        if interface == 'Tunnel0':
+            acls = AccessList(hostname)
+            aclcontents = []
+            aclnames = ['SDA-fabric-in','SDA-fabric-out']
+            for i in aclnames:
+                acls.aclbyidname(i,service)
+                aces = acls.aces
+                aclname = acls.aclname
+                acltype = acls.acltype
+                aclaftype = acls.aclaftype
+                aclinfo = {
+                    'aclname': aclname,
+                    'acltype': acltype,
+                    'aclaftype': aclaftype,
+                    'aces': aces
+                }
+                aclcontents.append(aclinfo)
+            self.l2floodacls = aclcontents
+
+def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
+    print("Starting Underlay Multicast Flows!...\n")
+    # Starting Underlay Multicast Flows!
+    # Underlay Multicast Validations for FHR:
+    umcastdevice = UnderlayMulticastDevice(None, mgmtip)
+    umcastdevice.device_profiler(catc_name, service)
+    hostname = umcastdevice.profiled_device.hostname
+    #print("Profiled device {}:\n".format(hostname))
+    #print(pformat(vars(umcastdevice.profiled_device), indent=4, width=1, sort_dicts=False))
+    # Global Multicast Enablement
+    umcastdevice.multicast_enablement(service)
+    if umcastdevice.mcastconfig.multicastenabled is False:
+        sys.exit("WARNING!: Device {} does not have Multicast Enabled in the Global RIB!\n".format(hostname))
+    else:
+        print("Global Multicast Routing is enabled on device {}:\n".format(hostname))
+        #print(pformat(vars(umcastdevice.mcastconfig), indent=4, width=1, sort_dicts=False))
+    # PIM Interfaces of a Device:
+    umcastdevice.pim_interfaces(service)
+    interface_list = umcastdevice.piminterfaces.piminterfaces
+    umcastdevice.anypiminterface('Loopback0',interface_list)
+    if umcastdevice.isinterfacepimenabled is not True:
+        sys.exit("WARNING!: Device {} does not have Loopback0 as PIM enabled\n".format(hostname))
+    # PIM Neighbors
+    umcastdevice.pim_neighbors(service)
+    pimneighborlist = umcastdevice.pimneighbors.pimneighbors
+    pimneighborcount = umcastdevice.pimneighbors.neighborcount
+    if pimneighborcount == 0:
+        sys.exit("WARNING!: Device {} does not have PIM neighbors! verify PIM configuration\n".format(hostname))
+    # Identify the L2LISP Interface and Validate it's PIM status
+    umcastdevice.l2lispinterface(vlan, service)
+    # Retrieve L2Flooding Configuration.
+    umcastdevice.broadcast_underlay_properties(l2lispiid, service)
+    # SSM Configuration and Validation
+    # Underlay Multicast Group should be ASM:
+    underlay_group = umcastdevice.l2floodingproperties.broadcastunderlay
+    umcastdevice.ssm_underlay_group(service)
+    ssminfo = umcastdevice.ssminformation
+    if ssminfo.ssmenabled is True:
+        print("SSM Multicast is Enabled on device: {}\n".format(hostname))
+    else:
+        print("WARNING!: SSM Multicast is NOT Enabled on device: {}, configure \"ip pim ssm default\" on the device\n".format(hostname))
+    isssmgroup = umcastdevice.isssmgroup
+    if isssmgroup is True:
+        sys.exit("WARNING!: SSM Multicast range is covering the Underlay Multicast Group: {} on device: {}".format(underlay_group, hostname))
+    # Retrieve RP information:
+    umcastdevice.rp_identification(underlay_group, service)
+    rp = umcastdevice.rpinformation.rp
+    if rp is None:
+        sys.exit("WARNING!: Device {} does not have PIM RP! verify PIM RP configuration\n".format(hostname))
+    pingstatus = umcastdevice.rpinformation.pingstatus
+    if int(pingstatus.result) <= 70:
+        print("WARNING! : Packet Loss from {} to RP {} is below threshold of 70%, current value is {} % \n".format(
+            hostname, rp, pingstatus))
+        print("WARNING! : PIM registers to RP {} might fail!\n".format(rp))
+    else:
+        print(
+            "ICMP Connectivity from {} to RP {} is good at {} % success rate\n".format(hostname, rp, pingstatus.result))
+    # RP Validations:
+    # Is the PIM Tunnel Status UP?
+    try:
+        maintunnel = umcastdevice.rpinformation.maintunnel
+        tunnels = umcastdevice.rpinformation.pimtunnels
+        tunnel_state = None
+        for tunnel in tunnels:
+            if tunnel['tunnel_interface'] == maintunnel:
+                tunnel_state = tunnel['tunnel_state']
+                # Matching Register Source as Loopback0:
+                devicelo0 = umcastdevice.profiled_device.loopback
+                registersource = tunnel['tunnel_source']
+                if devicelo0 == registersource:
+                    print ("Loopback0 is being used as register-source to register to RP {} on device: {}\n".format(rp, hostname))
+                else:
+                    print ("WARNING!: Loopback0 is NOT the register-source to reach RP {} on device: {}, current source IP is: {}\n".format(rp,hostname,registersource))
+        if tunnel_state == 'UP':
+            print("PIM Encapsulation {} to RP {} is in UP state in device {}\n".format(maintunnel, rp, hostname))
+        else:
+            print("PIM Encapsulation to RP {} is NOT in UP state in device {}, are there any routes to the RP?\n".format(rp, hostname))
+            print("RIB route to the PIM RP {}:\n".format(rp))
+            print(pformat(vars(umcastdevice.rpinformation.rproute), indent=4, width=1, sort_dicts=False))
+            print("CEF route to the PIM RP {}:\n".format(rp))
+            print(pformat(vars(umcastdevice.rpinformation.rpcef), indent=4, width=1, sort_dicts=False))
+            sys.exit("")
+    except (KeyError, ValueError, IndexError) as e:
+        print("PIM Encapsulation to RP {} is NOT in UP state in device {}, are there any routes to the RP?\n".format(rp, hostname))
+        print("RIB route to the PIM RP {}:\n".format(rp))
+        print(pformat(vars(umcastdevice.rpinformation.rproute), indent=4, width=1, sort_dicts=False))
+        print("CEF route to the PIM RP {}:\n".format(rp))
+        print(pformat(vars(umcastdevice.rpinformation.rpcef), indent=4, width=1, sort_dicts=False))
+        sys.exit("")
+    # RPF Information:
+    umcastdevice.rpf_to_rp(rp,service)
+    rpffailurestatus = umcastdevice.rpfinformation.rpffailure
+    if rpffailurestatus is False:
+        rpf = umcastdevice.rpfinformation.rpfip
+        rpfinterface = umcastdevice.rpfinformation.rpfinterface
+        print ("RPF Interface to the RP {} is: {} on device: {}; Attempting CDP resolution...\n".format(rp,rpfinterface,hostname))
+        cdpneighbors = CDPinfo(hostname)
+        cdpneighbors.cdpneighborinterface(rpfinterface,service)
+        print ("CDP neighbors for interface {} that matches RPF IP {} on device: {}:\n".format(rpfinterface, rpf, hostname))
+        rpfcdpneighbor = None
+        if cdpneighbors.numberofneighbors != 0:
+            print(pformat(vars(cdpneighbors), indent=4, width=1, sort_dicts=False))
+            print ("\n")
+            for i in cdpneighbors.cdpneighbors:
+                try:
+                    management_addresses = i['management_addresses']
+                    for j in management_addresses:
+                        if j == rpf:
+                            rpfcdpneighbor = i
+                except (KeyError, ValueError, IndexError) as e:
+                    print("WARNING:! No CDP neighbor found for RPF IP {}\n".format(rpf))
+        if rpfcdpneighbor is not None:
+            print (rpfcdpneighbor)
+    else:
+        print ("RPF Not Found for RP {} on device: {}; Verifying Route!\n".format(rp,hostname))
+        #If RPF resolution fails; verify the route to the upstream RP:
+        cef_hops = umcastdevice.rpinformation.rpcef.nexthops
+        pimneighbinterfaces=[]
+        for i in pimneighborlist:
+            interface = i['interface']
+            pimneighbinterfaces.append(interface)
+        for i in cef_hops:
+            interfacename = i['oif']
+            if any(x in interfacename for x in pimneighbinterfaces):
+                sys.exit("Nexthop Interface {} has a PIM neighbor\n It is possible that long DNS resolution times can prevent RPF command from resolving, try disabling local DNS resolution\n Otherwise, verify if any other multicast or PIM configuration is preventing RPF resolution\n".format(interfacename))
+            else:
+                print ("WARNING!: Interface {} has no PIM neighbor!\n".format(interfacename))
+                #Verifying if the CEF next hop is configured with PIM sparse-mode
+                pimintfstatus = False
+                for j in interface_list:
+                    piminterface = j['interface_name']
+                    if interfacename == piminterface:
+                        pimintfstatus = True
+                if pimintfstatus is False:
+                    sys.exit("Elected RPF interface should be {} but it is not PIM enabled!\n".format(interfacename))
+                if pimintfstatus is True:
+                    sys.exit("Elected RPF interface should be {} and it is enabled for PIM, but no PIM neighbor is found!\n".format(interfacename))
+
+    #Underlay Multicast Group not denied by Multicast Group Range:
+    umcastdevice.multicast_range(service)
+    mcastrangeinfo = umcastdevice.mcastrangeinfo
+    mcastrangestatus = umcastdevice.isblockedbymcastrange
+    if mcastrangestatus is False:
+        print("Multicast Range allowing the L2 Flooding Group {} on device: {}\n".format(underlay_group,hostname))
+    else:
+        sys.exit("WARNING!: Multicast Range configuration is denying the Underlay Multicast Group: {} on device: {}\n".format(underlay_group,hostname))
+
+    #PIM Statistics:
+    umcastdevice.pim_statistics(service)
+    #StarG Mroute:
+    umcastdevice.local_star_g(service)
+    starginfo = umcastdevice.stargmroute
+    if starginfo is None:
+        sys.exit("WARNING!: *,G mroute NOT found for group {} on device: {} , confirm if this mroute is not being created due to mroute limits or other multicast configuration\n".format(underlay_group, hostname))
+    else:
+        print("Found *,G mroute for group {} on device: {} , verifying it's state\n".format(underlay_group,hostname))
+        flags = starginfo['flags']
+        flagsmatch = ['S','J','C','F']
+        if all(x in flags for x in flagsmatch):
+            print ("Flags are SJCF\n")
+        else:
+            print ("WARNING!: *,G Mroute Flags are not SJCF (Sparse-Mode, Join SPT, Connected and Register)\n")
+        #IIF Verification: It is already implicit on previous checks
+        #OIL Verification: Is the L2LISP or Tunnel interface listed on the OIL?
+        if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'L2LISP0':
+            l2lispinterface = umcastdevice.l2lispinterfacestatus.l2lispsubinterfacestatus.interface
+        if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'Tunnel':
+            l2lispinterface = umcastdevice.l2lispinterfacestatus.l2lispparenstatus.interface
+        oils = starginfo['outgoinginterfacelist']
+        oilfound = False
+        for i in oils:
+            if i['interface'] == l2lispinterface:
+                print ("Interface {} found in the OIL for the *,G Mroute on device: {}\n".format(l2lispinterface,hostname))
+                oilfound = True
+        if oilfound is not True:
+            print("WARNING!: L2LISP/Tunnel interface not found as OIL for the *,G Mroute on device: {}, verifying L2LISP PIM interface status".format(l2lispinterface,hostname))
+            oilpimstatus = anyinterface_pim_status(l2lispinterface,interface_list)
+            if oilpimstatus is not True:
+                sys.exit("WARNING!: Device {} does not have {} as PIM enabled\n".format(hostname,l2lispinterface))
+            else:
+                sys.exit("WARNING!: Device {} does not have {} as OIL for the *,G Mroute, even if it is PIM enabled".format(hostname,l2lispinterface))
+    #L2LISPACL
+    if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'L2LISP0':
+        print ("Collecting information about L2LISP0 ACL\n")
+        umcastdevice.floodingacls('L2LISP0',service)
+    if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'Tunnel':
+        print ("VCollecting information about L2LISP Special ACL \n")
+        umcastdevice.floodingacls('Tunnel',service)
+
+    return umcastdevice
+
+def underlaymcast_object_print(umcastdevice):
+    hostname = umcastdevice.profiled_device.hostname
+    vlan = umcastdevice.l2lispinterfacestatus.stpstatus.vlan
+    l2lispiid = umcastdevice.iid
+    rp = umcastdevice.rp
+    print ("Device Information {}:\n".format(hostname))
+    print(pformat(vars(umcastdevice.profiled_device), indent=4, width=1, sort_dicts=False))
+    print ("Multicast Global Configuration for device {}:\n".format(hostname))
+    print(pformat(vars(umcastdevice.mcastconfig), indent=4, width=1, sort_dicts=False))
+    print ("PIM Interface Information for device {}:\n".format(hostname))
+    print(pformat(vars(umcastdevice.piminterfaces), indent=4, width=1, sort_dicts=False))
+    print("PIM Neighbors Information for device {}:\n".format(hostname))
+    print(pformat(vars(umcastdevice.pimneighbors), indent=4, width=1, sort_dicts=False))
+    print("L2LISP Interface Information for device {}:\n".format(hostname))
+    print(pformat(vars(umcastdevice.l2lispinterfacestatus), indent=4, width=1, sort_dicts=False))
+    print("Spanning Tree Information for VLAN {} on device {}:\n".format(vlan, hostname))
+    print(pformat(vars(umcastdevice.l2lispinterfacestatus.stpstatus), indent=4, width=1, sort_dicts=False))
+    print("VLAN {} information for device {}:\n".format(vlan, hostname))
+    print(pformat(vars(umcastdevice.l2lispinterfacestatus.vlanstatus), indent=4, width=1, sort_dicts=False))
+    if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'L2LISP0':
+        print("L2LISP Parent Interface Information on device {}:\n".format(hostname))
+        print(pformat(vars(umcastdevice.l2lispinterfacestatus.l2lispparenstatus), indent=4, width=1,sort_dicts=False))
+        print("L2LISP Sub-Interface Information on device {}:\n".format(hostname))
+        print(pformat(vars(umcastdevice.l2lispinterfacestatus.l2lispsubinterfacestatus), indent=4, width=1,sort_dicts=False))
+    if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'Tunnel':
+        print("L2LISP Parent Interface Information on device {}:\n".format(hostname))
+        print(pformat(vars(umcastdevice.l2lispinterfacestatus.l2lispparenstatus), indent=4, width=1,sort_dicts=False))
+    print("L2LISP Flooding Configuration for Instance-ID {} on device {}:\n".format(l2lispiid, hostname))
+    print(pformat(vars(umcastdevice.l2floodingproperties), indent=4, width=1, sort_dicts=False))
+    print("SSM Information on device {}:\n".format(hostname))
+    print(pformat(vars(umcastdevice.ssminformation), indent=4, width=1, sort_dicts=False))
+    print("Information about RP {} on device {}:\n".format(rp, hostname))
+    print(pformat(vars(umcastdevice.rpinformation), indent=4, width=1, sort_dicts=False))
+    print("RIB route to the PIM RP {}:\n".format(rp))
+    print(pformat(vars(umcastdevice.rpinformation.rproute), indent=4, width=1, sort_dicts=False))
+    print("CEF route to the PIM RP {}:\n".format(rp))
+    print(pformat(vars(umcastdevice.rpinformation.rpcef), indent=4, width=1, sort_dicts=False))
+    print("RPF information for PIM RP {}: \n".format(rp))
+    print(pformat(vars(umcastdevice.rpfinformation), indent=4, width=1, sort_dicts=False))
+    print("Multicast Range Information on device {}: \n".format(hostname))
+    print(pformat(vars(umcastdevice.mcastrangeinfo), indent=4, width=1, sort_dicts=False))
+    print("PIM Statistics on device {}: \n".format(hostname))
+    print(pformat(vars(umcastdevice.pimstatistics), indent=4, width=1, sort_dicts=False))
+    print("*,G Mroute Information on device {}: \n".format(hostname))
+    print(umcastdevice.stargmroute)

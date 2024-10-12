@@ -160,3 +160,11 @@ def issubnetbroadcast(subnetstring):
         return True
     else:
         return False
+
+def wildcard_converter(address,mask):
+    mask_int = int.from_bytes(ipaddress.IPv4Address(mask).packed, "big")
+    address_int = int.from_bytes(ipaddress.IPv4Address(address).packed, "big")
+    lower = ipaddress.IPv4Address((2 ** 32 - 1 - mask_int) & address_int)
+    upper = ipaddress.IPv4Address(mask_int | address_int)
+    subnet_range = list(ipaddress.summarize_address_range(lower, upper))
+    return subnet_range

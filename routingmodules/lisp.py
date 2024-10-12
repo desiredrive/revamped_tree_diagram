@@ -1,6 +1,5 @@
 import re
 import sys
-from os import access
 
 import radkit_cli
 from switchingmodules.interfaces import Interfaces
