@@ -75,7 +75,6 @@ class MulticastRoutes:
 
         mroute_cmd = "show ip mroute {} {} {}".format(vrf_mode,group,source)
         mroute_op = radkit_cli.get_single_output_genie(self.hostname, mroute_cmd,service)
-        print (mroute_op)
         if mroute_op is not None:
             output = mroute_op
             group = group

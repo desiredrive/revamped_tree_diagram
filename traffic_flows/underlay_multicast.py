@@ -17,7 +17,7 @@ from routingmodules.multicastrouting import (
 from routingmodules.pim import (
     PimConfiguration
 )
-from securitymodules.accesslists import AccessList
+from securitymodules.accesslists import AccessList, is_acl_denying_dst
 from switchingmodules.cdp import CDPinfo
 
 #Order of operations for verifying multicast
@@ -44,13 +44,7 @@ def text():
     *) Determining if SSM is enabled using the default group 232.0.0.0/8
     *) PIM drops
     *) *,G Creation based on L2LISP interface availability
-    -) L2LISP ACL (Parse if the required traffic is blocked or allowed by the L2LISP ACL 17.3 and 17.6)
-    -) S,G Creation based on traffic:
-        what constitutes traffic? - BUM traffic traversing L2 interfaces in the L2LISP domain/VLAN
-            - STP verification
-            - AcX exclusion
-
-
+    *) L2LISP ACL (Parse if the required traffic is blocked or allowed by the L2LISP ACL 17.3 and 17.6)
 
 LHR Validations:
 
@@ -93,6 +87,10 @@ FHR Validations
 -) Main Validations
 -) Is it the FHR?
 -) Registration Validation (Stuck in Register?, PIM Tunnel, Recahability, Reg Counters)
+    -) S,G Creation based on traffic:
+        what constitutes traffic? - BUM traffic traversing L2 interfaces in the L2LISP domain/VLAN
+            - STP verification
+            - AcX exclusion
 -) S,G Validation
 -) S,G Counters
 -) S,G OIL State
@@ -281,47 +279,11 @@ class UnderlayMulticastDevice:
                 acl.aclbyidname(ssmacl,service)
                 acltype = acl.acltype
                 aclaces = acl.aces
-                if acltype == 'extended':
-                    for ace in aclaces:
-                        destinationnet = ace['ace_destination']
-                        forwarding = ace['forwarding']
-                        if forwarding == 'permit':
-                            if "host" in destinationnet:
-                                destinationip = destinationnet.split(" ")[1]
-                                if l2floodinggroup == destinationip:
-                                    self.isssmgroup = True
-                            elif 'any' in destinationnet:
-                                self.isssmgroup = True
-                            else:
-                                destinationnetwork = destinationnet.split(" ")
-                                destinationip = destinationnetwork[0]
-                                destinationwc = destinationnetwork[1]
-                                subnet_range = wildcard_converter(destinationip, destinationwc)
-                                for subnet in subnet_range:
-                                    result = inside_subnet(subnet, l2floodinggroup)
-                                    if result is True:
-                                        self.isssmgroup = True
-                if acltype == 'standard':
-                    for ace in aclaces:
-                        sourcenet = ace['ace_source']
-                        forwarding = ace['forwarding']
-                        if forwarding == 'permit':
-                            if "host" in sourcenet:
-                                sourceip = sourcenet.split(" ")[1]
-                                if l2floodinggroup == sourceip:
-                                    self.isssmgroup = True
-                            elif 'any' in sourcenet:
-                                self.isssmgroup = True
-                            else:
-                                sourcenetwork = sourcenet.split(" ")
-                                sourceip = sourcenetwork[0]
-                                sourcewc = sourcenetwork[1]
-                                print(sourcenetwork)
-                                subnet_range = wildcard_converter(sourceip, sourcewc)
-                                for subnet in subnet_range:
-                                    result = inside_subnet(subnet, l2floodinggroup)
-                                    if result is True:
-                                        self.isssmgroup = True
+                acl = {
+                    'acltype' : acltype,
+                    'aces' : aclaces
+                }
+                self.isssmgroup = not(is_acl_denying_dst(acl,l2floodinggroup))
         else:
             self.isssmgroup = False
 
@@ -342,47 +304,11 @@ class UnderlayMulticastDevice:
             acl.aclbyidname(mcastrangeacl, service)
             acltype = acl.acltype
             aclaces = acl.aces
-            if acltype == 'extended':
-                for ace in aclaces:
-                    destinationnet = ace['ace_destination']
-                    forwarding = ace['forwarding']
-                    if forwarding == 'permit':
-                        if "host" in destinationnet:
-                            destinationip = destinationnet.split(" ")[1]
-                            if l2floodinggroup == destinationip:
-                                self.isblockedbymcastrange = True
-                        elif "any" in destinationnet:
-                            self.isblockedbymcastrange = True
-                        else:
-                            destinationnetwork = destinationnet.split(" ")
-                            destinationip = destinationnetwork[0]
-                            destinationwc = destinationnetwork[1]
-                            subnet_range = wildcard_converter(destinationip, destinationwc)
-                            for subnet in subnet_range:
-                                result = inside_subnet(subnet, l2floodinggroup)
-                                if result is True:
-                                    self.isblockedbymcastrange = True
-            if acltype == 'standard':
-                for ace in aclaces:
-                    sourcenet = ace['ace_source']
-                    forwarding = ace['forwarding']
-                    if forwarding == 'permit':
-                        if "host" in sourcenet:
-                            sourceip = sourcenet.split(" ")[1]
-                            if l2floodinggroup == sourceip:
-                                self.isblockedbymcastrange = True
-                        elif 'any' in sourcenet:
-                            self.isblockedbymcastrange = True
-                        else:
-                            sourcenetwork = sourcenet.split(" ")
-                            sourceip = sourcenetwork[0]
-                            sourcewc = sourcenetwork[1]
-                            print(sourcenetwork)
-                            subnet_range = wildcard_converter(sourceip, sourcewc)
-                            for subnet in subnet_range:
-                                result = inside_subnet(subnet, l2floodinggroup)
-                                if result is True:
-                                    self.isblockedbymcastrange = True
+            acl = {
+                'acltype' : acltype,
+                'aces' : aclaces
+            }
+            self.isblockedbymcastrange = is_acl_denying_dst(acl,l2floodinggroup)
 
     def pim_statistics(self,service):
         hostname = self.profiled_device.hostname
@@ -615,11 +541,11 @@ def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
     else:
         print("Found *,G mroute for group {} on device: {} , verifying it's state\n".format(underlay_group,hostname))
         flags = starginfo['flags']
-        flagsmatch = ['S','J','C','F']
+        flagsmatch = ['S','J','C']
         if all(x in flags for x in flagsmatch):
             print ("Flags are SJCF\n")
         else:
-            print ("WARNING!: *,G Mroute Flags are not SJCF (Sparse-Mode, Join SPT, Connected and Register)\n")
+            print ("WARNING!: *,G Mroute Flags are not SJCF (Sparse-Mode, Join SPT and Connected)\n")
         #IIF Verification: It is already implicit on previous checks
         #OIL Verification: Is the L2LISP or Tunnel interface listed on the OIL?
         if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'L2LISP0':
@@ -694,3 +620,5 @@ def underlaymcast_object_print(umcastdevice):
     print(pformat(vars(umcastdevice.pimstatistics), indent=4, width=1, sort_dicts=False))
     print("*,G Mroute Information on device {}: \n".format(hostname))
     print(umcastdevice.stargmroute)
+    print("L2Flood ACL Information on device {}: \n".format(hostname))
+    print(umcastdevice.l2floodacls)

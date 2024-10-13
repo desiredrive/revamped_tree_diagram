@@ -1,5 +1,72 @@
 import radkit_cli
 import re
+from ipverifications import (
+    wildcard_converter,
+    inside_subnet
+)
+
+def is_acl_denying_dst(acldetails,destination):
+    #Return True means Denied; Return False means Not Denied
+    acltype = acldetails['acltype']
+    aclaces = acldetails['aces']
+    if acltype == 'extended':
+        for ace in aclaces:
+            destinationnet = ace['ace_destination']
+            forwarding = ace['forwarding']
+            if "host" in destinationnet:
+                destinationip = destinationnet.split(" ")[1]
+                if destination == destinationip:
+                    if forwarding == 'deny':
+                        return True
+                    else:
+                        return False
+            elif "any" in destinationnet:
+                if forwarding == 'deny':
+                    return True
+                else:
+                    return False
+            else:
+                destinationnetwork = destinationnet.split(" ")
+                destinationip = destinationnetwork[0]
+                destinationwc = destinationnetwork[1]
+                subnet_range = wildcard_converter(destinationip, destinationwc)
+                for subnet in subnet_range:
+                    result = inside_subnet(subnet, destination)
+                    if result is True:
+                        if forwarding == 'deny':
+                            return True
+                        else:
+                            return False
+    if acltype == 'standard':
+        for ace in aclaces:
+            sourcenet = ace['ace_source']
+            forwarding = ace['forwarding']
+            if "host" in sourcenet:
+                sourceip = sourcenet.split(" ")[1]
+                if sourceip == sourceip:
+                    if forwarding == 'deny':
+                        return True
+                    else:
+                        return False
+            elif 'any' in sourcenet:
+                if forwarding == 'deny':
+                    return True
+                else:
+                    return False
+            else:
+                sourcenetwork = sourcenet.split(" ")
+                sourceip = sourcenetwork[0]
+                sourcewc = sourcenetwork[1]
+                subnet_range = wildcard_converter(sourceip, sourcewc)
+                for subnet in subnet_range:
+                    result = inside_subnet(subnet, destination)
+                    if result is True:
+                        if forwarding == 'deny':
+                            return True
+                        else:
+                            return False
+    return False
+
 class AccessList:
     def __init__(self,device):
         self.hostname = device
