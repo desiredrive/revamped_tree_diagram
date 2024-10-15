@@ -89,10 +89,11 @@ class Interfaces():
             pass
 
     def show_interface_counters(self,service):
-        intfc_cmd = "show interface {} counters".format(self.interface)
+        intfc_cmd = "show interface {} counter".format(self.interface)
         intfc_op = radkit_cli.get_single_output_genie(self.hostname, intfc_cmd, service)
-
+        print (intfc_op)
         if intfc_op is not None:
+            print ("elo")
             intfcounterpath = intfc_op['interface'][self.interface]
             self.inoctets = intfcounterpath['in']['octets']
             self.inunicastpackets = intfcounterpath['in']['ucast_pkts']
