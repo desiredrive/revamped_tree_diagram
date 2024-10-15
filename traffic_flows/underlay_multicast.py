@@ -2,6 +2,9 @@ import sys
 import ipaddress
 from pprint import pformat
 
+from jinja2.sandbox import is_internal_attribute
+
+from catalystcenterapi.catcapi import profile_devices_with_ip
 from ipverifications import (
     mac_address_validator,
     ipsubnet_validator_no_return,
@@ -608,7 +611,7 @@ def underlaymcast_object_print(umcastdevice):
     print("L2Flood ACL Information on device {}: \n".format(hostname))
     print(umcastdevice.l2floodacls)
 
-def fhr_lhr_validations(fhrdevice,lhrdevice):
+def fhr_lhr_validations(fhrdevice,lhrdevice,catc,service):
     # FHR and LHR consistency:
     # Same RP?
     fhr_rpinfo = fhrdevice.rpinformation
@@ -618,13 +621,41 @@ def fhr_lhr_validations(fhrdevice,lhrdevice):
     else:
         samerp = False
     # #Same Fabric Site? #RP in the same site?
+    potential_rps  = []
+    isinternal = None
+    if samerp is True:
+        fhrsitefabricsite = fhrdevice.profiled_device.fabric_site_hierarchy
+        lhrsitefabricsite = lhrdevice.profiled_device.fabric_site_hierarchy
+        profiledrps = profile_devices_with_ip(fhr_rpinfo.rp,catc,service)
+        for rp in profiledrps:
+            rp_site = rp.fabric_site_hierarchy
+            if (rp_site == fhrsitefabricsite) and (rp_site == lhrsitefabricsite):
+                isinternal = True
+                potential_rps.append(rp)
+            else:
+                isinternal = False
+
+    else:
+        profiledrps = []
+        isinternal = None
 
     # #Possible MSDP configuration?
+    total_rps = len(potential_rps)
+    msdpcriteria = False
+    if total_rps > 1:
+        print ("Found more than 1 RP in the same fabric site, MSDP peering will be considered\n")
+        print ("Fabric Sites for profiled RPs: \n")
+        msdpcriteria = True
+        for rp in potential_rps:
+            print ("RP Device: {} with an RP IP of : {} is part of Fabric Site: {}".format(rp.hostname,fhr_rpinfo.rp,rp.fabric_site_id))
     # #RP is internal?
     consistency_check = {
-        'samerp' : samerp
+        'samerp' : samerp,
+        'profiledrps' : profiledrps,
+        'internalrp' : isinternal,
+        'msdpcheck' : msdpcriteria
     }
-
+    return consistency_check
 def fhr_validations(umcastdevice):
     '''
         FHR Validations
