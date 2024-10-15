@@ -72,7 +72,7 @@ def get_single_output_genie(hostname, command: str, service):
         sys.exit("Error when getting the following command: {}".format(command))
     except KeyError as e:
         sys.exit("Error: {} in RADKIT Inventory, Device: {} ".format(e, hostname))
-    return output   
+    return output
 
 def get_catc_api(dnac, api_url: str,service):
     try:
@@ -80,7 +80,7 @@ def get_catc_api(dnac, api_url: str,service):
         try:
             response = device_inventory.http.get(api_url).wait()
             response_js = json.loads(response.content)
-            return (response_js)
+            return response_js
         except:
             return None
     except ValueError:

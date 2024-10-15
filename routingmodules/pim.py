@@ -351,13 +351,10 @@ class PimConfiguration:
             self.rpffailure = True
 
     def pim_ssm_range(self,service):
-        vrf = None
         if self.vrf == "default":
             vrf_mode = ""
-            vrf = ''
         elif self.vrf is None:
             vrf_mode = ""
-            vrf = ''
         else:
             vrf_mode = "vrf "+self.vrf+" "
 

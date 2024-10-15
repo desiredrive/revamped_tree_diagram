@@ -7,9 +7,8 @@ from ipverifications import (
     ipsubnet_validator_no_return,
     issubnetbroadcast,
     inside_subnet,
-    wildcard_converter
 )
-from device_profiler import device
+from device_profiler import Device
 from routingmodules.lisp import L2LISPInterface, L2LISPConfiguration
 from routingmodules.multicastrouting import (
     MulticastConfiguration, MulticastRoutes
@@ -21,31 +20,7 @@ from securitymodules.accesslists import AccessList, is_acl_denying_dst
 from switchingmodules.cdp import CDPinfo
 
 #Order of operations for verifying multicast
-def text():
-    '''
-    Main Local Verifications
-    *)Which traffic are you troubleshooting?
-    *) Is it L2 Only VN?
-    -) Is IGMP snooping enabled? - This controls IGMP verifications
-    *) Is 17.6 or higher?
-    *) Multicast Routing global enablement
-    -) Multicast Limits and Counts (Pending
-    *) PIM enabled in Loopback0 Interfaces
-    MAYBE....) Multicast enabled in upstream interfaces (what are upstream interfaces?) (the ones used by the upstream protocol)
-        - This requires per-protocol enablement and neighbor validation; for now: OSPF and ISIS
-    *) PIM neighbor validations
-    *) PIM enablement on L2 interfaces
-    *) PIM DR election (Lo0 must be DR)
-    *) L2LISP validations (already made)
-    * Determining Multicast Group for the required L2 Instance
-    *) Determining RP to the required group
-    *) Determining RP source interface = warning if lo0 is not the source
-    *) Determining RP reachability and Tunnel encap (and decap if eligible)
-    *) Determining if SSM is enabled using the default group 232.0.0.0/8
-    *) PIM drops
-    *) *,G Creation based on L2LISP interface availability
-    *) L2LISP ACL (Parse if the required traffic is blocked or allowed by the L2LISP ACL 17.3 and 17.6)
-
+'''
 LHR Validations:
 
 -) Main validations
@@ -61,7 +36,6 @@ LHR Validations:
 -) Identification of RPF upstream interface (CDP and L3)
 -) Carrying RP information, how many RPs do exist? Are there more than 1? How can we tell.?
 -) DO intermediate nodes exist?
-
 
 RP Validations:
 -) PIM Rules (3, 4, 5=Prunning, 6=Maintenance, 7=FHR Prunning)
@@ -83,22 +57,7 @@ RP Validations:
 -) S,G OIL download to *,G Validaiton
 -) Is RP joining the downstream Int or FHR?
 
-FHR Validations
--) Main Validations
--) Is it the FHR?
--) Registration Validation (Stuck in Register?, PIM Tunnel, Recahability, Reg Counters)
-    -) S,G Creation based on traffic:
-        what constitutes traffic? - BUM traffic traversing L2 interfaces in the L2LISP domain/VLAN
-            - STP verification
-            - AcX exclusion
--) S,G Validation
--) S,G Counters
--) S,G OIL State
--) S,G Counters
--) MFIB Equivalents
--) Is it SPT already?
 '''
-    return None
 
 def multicast_ranges(mcast_group):
     mcastflag = False
@@ -197,7 +156,7 @@ class UnderlayMulticastDevice:
         self.vrf = vrf
 
     def device_profiler(self, catc,service):
-        devprof = device(self.mgmtip,catc)
+        devprof = Device(self.mgmtip,catc)
         devprof.profile_device(service)
         self.profiled_device = devprof
 
@@ -264,10 +223,7 @@ class UnderlayMulticastDevice:
         self.ssminformation = ssminformation
         #Verifying if the Underlay Group is within the SSM group
         l2floodinggroup = self.l2floodingproperties.broadcastunderlay
-        try:
-            ssmacl = ssminformation.ssmacl
-        except AttributeError:
-            ssmacl = None
+        ssmacl = ssminformation.ssmacl
         ssmstatus = ssminformation.ssmenabled
         self.isssmgroup = False
         if ssmstatus is True:
@@ -385,6 +341,31 @@ class UnderlayMulticastDevice:
             self.l2floodacls = aclcontents
 
 def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
+    '''
+    Main Local Verifications
+    *)Which traffic are you troubleshooting?
+    *) Is it L2 Only VN?
+    -) Is IGMP snooping enabled? - This controls IGMP verifications
+    *) Is 17.6 or higher?
+    *) Multicast Routing global enablement
+    -) Multicast Limits and Counts (Pending
+    *) PIM enabled in Loopback0 Interfaces
+    MAYBE....) Multicast enabled in upstream interfaces (what are upstream interfaces?) (the ones used by the upstream protocol)
+        - This requires per-protocol enablement and neighbor validation; for now: OSPF and ISIS
+    *) PIM neighbor validations
+    *) PIM enablement on L2 interfaces
+    *) PIM DR election (Lo0 must be DR)
+    *) L2LISP validations (already made)
+    * Determining Multicast Group for the required L2 Instance
+    *) Determining RP to the required group
+    *) Determining RP source interface = warning if lo0 is not the source
+    *) Determining RP reachability and Tunnel encap (and decap if eligible)
+    *) Determining if SSM is enabled using the default group 232.0.0.0/8
+    *) PIM drops
+    *) *,G Creation based on L2LISP interface availability
+    *) L2LISP ACL (Parse if the required traffic is blocked or allowed by the L2LISP ACL 17.3 and 17.6)
+    '''
+
     print("Starting Underlay Multicast Flows!...\n")
     # Starting Underlay Multicast Flows!
     # Underlay Multicast Validations for FHR:
@@ -416,9 +397,13 @@ def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
     umcastdevice.l2lispinterface(vlan, service)
     # Retrieve L2Flooding Configuration.
     umcastdevice.broadcast_underlay_properties(l2lispiid, service)
+    underlay_group = umcastdevice.l2floodingproperties.broadcastunderlay
+    if underlay_group is None:
+        sys.exit("WARNING!: Broadcast Underlay Group not found on device: {}, verify if broadcast-underlay is configured under the L2LISP instance {}\n".format(hostname,l2lispiid))
+    else:
+        print("Broadcast Underlay Group is {} for L2LISP ID {} found on device: {}\n".format(underlay_group,l2lispiid,hostname))
     # SSM Configuration and Validation
     # Underlay Multicast Group should be ASM:
-    underlay_group = umcastdevice.l2floodingproperties.broadcastunderlay
     umcastdevice.ssm_underlay_group(service)
     ssminfo = umcastdevice.ssminformation
     if ssminfo.ssmenabled is True:
@@ -622,3 +607,44 @@ def underlaymcast_object_print(umcastdevice):
     print(umcastdevice.stargmroute)
     print("L2Flood ACL Information on device {}: \n".format(hostname))
     print(umcastdevice.l2floodacls)
+
+def fhr_lhr_validations(fhrdevice,lhrdevice):
+    # FHR and LHR consistency:
+    # Same RP?
+    fhr_rpinfo = fhrdevice.rpinformation
+    lhr_rpinfo = lhrdevice.rpinformation
+    if fhr_rpinfo.rp == lhr_rpinfo.rp:
+        samerp = True
+    else:
+        samerp = False
+    # #Same Fabric Site? #RP in the same site?
+
+    # #Possible MSDP configuration?
+    # #RP is internal?
+    consistency_check = {
+        'samerp' : samerp
+    }
+
+def fhr_validations(umcastdevice):
+    '''
+        FHR Validations
+    -) Registration Validation (Stuck in Register?, PIM Tunnel, Recahability, Reg Counters)
+        -) S,G Creation based on traffic:
+            what constitutes traffic? - BUM traffic traversing L2 interfaces in the L2LISP domain/VLAN
+                - STP verification
+                - AcX exclusion
+    -) S,G Validation
+    -) S,G Counters
+    -) S,G OIL State
+    -) S,G Counters
+    -) MFIB Equivalents
+    -) Is it SPT already?
+    '''
+    print("Validating FHR L2 Flooding Information...\n")
+    # Starting Underlay Multicast Flows!
+    # Underlay Multicast Validations for FHR:
+    # Is this device really an FHR? What constitutes an FHR?
+        #PIM Tunnel, Loopback 0 PIM enablement, Broadcast Underlay and more are covered by main validations (single device underlay profiling)
+        #An FHR is defined by a device that is able to create an S,G based on traffic; this criteria can use a source VLAN to determine if there are any active ports sending BUM traffic.
+        #Steps to determine if Flooding S,G must be created: 1, there are fwding interfaces on the vlan, there is at least 1 interface with incoming bcast traffic from these, the S,G is created based on this traffic.
+    #Step 1 Retrieve STP available ports from Object: umcastdevice.

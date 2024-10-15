@@ -21,9 +21,6 @@ class Interfaces():
         self.interface = interface 
 
     def show_interface(self, service):
-
-        print ("Collecting Interface Parameters and Information for interface {} on device: {} \n".format(self.interface, self.hostname))
-
         intf_cmd = "show interface {}".format(self.interface)
         intf_op = radkit_cli.get_single_output_genie(self.hostname,intf_cmd,service)
         interface = None
@@ -91,4 +88,17 @@ class Interfaces():
         except KeyError:
             pass
 
+    def show_interface_counters(self,service):
+        intfc_cmd = "show interface {} counters".format(self.interface)
+        intfc_op = radkit_cli.get_single_output_genie(self.hostname, intfc_cmd, service)
 
+        if intfc_op is not None:
+            intfcounterpath = intfc_op['interface'][self.interface]
+            self.inoctets = intfcounterpath['in']['octets']
+            self.inunicastpackets = intfcounterpath['in']['ucast_pkts']
+            self.inmulticastpackets = intfcounterpath['in']['mcast_pkts']
+            self.inbroadcastpackets = intfcounterpath['in']['bcast_pkts']
+            self.outoctets = intfcounterpath['out']['octets']
+            self.outunicastpackets = intfcounterpath['out']['ucast_pkts']
+            self.outmulticastpackets = intfcounterpath['out']['mcast_pkts']
+            self.outbroadcastpackets = intfcounterpath['out']['bcast_pkts']

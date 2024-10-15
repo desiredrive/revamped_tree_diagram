@@ -1,7 +1,3 @@
-import sys
-
-from ncclient.xml_ import new_ele
-
 import radkit_cli
 from switchingmodules import etherchannel
 from switchingmodules.arp import arp_modules
@@ -110,7 +106,7 @@ class IPCef:
             self.nexthops = nhlist
         else:
             #Empty next hop! (Special Adjacency???)
-            sys.exit("No next hop founds in CEF for prefix {} in vrf {} on Device: {}".format(self.ip,vrf,self.hostname))
+            self.nexthops = None
 
 class physical_recursion():
 

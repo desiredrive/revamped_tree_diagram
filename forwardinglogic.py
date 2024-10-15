@@ -7,7 +7,7 @@ from routingmodules import iprouting
 from routingmodules import cef
 from switchingmodules.interfaces import Interfaces
 from catalystcenterapi import catcapi
-from device_profiler import device
+from device_profiler import Device
 from hostonboarding import endpoint_info
 from securitymodules.ciscotrustsec import cts_endpoint_info
 from securitymodules.ciscotrustsec import cts_rules
@@ -77,7 +77,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service):
     #Profiling Destination XTR:
     #[Object: Destination XTR]
     print ("Profiling device where the Destination is located...\n")
-    dstxtr = device(dstxtrmgmtip,srcxtr.dnac)
+    dstxtr = Device(dstxtrmgmtip,srcxtr.dnac)
     dstxtr.profile_device(service)
     print (pformat(vars(dstxtr), indent=4, width =1, sort_dicts=False))
 
