@@ -1,6 +1,11 @@
 import radkit_cli
 import re
 
+def mroute_health_check(mrouteinfo):
+    #Validations:
+    #1 - Flags; F = Registered via RegStop, P = Prunned, No OIL;
+    return None
+
 class MulticastConfiguration:
     def __init__(self, vrf, device):
         self.hostname = device

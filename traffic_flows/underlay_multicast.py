@@ -1,9 +1,8 @@
 import sys
 import ipaddress
-from os import supports_dir_fd
 from pprint import pformat
 
-from jinja2.sandbox import is_internal_attribute
+from genie.libs.conf.igmp.nxos.igmp_group import IgmpGroup
 
 from catalystcenterapi.catcapi import profile_devices_with_ip
 from ipverifications import (
@@ -13,6 +12,7 @@ from ipverifications import (
     inside_subnet,
 )
 from device_profiler import Device
+from routingmodules.igmp import IGMP
 from routingmodules.lisp import L2LISPInterface, L2LISPConfiguration
 from routingmodules.multicastrouting import (
     MulticastConfiguration, MulticastRoutes
@@ -155,6 +155,8 @@ def anyinterface_pim_status(inputinterface,interface_list,hostname):
                 print("{} is configured for PIM Sparse (or sparse-dense) in device: {}\n".format(inputinterface,hostname))
                 return True
 
+
+
 class UnderlayMulticastDevice:
     def __init__(self,vrf, mgmtip):
         self.mgmtip = mgmtip
@@ -283,6 +285,14 @@ class UnderlayMulticastDevice:
             print("WARNING!: PIM Format Errors found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
         if pimstatistics.pimqueuedrops != 0:
             print("WARNING!: PIM Queue Drops found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
+
+    def igmp_verifications(self,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying IGMP Configuration of L2LISP interface on device: {} ...\n".format(hostname))
+        interface = self.l2lispinterfacestatus.l2lispfinalinterface
+        igmpinterfaces = IGMP(None,hostname)
+        igmpinterfaces.igmp_groups_interface_interface(interface,service)
+        self.igmpinterfaceinfo = igmpinterfaces
 
     def local_star_g(self,service):
         hostname = self.profiled_device.hostname
@@ -523,6 +533,25 @@ def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
 
     #PIM Statistics:
     umcastdevice.pim_statistics(service)
+    #L2LISP IGMP interfaces
+    umcastdevice.igmp_verifications(service)
+    #Is L2LISP enabled for IGMP?
+    try:
+        if umcastdevice.igmpinterfaceinfo.enable is not True:
+            sys.exit("WARNING!: IGMP is not enabled on L2LISP interface: {} on device: {}, this is an unknown condition\n".format(umcastdevice.igmpinterfaceinfo.igmpinterface, hostname))
+        if umcastdevice.igmpinterfaceinfo.dr_this_system is not True:
+            sys.exit("WARNING!: IGMP is enabled on L2LISP interface: {} but it is not the PIM DR on device: {}, this is an unknown condition\n".format(umcastdevice.igmpinterfaceinfo.igmpinterface, hostname))
+        if umcastdevice.igmpinterfaceinfo.query_this_system is not True:
+            sys.exit("WARNING!: IGMP is enabled on L2LISP interface: {} but it is not the IGMP Querier on device: {}, this is an unknown condition\n".format(umcastdevice.igmpinterfaceinfo.igmpinterface, hostname))
+        igmpgroupinterfaces = umcastdevice.igmpinterfaceinfo.joined_group
+        joining_underlay_group = False
+        for groups in igmpgroupinterfaces:
+            if groups in underlay_group:
+                joining_underlay_group = True
+        if joining_underlay_group is False:
+            sys.exit("WARNING!: IGMP is enabled on L2LISP interface: {} but it is not joining the Underlay Group {} on device : {}, this is an unknown condition, use show ip igmp groups command to validate\n".format(umcastdevice.igmpinterfaceinfo.igmpinterface, underlay_group,hostname))
+    except (KeyError,AttributeError,TypeError):
+        sys.exit("WARNING!: IGMP is not working as expected on L2LISP interface: {} on device: {}, this is an unknown condition\n".format(umcastdevice.igmpinterfaceinfo.igmpinterface, hostname))
     #StarG Mroute:
     umcastdevice.local_star_g(service)
     starginfo = umcastdevice.stargmroute
@@ -608,6 +637,8 @@ def underlaymcast_object_print(umcastdevice):
     print(pformat(vars(umcastdevice.mcastrangeinfo), indent=4, width=1, sort_dicts=False))
     print("PIM Statistics on device {}: \n".format(hostname))
     print(pformat(vars(umcastdevice.pimstatistics), indent=4, width=1, sort_dicts=False))
+    print("IGMP Information of L2LISP Interface {} {}: \n".format(umcastdevice.l2lispinterfacestatus.l2lispfinalinterface,hostname))
+    print(pformat(vars(umcastdevice.igmpinterfaceinfo), indent=4, width=1, sort_dicts=False))
     print("*,G Mroute Information on device {}: \n".format(hostname))
     print(umcastdevice.stargmroute)
     print("L2Flood ACL Information on device {}: \n".format(hostname))
@@ -731,3 +762,4 @@ def fhr_validations(fhrdevice,service):
     mfibinfo.mfib_verbose(group,loopback0,service)
     localmfib = mfibinfo
     return localmroute,localmfib,fwdingoils
+

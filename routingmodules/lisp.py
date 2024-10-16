@@ -261,12 +261,14 @@ class L2LISPInterface:
                 sys.exit("WARNING!: {} Interface is DOWN in device: {}".format(l2lispsubintf,self.hostname))
             self.l2lispparenstatus = l2lisp0interface
             self.l2lispsubinterfacestatus = l2lispsubinterface
+            self.l2lispfinalinterface = l2lispsubinterface.interface
         if l2lispparenttype == 'Tunnel':
             tunnelinterface = Interfaces(l2lispparentintf, self.hostname)
             tunnelinterface.show_interface(service)
             if tunnelinterface.linestate != 'up':
                 sys.exit("WARNING!: l2lispparentintf Interface is DOWN in device: {}".format(self.hostname))
             self.l2lispparenstatus = tunnelinterface
+            self.l2lispfinalinterface = tunnelinterface.interface
 
         #L2LISP statistics
 
