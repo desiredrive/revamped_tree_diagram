@@ -19,6 +19,7 @@ class EdgeNodeClassifier:
         print("Verifying Mac Address: {} ...\n".format(hostname))
         mac_learning_info = mac_learning(hostname)
         interface = self.client_interface
+        #Change
         mac_learning_info.mac_learning_interface(interface, vlan, service)
         self.mac_learning_info = mac_learning_info
 
