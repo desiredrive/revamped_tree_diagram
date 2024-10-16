@@ -4,7 +4,6 @@ import radkit_cli
 from device_profiler import Device
 from switchingmodules.maclearning import mac_learning
 
-
 class EdgeNodeClassifier:
     def __init__(self, mgmtip, interface):
         self.mgmtip = mgmtip
@@ -18,12 +17,13 @@ class EdgeNodeClassifier:
     def maclearning(self, vlan, service):
         hostname = self.profiled_device.hostname
         print("Verifying Mac Address: {} ...\n".format(hostname))
-        mac_learning_info = mac_learning(self, hostname)
-        mac_learning.mac_learning_interface(self.client_interface, vlan, service)
+        mac_learning_info = mac_learning(hostname)
+        interface = self.client_interface
+        mac_learning_info.mac_learning_interface(interface, vlan, service)
         self.mac_learning_info = mac_learning_info
 
 
-def edge_node_profilier(mgmtip, interface, catc_name, vlan, service):
+def edge_node_profiler(mgmtip, interface, catc_name, vlan, service):
         print("Edge Node Validation...\n")
 
         edge_node_device = EdgeNodeClassifier(mgmtip, interface)
