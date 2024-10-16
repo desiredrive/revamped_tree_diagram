@@ -103,3 +103,15 @@ class Interfaces():
             self.outunicastpackets = intfcounterpath['out']['ucast_pkts']
             self.outmulticastpackets = intfcounterpath['out']['mcast_pkts']
             self.outbroadcastpackets = intfcounterpath['out']['bcast_pkts']
+
+    def show_controllers_ethernet_controllers(self,service):
+        ethcon_cmd = "show controllers ethernet-controller {}".format(self.interface)
+        ethcon_op = radkit_cli.get_single_output_genie(self.hostname,ethcon_cmd,service)
+        if ethcon_op is not None:
+            ethpath = ethcon_op['interface']
+            for interface in ethpath:
+                interfacename = interface
+            new_path = ethpath[interfacename]
+            self.ethcontrollers_info = new_path
+        else:
+            self.ethcontrollers_info = None

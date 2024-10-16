@@ -660,23 +660,8 @@ def fhr_lhr_validations(fhrdevice,lhrdevice,catc,service):
     return consistency_check
 
 def fhr_validations(fhrdevice,service):
-    '''
-        FHR Validations
-    -) Registration Validation (Stuck in Register?, PIM Tunnel, Recahability, Reg Counters)
-        -) S,G Creation based on traffic:
-            what constitutes traffic? - BUM traffic traversing L2 interfaces in the L2LISP domain/VLAN
-                - STP verification
-                - AcX exclusion
-    -) S,G Validation
-    -) S,G Counters
-    -) S,G OIL State
-    -) S,G Counters
-    -) MFIB Equivalents
-    -) Is it SPT already?
-    '''
+
     print("Validating FHR L2 Flooding Information...\n")
-    # Starting Underlay Multicast Flows!
-    # Underlay Multicast Validations for FHR:
     # Is this device really an FHR? What constitutes an FHR?
         #PIM Tunnel, Loopback 0 PIM enablement, Broadcast Underlay and more are covered by main validations (single device underlay profiling)
         #An FHR is defined by a device that is able to create an S,G based on traffic; this criteria can use a source VLAN to determine if there are any active ports sending BUM traffic.
@@ -687,9 +672,8 @@ def fhr_validations(fhrdevice,service):
     if len(stpinterfaces) != 0:
         for interface in stpinterfaces:
             interfacecounters = Interfaces(interface,hostname)
-            interfacecounters.show_interface_counters(service)
-            print(pformat(vars(interfacecounters), indent=4, width=1, sort_dicts=False))
-            bcastcounters = interfacecounters.inbroadcastpackets
+            interfacecounters.show_controllers_ethernet_controllers(service)
+            bcastcounters = interfacecounters.ethcontrollers_info['receive']['broadcast_frames']
             if bcastcounters > 1:
                 print ("Incoming broadcast packets found in Interface {}, total incoming broadcasts: {} on device {}\n".format(interface,bcastcounters,hostname))
                 break
@@ -708,31 +692,42 @@ def fhr_validations(fhrdevice,service):
         print("WARNING!: Verify conditions for defect: CSCwf12353 \n")
         print("Try removing \"broadcast-underlay {}\" from the L2LISP instance {} and re-configure it again on device: {}".format(group,iid,hostname))
         sys.exit("\n")
+    elif localmroute.mrouteinfo[0]['source'] == "*":
+        print ("WARNING!: No Local S,G found!, expecting an S,G of {},{} on device: {}\n".format(loopback0,group,hostname))
+        print("WARNING!: Verify conditions for defect: CSCwf12353 \n")
+        print("Try removing \"broadcast-underlay {}\" from the L2LISP instance {} and re-configure it again on device: {}".format(group,iid,hostname))
+        sys.exit("\n")
     else:
         print("Found Local S,G of {},{} on device: {}\n".format(loopback0, group,hostname))
         #RPF is Null0?
-    rpfinterface = localmroute.mrouteinfo['incominginterface']
+    rpfinterface = localmroute.mrouteinfo[0]['incominginterface']
     if rpfinterface == 'Null0':
         print("Local S,G of {},{} RPF interface is Null0, which is expected, on device: {}\n".format(loopback0, group, hostname))
     else:
         print("WARNING!: Local S,G of {},{} RPF interface is {}, expecting Null0, on device: {}\n ".format(loopback0, group, rpfinterface, hostname))
         sys.exit("Verify RPF to the Loopack0 IP, is there an static mroute pointing to somewhere else?")
         #Is stuck in register?
-    mrouteflags = localmroute.mrouteinfo['flags']
+    mrouteflags = localmroute.mrouteinfo[0]['flags']
     registerflag = ['F']
     if any(x in mrouteflags for x in registerflag):
         print ("Local S,G for {},{} is not stuck in Registering, F flag set on device {}\n".format(loopback0,group, hostname))
     else:
         print ("WARNING: Local S,G for {},{} is stuck in Registering, F flag NOT set on device {}\n".format(loopback0,group, hostname))
         #What are the OILs, are there any?
-    mrouteoils = localmroute.mrouteinfo['outgoinginterfacelist']
+    mrouteoils = localmroute.mrouteinfo[0]['outgoinginterfacelist']
     if len(mrouteoils) == 0:
         print("WARNING: Local S,G for {},{} has no OILs on device {}\n".format(loopback0,group,hostname))
         fwdingoils = False
     else:
+        fwdingoils = True
         print("Local S,G for {},{} has OILs on device {}\n".format(loopback0, group, hostname))
-        print("OILs for the Local S,G:")
+        print("OILs for the Local S,G:\n")
         for oil in mrouteoils:
             print (oil)
-    localmfib = None
-    return localmroute,localmfib
+
+        #MFIB validation
+    #MFIB  Verbosity, cannot be used for the *,G as the output is too big, MFIB cannot specify the *,G
+    mfibinfo = MulticastRoutes(None,hostname)
+    mfibinfo.mfib_verbose(group,loopback0,service)
+    localmfib = mfibinfo
+    return localmroute,localmfib,fwdingoils

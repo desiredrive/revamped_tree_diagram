@@ -130,3 +130,57 @@ class MulticastRoutes:
                 self.mrouteinfo = mroutes
             else:
                 self.mrouteinfo = None
+
+    def mfib_verbose(self,group,source,service):
+        if self.vrf == "default":
+            vrf_mode = ""
+            vrf = 'Default'
+        elif self.vrf is None:
+            vrf_mode = ""
+            vrf = 'Default'
+        else:
+            vrf = self.vrf
+            vrf_mode = "vrf "+self.vrf+" "
+
+        mfibverb_cmd = "show ip mfib {} {} {} verbose".format(vrf_mode,group,source)
+        mfibverb_output = radkit_cli.get_single_output_genie(self.hostname,mfibverb_cmd,service)
+
+        if mfibverb_output is not None:
+            mfib_main_path = mfibverb_output['vrf'][vrf]['address_family']['ipv4']
+            if len(mfib_main_path) == 0:
+                self.mfibstate = False
+            else:
+                self.mfibstate = True
+                mfib_main_path = mfib_main_path['multicast_group'][group]['source_address'][source]
+                self.mfibflags = mfib_main_path['flags']
+                self.sw_packets_per_second = mfib_main_path['sw_packets_per_second']
+                self.sw_packet_count = mfib_main_path['sw_packet_count']
+                self.sw_rpf_failed = mfib_main_path['sw_rpf_failed']
+                self.sw_other_drops = mfib_main_path['sw_other_drops']
+                self.hw_packet_count = mfib_main_path['hw_packet_count']
+                self.hw_packets_per_second = mfib_main_path['hw_packets_per_second']
+                self.hw_rpf_failed = mfib_main_path['hw_rpf_failed']
+                self.hw_other_drops = mfib_main_path['hw_other_drops']
+                iifpath = mfib_main_path['incoming_interfaces']
+                iifinterface = None
+                for interface in iifpath:
+                    iifinterface = interface
+                self.iif = iifinterface
+                self.iifflags = mfib_main_path['incoming_interfaces'][iifinterface]['ingress_flags']
+                oilpath = mfib_main_path['outgoing_interfaces']
+                oils = []
+                for interface in oilpath:
+                    oilinterface = interface
+                    egress_flags = mfib_main_path['outgoing_interfaces'][oilinterface]['egress_flags']
+                    egress_adj_mac = mfib_main_path['outgoing_interfaces'][oilinterface]['egress_adj_mac']
+                    adjacency = egress_adj_mac.split(":")[1].strip()
+                    oilinfo = {
+                        'interface' : oilinterface,
+                        'oilflags' : egress_flags,
+                        'adjacency' : adjacency
+                    }
+                    oils.append(oilinfo)
+                self.oils = oils
+
+
+
