@@ -763,3 +763,7 @@ def fhr_validations(fhrdevice,service):
     localmfib = mfibinfo
     return localmroute,localmfib,fwdingoils
 
+def rp_validations(fhrdevice,service):
+
+    #Step 1: Is the S,G in the FHR registered?
+    return None
