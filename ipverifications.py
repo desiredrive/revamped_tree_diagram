@@ -136,8 +136,12 @@ def mac_address_validator(mac: str):
             macbytes = binascii.unhexlify(i)
         first_octet_bits = "{0:b}".format(macbytes[0])
         last_bit = (first_octet_bits[-1])
+        all_bits = ""
+        for j in range (0,5):
+            octecbits = "{0:b}".format(macbytes[j])
+            all_bits = all_bits+octecbits
         if int(last_bit) == 1:
-            if i == 'ffffffffffff':
+            if all_bits == '1111111111111111111111111111111111111111':
                 print("MAC Address {} is a Broadcast MAC address".format(i))
                 mactype = 'Broadcast'
             else:

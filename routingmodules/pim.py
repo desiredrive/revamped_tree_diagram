@@ -1,4 +1,3 @@
-from pyats.clean.utils import parse_cli_args
 
 import radkit_cli
 import re

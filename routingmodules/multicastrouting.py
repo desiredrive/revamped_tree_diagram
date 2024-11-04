@@ -177,8 +177,11 @@ class MulticastRoutes:
                 for interface in oilpath:
                     oilinterface = interface
                     egress_flags = mfib_main_path['outgoing_interfaces'][oilinterface]['egress_flags']
-                    egress_adj_mac = mfib_main_path['outgoing_interfaces'][oilinterface]['egress_adj_mac']
-                    adjacency = egress_adj_mac.split(":")[1].strip()
+                    try:
+                        egress_adj_mac = mfib_main_path['outgoing_interfaces'][oilinterface]['egress_adj_mac']
+                        adjacency = egress_adj_mac.split(":")[1].strip()
+                    except (KeyError,TypeError,IndexError):
+                        adjacency = None
                     oilinfo = {
                         'interface' : oilinterface,
                         'oilflags' : egress_flags,

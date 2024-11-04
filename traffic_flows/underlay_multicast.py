@@ -2,8 +2,6 @@ import sys
 import ipaddress
 from pprint import pformat
 
-from genie.libs.conf.igmp.nxos.igmp_group import IgmpGroup
-
 from catalystcenterapi.catcapi import profile_devices_with_ip
 from ipverifications import (
     mac_address_validator,
@@ -154,8 +152,6 @@ def anyinterface_pim_status(inputinterface,interface_list,hostname):
             else:
                 print("{} is configured for PIM Sparse (or sparse-dense) in device: {}\n".format(inputinterface,hostname))
                 return True
-
-
 
 class UnderlayMulticastDevice:
     def __init__(self,vrf, mgmtip):
@@ -567,6 +563,7 @@ def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
             print ("WARNING!: *,G Mroute Flags are not SJCF (Sparse-Mode, Join SPT and Connected)\n")
         #IIF Verification: It is already implicit on previous checks
         #OIL Verification: Is the L2LISP or Tunnel interface listed on the OIL?
+        l2lispinterface = None
         if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'L2LISP0':
             l2lispinterface = umcastdevice.l2lispinterfacestatus.l2lispsubinterfacestatus.interface
         if umcastdevice.l2lispinterfacestatus.l2lispparenttype == 'Tunnel':
@@ -579,7 +576,7 @@ def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
                 oilfound = True
         if oilfound is not True:
             print("WARNING!: L2LISP/Tunnel interface not found as OIL for the *,G Mroute on device: {}, verifying L2LISP PIM interface status".format(l2lispinterface,hostname))
-            oilpimstatus = anyinterface_pim_status(l2lispinterface,interface_list)
+            oilpimstatus = anyinterface_pim_status(l2lispinterface,interface_list,hostname)
             if oilpimstatus is not True:
                 sys.exit("WARNING!: Device {} does not have {} as PIM enabled\n".format(hostname,l2lispinterface))
             else:
@@ -763,7 +760,81 @@ def fhr_validations(fhrdevice,service):
     localmfib = mfibinfo
     return localmroute,localmfib,fwdingoils
 
-def rp_validations(fhrdevice,service):
+def lhr_sg_validations(fhrdevice,lhrdevice,service):
 
+    print("Validating LHR L2 Flooding Information...\n")
+    # All L2 Flooding Enabled devices are considered LHRs. Skipping PIM Encapsulation information, but S,G states.
+        #An LHR is defined by a device that expects traffic from the FHR in the form of an S,G;
+    hostname = lhrdevice.profiled_device.hostname
+    #Step 1 Verify if the S,G is created on the device:
+    #RPF must be a PIM neighbor
+    #If the S,G exists, it must have the L2LISP interface as OIL
+    # Flags: J and T (SPT Bit and Traffic Triggered)
+    # How many packets average? Bigger than 0?
+    #Hardware Forwarded bigger than SW forwarding?
+    loopback0 = fhrdevice.profiled_device.loopback
+    group = fhrdevice.l2floodingproperties.broadcastunderlay
+    remotemroute = MulticastRoutes(None,hostname)
+    remotemroute.mroute_get(group,loopback0,service)
+        #It exists?
+    if remotemroute.mrouteinfo is None:
+        print ("WARNING!: No Remote S,G found!, expecting an S,G of {},{} on device: {}".format(loopback0,group,hostname))
+        print("Starting Shared Tree validations for Underlay Multicast")
+        return None, None, None
+    elif remotemroute.mrouteinfo[0]['source'] == "*":
+        print ("WARNING!: No Remote S,G found!, expecting an S,G of {},{} on device: {}".format(loopback0,group,hostname))
+        print("Starting Shared Tree validations for Underlay Multicast")
+        return None,None,None
+    else:
+        print("Found Local S,G of {},{} on device: {}\n".format(loopback0, group,hostname))
+        #RPF is PIM neighbor?
+        rpfinterface = remotemroute.mrouteinfo[0]['incominginterface']
+        pimneighbors = lhrdevice.pimneighbors.pimneighbors
+        is_rpf_pimintf = False
+        for pimneighbor in pimneighbors:
+            currentinterface = pimneighbor['interface']
+            if rpfinterface == currentinterface:
+                is_rpf_pimintf = True
+        if is_rpf_pimintf is False:
+            sys.exit("RPF Interface for S,G Entry {},{} on device is {} which is not a PIM neighbor on device: {}, verify RPF resolution for source {}".format(loopback0,group,rpfinterface,hostname,loopback0))
+
+        #Correct Flags?
+        mrouteflags = remotemroute.mrouteinfo[0]['flags']
+        sptflags = ['J','T']
+        if all(x in mrouteflags for x in sptflags):
+            print ("Remote S,G for {},{} has correct flags for this mroute: {}  on device {}\n".format(loopback0,group, mrouteflags, hostname))
+        else:
+            print ("Remote S,G for {},{} is missing the expected JT flags , flags for this mroute are: {}  on device {}\n".format(loopback0,group, mrouteflags, hostname))
+        #L2LISP or Tunnel interface in OIL?
+        expectedoil = lhrdevice.l2lispinterfacestatus.l2lispfinalinterface
+        mrouteoils = remotemroute.mrouteinfo[0]['outgoinginterfacelist']
+        if len(mrouteoils) == 0:
+            print("WARNING: Remote S,G for {},{} has no OILs on device {}\n".format(loopback0,group,hostname))
+            fwdingoils = False
+        else:
+            fwdingoils = True
+            print("Remote S,G for {},{} has OILs on device {}\n".format(loopback0, group, hostname))
+            l2lispinoil = False
+            for oil in mrouteoils:
+                currentoilinterface = oil['interface']
+                if currentoilinterface == expectedoil:
+                    l2lispinoil = True
+            if l2lispinoil is False:
+                sys.exit("Remote S,G for {},{} has interfaces in the OIL, but not the expected interface {}, on device: {} this is an unexpected error, outside of the scope of this script".format(loopback0,group,expectedoil,hostname))
+         #S,G Counters
+        mfibinfo = MulticastRoutes(None,hostname)
+        mfibinfo.mfib_verbose(group,loopback0,service)
+        remotemfib = mfibinfo
+        mfibswcounters = remotemfib.sw_packet_count
+        mfibhwcounters = remotemfib.hw_packet_count
+        #Hw counters must be greater than sw counters:
+        if int(mfibhwcounters) >= int(mfibswcounters):
+            print ("Remote S,G for {},{} has registered {} packets in hardware and {} in software on device: {}, which is expected".format(loopback0,group,mfibhwcounters,mfibswcounters,hostname))
+        else:
+            print("Remote S,G for {},{} has registered {} packets in software, more than total {} in hardware, can be unexpected, confirm that HW counters are increasing and not SW, otherwise this is unexpected and outside the scope of this script".format(loopback0, group, mfibhwcounters, mfibswcounters))
+
+        return remotemroute,remotemfib,fwdingoils
+
+def rp_validations(fhrdevice,service):
     #Step 1: Is the S,G in the FHR registered?
     return None
