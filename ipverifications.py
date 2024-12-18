@@ -85,7 +85,7 @@ def ip_validator_input (ip_type: str):
         else:
             #valid IP input
             break
-    return ip_address
+    return str(ip_address)
 
 #Function to Validate if the IP is a valid IP address (any type) as string
 def ip_validator(ip_type: str):

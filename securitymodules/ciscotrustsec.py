@@ -260,7 +260,18 @@ class cts_rules():
                     self.srcsgt = sgt
                     self.dstsgt = dgt
                     self.isdefaultrule = True
-                    self.rbacl = ctsrbacpath[index]['action_policy']+" IP"
+                    try:
+                        self.rbacl = ctsrbacpath[index]['action_policy']+" IP"
+                    except:
+                        matches = ["#"]
+                        rbacls = ctsrbacpath[index]['policy_groups']
+                        for j in rbacls:
+                            if not any(x in j for x in matches):
+                                try:
+                                    rbacl = re.compile(".*(?=-[0-9]+)").search(j).group().strip()
+                                except:
+                                    rbacl = None
+                        self.rbacl = rbacl
 
     def cts_rbac_rbacls(self, rbacl, service):
         rbaclcmd = "show cts rbacl \"{}\" | se ACEs".format(rbacl)

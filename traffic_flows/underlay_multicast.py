@@ -26,14 +26,6 @@ from switchingmodules.interfaces import Interfaces
 '''
 LHR Validations:
 
--) Main validations
--) FHR Routes exist already? - Jump to SPT/SG Validations
--) PIM Rules (Rule 1,Rule 2,
--) *,G Creation and RPF
--) *,G Counters
--) *,G Flags (Rule 8)
--) MFIB equivalents
--) Identification of RPF interface
 -) Identification of potential CDP neighbor (optional); mapping nexthop interface with L3 information
 -) Identification of RPF neighbor (Lo0 to Device name to Radkit Inventory)
 -) Identification of RPF upstream interface (CDP and L3)
