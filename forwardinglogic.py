@@ -11,6 +11,7 @@ from device_profiler import Device
 from hostonboarding import endpoint_info
 from securitymodules.ciscotrustsec import cts_endpoint_info
 from securitymodules.ciscotrustsec import cts_rules
+from radkit_cli import logging_info,logging_error,logging_warning
 
 from pprint import pformat
 
@@ -30,23 +31,31 @@ Are source and destination in the same subnet? If Yes:
         if Flood ARPnd disabled : L2MAC and L2AR are mandatory
         if Flood ARPnd enabled: L2MAC is mandatory, L2AR is relaxed
 '''
-def flowelection(epinfo, dstip):
+def flowelection(epinfo, dstip,step):
+    process = "Forwarding-Logic"
     issamesubnet=ipverifications.subnet_validator(epinfo.sourceip,dstip,epinfo.mask)
     if issamesubnet==False:
-        print ("Devices in different Subnet, Routing Flow\n")
+        logging_info(step, process, "Main",
+                      "Devices in different Subnet, Routing Flow")
+        #print ("Devices in different Subnet, Routing Flow\n")
         return ("L3")
     if issamesubnet==True:
-        print ("Devices in the same Subnet, starting Switching Flow \n")
+        logging_info(step, process, "Main",
+                      "Devices in the same Subnet, starting Switching Flow")
+        #print ("Devices in the same Subnet, starting Switching Flow \n")
         return ("L2")
 
-def device_flow(flow_type, sourcextr, sourceep, destip, service):
+def device_flow(flow_type, sourcextr, sourceep, destip, service,step):
+    process = "Forwarding-Logic"
     if flow_type == "L2":
-        print("Determining if flow is Inter-XTR or Intra-XTR")
+        logging_info(step, process, "Main",
+                      "Determining if flow is Inter-XTR or Intra-XTR")
+        #print("Determining if flow is Inter-XTR or Intra-XTR")
         
         #Step 1: Profile L2 LISP parameters for the Source Endpoint
         l2lispsrc = lisp.l2lisp_info()
         l2lispsrc.l2_lisp_parameters(sourcextr, sourceep, service)
-        print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
+        #print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
 
         #Step 2: Identify AR-Request, find the endpoint in Control Plane 
         l2lisp_ar = traffic_flows.l2_lisp_interxtr.ar_relay_resolution(destip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy)

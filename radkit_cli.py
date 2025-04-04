@@ -4,6 +4,7 @@ import radkit_client
 import sys
 import json
 import radkit_genie
+import logging
 
 from radkit_client.sync import (
     # For the creation of the context.
@@ -15,6 +16,27 @@ from radkit_client.sync import (
     direct_login,
 )
 
+logging.basicConfig(
+    format='%(asctime)s %(levelname)-1s %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S',
+    #filename="script_logs.txt"
+    )
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+def logging_info(step,process,device,message):
+   string = "[STEP:{}][{}][{}]: {}".format(step,device,process,message)
+   logger.info(string)
+
+def logging_error(step,process,device,message):
+    string = "[STEP: {}][{}][{}]: {}".format(step,device,process,message)
+    logging.error(string)
+
+def logging_warning(step,process,device,message):
+    string = "[STEP: {}][{}][{}]: {}".format(step,device,process,message)
+    logging.warning(string)
 
 def main(service: radkit_client.Service):
     """
@@ -33,6 +55,11 @@ def append_to_logging_file(content):
     f.write(content)
     f.write("\n----------------------------------------------------------------------------------------------------------------------------\n")
     f.close()
+
+
+def radkit_version(service):
+    radkit_version = service.version
+    return radkit_version
 
 def radkit_login(email: str, domain: str, serial: str):
     # Connect to the given service, using SSO login.

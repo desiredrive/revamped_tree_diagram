@@ -230,7 +230,7 @@ class L2LISPInterface:
 
         #VLAN Status and L2LISP type
         vlanstatus = VlanInformation(self.vlan,self.hostname)
-        vlanstatus.vlanbrief(service)
+        vlanstatus.vlanbrief_manual(service)
         l2lispparentintf = None
         l2lispparenttype = None
         l2lispiid = None
