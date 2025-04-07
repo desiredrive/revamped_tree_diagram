@@ -73,7 +73,7 @@ def validate_cp_infabric(cpmgmtip,sitehierarchy,catc,service,step):
     api_response = radkit_cli.get_catc_api(catc,api_url,service)
     api_status = api_response['status']
     if api_status == "failed":
-        logging_error(step, "CatalystCenterAPI", catc,
+        logging_error(step, "CatalystCenterAPI",None, catc,
                       "WARNING!: Could not find the Control Plane with Management IP {} in Catalyst Center".format(cpmgmtip))
         sys.exit("WARNING!: Could not find the Control Plane with Management IP {} in Catalyst Center".format(cpmgmtip))
     else:
@@ -83,10 +83,12 @@ def validate_cp_infabric(cpmgmtip,sitehierarchy,catc,service,step):
     #Validating if the device is inside the fabric site: 
     split_string = cp_location.split(sitehierarchy)
     if len(split_string) > 1:
-        print ("Device {} located in {} is part of the fabric site {}".format(cp_name,cp_location,sitehierarchy))
+        logging_info(step, "CatalystCenterAPI",None, catc,
+                      "Device {} located in {} is part of the fabric site {}".format(cp_name,cp_location,sitehierarchy))
+        #print ("Device {} located in {} is part of the fabric site {}".format(cp_name,cp_location,sitehierarchy))
         return True
     else:
-        logging_error(step, "CatalystCenterAPI", catc,
+        logging_error(step, "CatalystCenterAPI",None, catc,
                       "Could not determine if device {} located in {} is part of the fabric site {}".format(cp_name,cp_location,sitehierarchy))
         sys.exit("Could not determine if device {} located in {} is part of the fabric site {}".format(cp_name,cp_location,sitehierarchy))
     

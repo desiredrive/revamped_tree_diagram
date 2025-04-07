@@ -33,14 +33,15 @@ Are source and destination in the same subnet? If Yes:
 '''
 def flowelection(epinfo, dstip,step):
     process = "Forwarding-Logic"
+    subprocess = "[Flow-Election]"
     issamesubnet=ipverifications.subnet_validator(epinfo.sourceip,dstip,epinfo.mask)
     if issamesubnet==False:
-        logging_info(step, process, "Main",
+        logging_info(step, process, subprocess,"Main",
                       "Devices in different Subnet, Routing Flow")
         #print ("Devices in different Subnet, Routing Flow\n")
         return ("L3")
     if issamesubnet==True:
-        logging_info(step, process, "Main",
+        logging_info(step, process, subprocess,"Main",
                       "Devices in the same Subnet, starting Switching Flow")
         #print ("Devices in the same Subnet, starting Switching Flow \n")
         return ("L2")
@@ -48,18 +49,29 @@ def flowelection(epinfo, dstip,step):
 def device_flow(flow_type, sourcextr, sourceep, destip, service,step):
     process = "Forwarding-Logic"
     if flow_type == "L2":
-        logging_info(step, process, "Main",
+        subprocess = "[L2]"
+        logging_info(step, process, subprocess,"Main",
                       "Determining if flow is Inter-XTR or Intra-XTR")
         #print("Determining if flow is Inter-XTR or Intra-XTR")
         
         #Step 1: Profile L2 LISP parameters for the Source Endpoint
         l2lispsrc = lisp.l2lisp_info()
         l2lispsrc.l2_lisp_parameters(sourcextr, sourceep, service)
+        hostname = sourcextr.hostname
+        collection_summary = "VLAN: {}, L2VNI: {}, MAC: {}, In L2DynEID?: {}, In L2DB: {}, , L2CPs: {}, Signal-Supress: {}".format(l2lispsrc.sourcevlan,l2lispsrc.l2lispiid, l2lispsrc.sourcemac,l2lispsrc.l2dynstate,l2lispsrc.l2lispdbstate,l2lispsrc.l2cps,l2lispsrc.l2signalsupressstate)
+        string = "Result: Success"
+        logging_info(step, process, subprocess, hostname, collection_summary)
+        logging_info(step, process, subprocess, hostname, string)
         #print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
+        step = step+1
+
 
         #Step 2: Identify AR-Request, find the endpoint in Control Plane 
-        l2lisp_ar = traffic_flows.l2_lisp_interxtr.ar_relay_resolution(destip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy)
-
+        l2lisp_ar = traffic_flows.l2_lisp_interxtr.ar_relay_resolution(destip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy,step)
+        collection_summary = "EID: {}, L2VNI: {}, ETRs: {}, AR-Binding: {}, Protocol: {}, CP: {}, AuthenticationFailures: {}".format(l2lispsrc.sourcevlan,l2lispsrc.l2lispiid, l2lispsrc.sourcemac,l2lispsrc.l2dynstate,l2lispsrc.l2lispdbstate,l2lispsrc.l2cps,l2lispsrc.l2signalsupressstate)
+        string = "Result: Success"
+        logging_info(step, process, subprocess, hostname, collection_summary)
+        logging_info(step, process, subprocess, hostname, string)
         #Step 3: Identify L2 EID / MAC-Address, extract destination RLOC
         l2lisp_mac = traffic_flows.l2_lisp_interxtr.mac_rloc_resolution(l2lisp_ar[0],l2lispsrc.l2lispiid,l2lisp_ar[1],service)
 

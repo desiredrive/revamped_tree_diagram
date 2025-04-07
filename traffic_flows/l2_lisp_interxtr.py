@@ -5,7 +5,7 @@ from routingmodules.lisp import l2_map_cache
 from pprint import pformat
 from catalystcenterapi.catcapi import get_device_from_lo0, get_network_device_byuuid, validate_cp_infabric
 
-def ar_relay_resolution(dstip, iid, l2cps, service, dnac, fabricsite):
+def ar_relay_resolution(dstip, iid, l2cps, service, dnac, fabricsite,step):
 
         #Step 1, identify Control Planes
         device_uuids = []
@@ -21,7 +21,7 @@ def ar_relay_resolution(dstip, iid, l2cps, service, dnac, fabricsite):
             cpmgmtip = get_network_device_byuuid(i,dnac,service)
             if cpmgmtip is None:
                 continue
-            is_local = validate_cp_infabric(cpmgmtip,fabricsite,dnac,service)
+            is_local = validate_cp_infabric(cpmgmtip,fabricsite,dnac,service,step)
             if is_local is True:
                 local_cps_mgmtips.append(cpmgmtip)
 
@@ -38,17 +38,17 @@ def ar_relay_resolution(dstip, iid, l2cps, service, dnac, fabricsite):
         macs = []
         etrs = []
 
-        print ("Address-Resolution Binding results: \n")
+        #print ("Address-Resolution Binding results: \n")
         for i in address_resolution:
             try:
                 mac = i.arbinding
                 etr = i.etrs
-                print (pformat(vars(i), indent=4, width =1, sort_dicts=False))
+                #print (pformat(vars(i), indent=4, width =1, sort_dicts=False))
                 macs.append(mac)
                 etrs.append(etr)
             except AttributeError:
                 pass
-        print ("\n")
+        #print ("\n")
         macs = list(set(macs))
         macs = [x for x in macs if x is not None]
         if len (macs) > 1:

@@ -5,6 +5,7 @@ import radkit_cli
 from switchingmodules.interfaces import Interfaces
 from switchingmodules.spanning_tree import SpanningTree
 from switchingmodules.vlan import VlanInformation
+from radkit_cli import logging_info,logging_error,logging_warning
 
 
 class lisp_route_import:
@@ -44,13 +45,18 @@ class controlplane_eid:
         self.queriedcp = queriedcp #What is the IP address of this queried CP?
 
     def address_q(self, service):
+            hostname = self.queriedcp
+            process = "LISP"
+            subprocess = "[Control-Plane]"
             cmd = "sh lisp instance-id {} ethernet server address-resolution {}".format(self.iid, self.eid)
             cp_server_output = radkit_cli.get_single_output_genie(self.queriedcp,cmd,service)
             #Address resolution is always registered using TCP
             self.protocol = "TCP"            
             #Parsing:
             if cp_server_output == None:
-                print("ARP Registration not found in CP {}".format(self.queriedcp))
+                logging_info("X",process,subprocess,hostname,
+                             "ARP Registration not found in CP {}".format(self.queriedcp))
+                #print("ARP Registration not found in CP {}".format(self.queriedcp))
             else:
                 response_path = cp_server_output['lisp_id'][0]['instance_id'][self.iid]
                 host = self.eid+"/32"
@@ -67,7 +73,9 @@ class controlplane_eid:
                 self.arbinding = host_path['hardware_address'] 
 
     def ethernet_q(self, service):
-
+        hostname = self.hostname
+        process = "LISP"
+        subprocess = "[Control-Plane]"
         wlc_cmd = "show run | se set WLC"
         wlc_op = radkit_cli.get_any_single_output(self.queriedcp,wlc_cmd,service)
         wlcs = []
@@ -83,7 +91,9 @@ class controlplane_eid:
         self.arbinding = "NA"
 
         if cp_server_output == None:
-            print("MAC Registration not found in CP {}".format(self.queriedcp))
+            logging_info("X", process, subprocess, hostname,
+                         "MAC Registration not found in CP {}".format(self.queriedcp))
+            #print("MAC Registration not found in CP {}".format(self.queriedcp))
         try:
             for line in cp_server_output.splitlines():
                 if "ETR" in line:
@@ -103,6 +113,8 @@ class controlplane_eid:
             pass
         etrs_list = [i for i in etr_list if i not in wlcs]
         if len(etrs_list) > 1:
+            logging_error("X", process, subprocess, hostname,
+                          "Multiple RLOCs detected for this L2 Registration, triggering troubleshooting flow\n {}".format(etrs_list))
             sys.exit("Multiple RLOCs detected for this L2 Registration, triggering troubleshooting flow\n {}".format(etrs_list))
         self.etrs = etrs_list
 
@@ -121,13 +133,17 @@ class l2lisp_info:
         if ep.isl3only==False:
 
             #Original Command = "show lisp eid-table vlan {vlan} dynamic-eid summary"
-            print ("Obtaining LISP-related information for L2 IID\n")
+            process = "LISP"
+            subprocess = "[L2LISP]"
+            #print ("Obtaining LISP-related information for L2 IID\n")
             lispdyneidcmd = "show lisp eid-table vlan {} dynamic-eid summary".format(self.sourcevlan)
             lispdyneidop = radkit_cli.get_single_output_genie(hostname,lispdyneidcmd,service)
             instance = lispdyneidop['lisp_id'][0]['instance_id']
             for i in instance:
                 self.l2lispiid = i
             if self.l2lispiid==0:
+                logging_error("X", process, subprocess, hostname,
+                              "L2 LISP IID Not Found, Is this an L3 Only Subnet?")
                 sys.exit("L2 LISP IID Not Found, Is this an L3 Only Subnet?")
             
             #Basic L2 LISP Information
@@ -139,10 +155,14 @@ class l2lisp_info:
             if lispservicepath['itr']['enabled'] == True:
                 self.l2itr = True
             else:
+                logging_error("X", process, subprocess, hostname,
+                              "LISP Ethernet Instance {} is not enabled as ITR!, configure \"itr\" under the global service ethernet instance".format(self.l2lispiid))
                 sys.exit("LISP Ethernet Instance {} is not enabled as ITR!, configure \"itr\" under the global service ethernet instance".format(self.l2lispiid))
             if lispservicepath['etr']['enabled'] == True:
                 self.l2etr = True
             else:
+                logging_error("X", process, subprocess, hostname,
+                              "LISP Ethernet Instance {} is not enabled as ETR!, configure \"etr\" under the global service ethernet instance".format(self.l2lispiid))
                 sys.exit("LISP Ethernet Instance {} is not enabled as ETR!, configure \"etr\" under the global service ethernet instance".format(self.l2lispiid))
 
             self.l2lispsmrmode = lispservicepath['itr']['solicit_map_request']
@@ -175,9 +195,13 @@ class l2lisp_info:
             percentage = (current/limit)*100
 
             if (percentage > threshold):
-                print ("WARNING! Current number of L2 Map-Caches is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
-            else:
-                print ("INFO: Current number of L2 Map-Caches is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+                logging_warning("X", process, subprocess, hostname,
+                              "Current number of L2 Map-Caches is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+                #print ("WARNING! Current number of L2 Map-Caches is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+            #else:
+            #    logging_info("X", process, subprocess, hostname,
+            #                  "Current number of L2 Map-Caches is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+            #    #print ("INFO: Current number of L2 Map-Caches is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
             
             self.l2dbcache_current = lispservicepath['database']['total_database_mapping']
             self.l2dbcache_limit = lispservicepath['database']['dynamic_database']['limit']
@@ -188,19 +212,27 @@ class l2lisp_info:
             percentage = (current/limit)*100
 
             if (percentage > threshold):
-                print ("WARNING! Current number of L2 Database Entries is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
-            else:
-                print ("INFO: Current number of L2 Database Entries is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+                logging_warning("X", process, subprocess, hostname,
+                              "Current number of L2 Database Entries is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+                #print ("WARNING! Current number of L2 Database Entries is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+            #else:
+            #    logging_info("X", process, subprocess, hostname,
+            #                  "Current number of L2 Database Entries is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
+            #    #print ("INFO: Current number of L2 Database Entries is {} , limit is {}, capacity at {}%".format(current,limit,percentage))
 
             self.l2signalsupressstate = lispservicepath['map_cache']['signal_supress']
             if self.l2signalsupressstate is True:
-                sys.exit("WARNING! Signal Supression is enabled, no more map-requests will be created for this instance!")
+                logging_error("X", process, subprocess, hostname,
+                              "WARNING! Signal Supression is enabled, no more map-requests will be created for this instance!")
+                sys.exit("Signal Supression is enabled, no more map-requests will be created for this instance!")
 
             #Searching the source MAC in LISP L2 Dynamic EID
             eids = lispdyneidop['lisp_id'][0]['instance_id'][self.l2lispiid]['dynamic_eids']['Auto-L2-group-8192']['eids']
             if any(x  in self.sourcemac for x in eids):
                 self.l2dynstate = True
             else:
+                logging_error("X", process, subprocess, hostname,
+                              "Source MAC {} in IPDT but not in LISP {} Dynamic-EID, is LISP database-mapping configured for VLAN {}?".format(self.sourcemac,self.l2lispiid,self.sourcevlan))
                 sys.exit("Source MAC {} in IPDT but not in LISP {} Dynamic-EID, is LISP database-mapping configured for VLAN {}?".format(self.sourcemac,self.l2lispiid,self.sourcevlan))
 
             #Searching the source MAC in LISP Database
@@ -211,6 +243,8 @@ class l2lisp_info:
             if any(x  in mac for x in eids):
                 self.l2lispdbstate = True
             else:
+                logging_error("X", process, subprocess, hostname,
+                              "Source MAC {} in IPDT/ DynEID but not in LISP {} Database? Debug LISP".format(self.sourcemac, self.l2lispiid))
                 sys.exit("Source MAC {} in IPDT/ DynEID but not in LISP {} Database? Debug LISP".format(self.sourcemac,self.l2lispiid))
 
 class L2LISPInterface:
@@ -218,11 +252,18 @@ class L2LISPInterface:
         self.hostname = device
         self.vlan = vlan
 
+
     def l2lispinterfacestatus(self,service):
+        process = "LISP"
+        subprocess = "[L2LISPInterface]"
+        hostname = self.hostname
+
         #STP Status for the VLAN
         stpstatus = SpanningTree(self.hostname)
         stpstatus.spt_vlan_active(self.vlan,service)
         if stpstatus is None:
+            logging_error("X", process, subprocess, hostname,
+                          "WARNING!: No Spanning Tree Information for VLAN {} in device: {} , is the VLAN created? There are no active in this VLAN".format(self.vlan, self.hostname))
             sys.exit("WARNING!: No Spanning Tree Information for VLAN {} in device: {} , is the VLAN created? There are no active in this VLAN".format(self.vlan, self.hostname))
         if stpstatus.number_of_fwd_interfaces == 0:
             sys.exit("WARNING!: No FWD enabled ports in VLAN {} in device: {} , are the ports assigned to the correct VLAN and connected?".format(self.vlan, self.hostname))
@@ -244,6 +285,8 @@ class L2LISPInterface:
                 l2lispsubinterfacesplit = port.split(":")
                 l2lispiid = l2lispsubinterfacesplit[1]
         if l2lispparentintf is None:
+            logging_error("X", process, subprocess, hostname,
+                          "WARNING!: No L2LISP (or Tunnel) interface found attached to VLAN {} in device: {}! - This might be the result of an unexpected switchover or ISSU upgrade; remove the affected L2LISP instance and create it again".format(self.vlan, self.hostname))
             sys.exit("WARNING!: No L2LISP (or Tunnel) interface found attached to VLAN {} in device: {}! - This might be the result of an unexpected switchover or ISSU upgrade; remove the affected L2LISP instance and create it again".format(self.vlan, self.hostname))
         self.vlanstatus = vlanstatus
         self.l2lispparenttype = l2lispparenttype
@@ -253,11 +296,15 @@ class L2LISPInterface:
             l2lisp0interface = Interfaces('L2LISP0', self.hostname)
             l2lisp0interface.show_interface(service)
             if l2lisp0interface.linestate != 'up':
+                logging_error("X", process, subprocess, hostname,
+                              "WARNING!: L2LISP Interface is DOWN in device: {}".format(self.hostname))
                 sys.exit("WARNING!: L2LISP Interface is DOWN in device: {}".format(self.hostname))
             l2lispsubintf = "L2LISP0."+l2lispiid
             l2lispsubinterface = Interfaces(l2lispsubintf,self.hostname)
             l2lispsubinterface.show_interface(service)
             if l2lispsubinterface.linestate != 'up':
+                logging_error("X", process, subprocess, hostname,
+                              "WARNING!: {} Interface is DOWN in device: {}".format(l2lispsubintf,self.hostname))
                 sys.exit("WARNING!: {} Interface is DOWN in device: {}".format(l2lispsubintf,self.hostname))
             self.l2lispparenstatus = l2lisp0interface
             self.l2lispsubinterfacestatus = l2lispsubinterface
@@ -266,6 +313,8 @@ class L2LISPInterface:
             tunnelinterface = Interfaces(l2lispparentintf, self.hostname)
             tunnelinterface.show_interface(service)
             if tunnelinterface.linestate != 'up':
+                logging_error("X", process, subprocess, hostname,
+                              "WARNING!: l2lispparentintf Interface is DOWN in device: {}".format(self.hostname))
                 sys.exit("WARNING!: l2lispparentintf Interface is DOWN in device: {}".format(self.hostname))
             self.l2lispparenstatus = tunnelinterface
             self.l2lispfinalinterface = tunnelinterface.interface
@@ -278,6 +327,7 @@ class L2LISPConfiguration:
         self.iid = iid
 
     def l2flooding_configuration(self,service):
+        hostname = self.hostname
         hostname = self.hostname
         iid = self.iid
         matches = ['#', 'show']
@@ -309,12 +359,6 @@ class L2LISPConfiguration:
                         except:
                             pass
 
-
-
-
-
-
-
 class l2_map_cache:
 
     def __init__(self,eid, iid, queriedev):
@@ -323,10 +367,14 @@ class l2_map_cache:
         self.queriedev = queriedev
 
     def l2map(self, service):
+            process = "LISP"
+            subprocess = "[Map-Cache]"
             eid = None
             map_cache_cmd = "sh lisp instance-id {} ethernet map-cache {}".format(self.iid, self.eid)
             map_cache_output = radkit_cli.get_single_output_genie(self.queriedev,map_cache_cmd,service)
             if map_cache_output == None:
+                logging_error("X", process,subprocess,self.queriedev,
+                              "WARNING!: No map-cache found for EID {} in IID {} in device {}, maybe ARP is not working?".format(self.eid, self.iid, self.queriedev))
                 sys.exit("WARNING!: No map-cache found for EID {} in IID {} in device {}, maybe ARP is not working?".format(self.eid, self.iid, self.queriedev) )
             else:
                 mapcache_path = map_cache_output['lisp_id'][0]['instance_id'][self.iid]['eid_prefix']

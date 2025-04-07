@@ -26,16 +26,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-def logging_info(step,process,device,message):
-   string = "[STEP:{}][{}][{}]: {}".format(step,device,process,message)
-   logger.info(string)
+def logging_info(step,process,subprocess,device,message):
+    if subprocess is None:
+        subprocess = ""
+    string = "[STEP:{}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
+    logger.info(string)
 
-def logging_error(step,process,device,message):
-    string = "[STEP: {}][{}][{}]: {}".format(step,device,process,message)
+def logging_error(step,process,subprocess,device,message):
+    if subprocess is None:
+        subprocess = ""
+    string = "[STEP: {}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
     logging.error(string)
 
-def logging_warning(step,process,device,message):
-    string = "[STEP: {}][{}][{}]: {}".format(step,device,process,message)
+def logging_warning(step,process,subprocess,device,message):
+    if subprocess is None:
+        subprocess = ""
+    string = "[STEP: {}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
     logging.warning(string)
 
 def main(service: radkit_client.Service):

@@ -25,9 +25,9 @@ def host_onboarding_success(endpoint,hostname):
     pool_attributes = "VLAN: {}, Gateway: {}, Mask: {}, Helpers: {}, L2Only: {}, L3Only: {}, Flooding: {}, Wireless: {}".format(vlanname,gw,mask,helpers,l2only,l3only,flooding,few)
     collection_summary = "Endpoint: {}, VLAN: {}, MAC: {}, Port: {}, VRF: {}, SISF Status: {}".format(ip,vlan,mac,port,vrf,status)
     string = "Result: Success"
-    logging_info(step, hostname, process, collection_summary)
-    logging_info(step, hostname, process, pool_attributes)
-    logging_info(step, hostname, process, string)
+    logging_info(step, process, None,hostname, collection_summary)
+    logging_info(step, process, None,hostname, pool_attributes)
+    logging_info(step, process, None,hostname, string)
 
 class endpoint_info:
 
@@ -53,6 +53,7 @@ class endpoint_info:
 
     def host_onboarding_validation(self, xtr, service,step):
         process = "Host-Onboarding"
+        subprocess = "[SISF]"
         self.mgmtip = xtr.mgmtip
         self.step = step
         hostname = xtr.hostname
@@ -72,11 +73,11 @@ class endpoint_info:
                     device_entry = ipdt_output['device'][i]
                     ipdt_state = True
         except TypeError:
-            logging_error(step, process, hostname,
+            logging_error(step, process, subprocess,hostname,
                           "No IPDT Entry for host {} !".format(self.sourceip))
             sys.exit("No IPDT Entry for host {} !".format(self.sourceip))
         if ipdt_state != True:
-            logging_error(step, process, hostname,
+            logging_error(step, process, subprocess,hostname,
                           "No IPDT Entry for host {} !".format(self.sourceip))
             sys.exit("No IPDT Entry for host {} !".format(self.sourceip))
 
@@ -89,15 +90,15 @@ class endpoint_info:
 
         ipdt_problematic_conditions = ['DOWN', 'VERIFY', 'STALE', 'UNKNOWN', 'INCOMPLETE']
         if  any(x  in self.ipdtstate for x in ipdt_problematic_conditions):
-            logging_error(step, process, hostname,
+            logging_error(step, process, subprocess,hostname,
                           "SISF/IPDT entry for host {} in device {} is in state {}, resolve this condition first".format(self.sourceip,hostname,self.ipdtstate))
             sys.exit("SISF/IPDT entry for host {} in device {} is in state {}, resolve this condition first".format(self.sourceip,hostname,self.ipdtstate))
 
-        logging_info(step,hostname,process,"Endpoint {} successfully validated in SISF/IPDT in REACHABLE state".format(self.sourceip))
+        logging_info(step,process,subprocess,hostname,"Endpoint {} successfully validated in SISF/IPDT in REACHABLE state".format(self.sourceip))
 
 
         #Retrieving Pool Details...(L2 Only, FEW, L3 Only, L2 Flooding, BVM/Multiple, associated VRF)
-        logging_info(step,hostname,process,"Retrieving Pool Details for VLAN {} in Fabric Site {}".format(self.sourcevlan,fabric_site))
+        logging_info(step,process,None,hostname,"Retrieving Pool Details for VLAN {} in Fabric Site {}".format(self.sourcevlan,fabric_site))
         #print ("Retrieving Pool Details for VLAN {} in Fabric Site {}".format(self.sourcevlan,fabric_site))
         l2vni_api = "/dna/intent/api/v1/sda/layer2VirtualNetworks?fabricId={}&vlanId={}".format(fabric_id,self.sourcevlan)
         l2vni_response = radkit_cli.get_catc_api(dnac, l2vni_api, service)['response'][0]
@@ -122,8 +123,8 @@ class endpoint_info:
         
         if self.isl2only is False:
             #Retrieve Anycast GW Information - CLI Parser : show ip interface (svi)
-            logging_info(step, hostname, process,
-                         "Endpoint found in VLAN {}, not L2 Only, retrieving Anycast Gateway information...\n".format(self.sourcevlan))
+            logging_info(step, process,None, hostname,
+                         "Endpoint found in VLAN {}, not L2 Only, retrieving Anycast Gateway information".format(self.sourcevlan))
             #print ("Endpoint found in VLAN {}, not L2 Only, retrieving Anycast Gateway information...\n".format(self.sourcevlan))
             sviip_cmd = "show ip interface vlan {}".format(self.sourcevlan)
             sviip_op = radkit_cli.get_single_output_genie(hostname, sviip_cmd, service)
@@ -141,7 +142,7 @@ class endpoint_info:
                 if 'CEF' in i:
                     cef_state = True
             if cef_state is False:
-                logging_error(step, process, hostname,
+                logging_error(step, process,"[CEF]", hostname,
                               "CEF is not enabled on interface Vlan{}, is route-cache disabled on the interface?".format(self.sourcevlan))
                 sys.exit("CEF is not enabled on interface Vlan{}, is route-cache disabled on the interface?".format(self.sourcevlan))
             
