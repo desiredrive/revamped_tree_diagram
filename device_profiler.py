@@ -1,15 +1,32 @@
 import re
 import sys
 import radkit_cli
+from radkit_cli import logging_info,logging_error,logging_warning
 from routingmodules import lisp
 
-def rloc_definition(hostname, uuid, dnac, service):
+def collection_success(xtr):
+    hostname = xtr.hostname
+    mgmtip = xtr.mgmtip
+    invstatus = xtr.reachabilitystatus
+    step = xtr.step
+    try:
+        lo0 = xtr.loopback
+    except AttributeError:
+        lo0 = None
+    isfabric = xtr.isfabric
+    collection_summary = "Hostname: {}, MgmtIP: {}, InventoryStatus: {}, Loopback0: {}, Fabric Device: {}".format(hostname,mgmtip,invstatus,lo0,isfabric)
+    string = "Result: Success"
+    logging_info(step, "Device-Profiling", None,hostname, collection_summary)
+    logging_info(step, "Device-Profiling", None,hostname, string)
+
+def rloc_definition(hostname, uuid, dnac, service,step):
      # Verifying if the configured Loopback0 is defined as the SINGLE LISP RLOC.
     loopback_api = "/dna/intent/api/v1/interface/network-device/{}/interface-name?name=Loopback0".format(uuid)
     loopback_response = radkit_cli.get_catc_api(dnac,loopback_api,service)['response']
     
     try:
         if "Not found" in loopback_response['errorCode']:
+            logging_error(step, "Device-Profiling", None,hostname, "Catalyst Center could NOT retrieve Loopback0 information for the device {}".format(hostname))
             sys.exit("Error: Catalyst Center could NOT retrieve Loopback0 information for the device {}".format(hostname))
     except KeyError:
         pass
@@ -17,6 +34,8 @@ def rloc_definition(hostname, uuid, dnac, service):
     #LoopbackState
     lo0state = loopback_response['status']
     if lo0state != 'up':
+        logging_error(step, "Device-Profiling", None,hostname,
+                      "Loopback0 is down at device: {} , unshut the interface".format(hostname))
         sys.exit("Loopback0 is down at device: {} , unshut the interface".format(hostname))
 
     for i in loopback_response['addresses']:
@@ -55,14 +74,20 @@ def rloc_definition(hostname, uuid, dnac, service):
         if len(rlocs) > 1:
             for i in rlocs:
                 if (i['Interface']) != "Loopback0":
+                    logging_error(step, "Device-Profiling",None, hostname,
+                                  "More than 1 RLOC configured under \"router lisp\", unsupported SD-Access configuration, please correct it on device: {}".format(hostname))
                     sys.exit("More than 1 RLOC configured under \"router lisp\", unsupported SD-Access configuration, please correct it on device: {}".format(hostname))
         if loopbackstate is False:
+            logging_error(step, "Device-Profiling", None,hostname,
+                          "RLOC Interface Not Found, Verify if the Loopback0 is being used as RLOC.")
             sys.exit("RLOC Interface Not Found, Verify if the Loopback0 is being used as RLOC.")
     else:
+        logging_error(step, "Device-Profiling",None, hostname,
+                      "Empty output when profiling RLOC information on device: {}, veirfy it's Managed state on Catalyst Center".format(hostname))
         sys.exit("Empty output when profiling RLOC information on device: {}, veirfy it's Managed state on Catalyst Center".format(hostname))
     return (ip,mask,rlocs[0])
 
-def fabric_sites(siteNameHierarchy, dnac, service):
+def fabric_sites(siteNameHierarchy, dnac, service,step):
     sitev2_api = "/dna/intent/api/v2/site?groupNameHierarchy={}".format(siteNameHierarchy)
     fabricsite_api = "/dna/intent/api/v1/sda/fabricSites"
     sitev2_response = radkit_cli.get_catc_api(dnac,sitev2_api,service)['response']
@@ -75,6 +100,8 @@ def fabric_sites(siteNameHierarchy, dnac, service):
             fabric_id = i['id']
             site_id = i['siteId']
     if fabric_id is None:
+        logging_error(step, "Device-Profiling",None, dnac,
+                      "Unable to parse Fabric Site details!!")
         sys.exit("Unable to parse Fabric Site details!!")
     else:
         sitev2_finalsite_api = "/dna/intent/api/v2/site?id={}".format(site_id)
@@ -84,9 +111,10 @@ def fabric_sites(siteNameHierarchy, dnac, service):
 
 class Device:
 
-    def __init__(self,mgmtip,catc):
+    def __init__(self,mgmtip,catc,step):
         self.mgmtip = mgmtip
         self.dnac = catc
+        self.step = step
 
 
     def find_device(self, service):
@@ -103,6 +131,8 @@ class Device:
 
             #If the Device does not exist  
             except (IndexError, ValueError):
+                logging_error(self.step, "Device-Profiling", None,"RADKIT-CLI",
+                              "Device {} not in RADKIT inventory".format(self.mgmtip))
                 sys.exit("Device {} not in RADKIT inventory".format(self.mgmtip)) 
 
 
@@ -117,7 +147,9 @@ class Device:
         fabricdevice_response = radkit_cli.get_catc_api(self.dnac, fabricdevice_api,service)
 
         if fabricdevice_response['status'] == "failed":
-            print ("WARNING!: Device {} is not a fabric device".format(self.hostname))
+            logging_warning(self.step, "Device-Profiling", self.dnac,
+                          "WARNING!: Device {} is not a fabric device".format(self.hostname))
+            #print ("WARNING!: Device {} is not a fabric device".format(self.hostname))
 
         self.version = netdevice_response['softwareVersion']
         self.serialnumbers = netdevice_response['serialNumber']
@@ -130,14 +162,16 @@ class Device:
             self.siteNameHierarchy = fabricdevice_response['siteNameHierarchy']
             self.isfabric = True
         except KeyError:
-            print("Device {} has no fabric role, could it be an intermediate node?".format(self.mgmtip))
+            logging_info(self.step, "Device-Profiling", None,self.dnac,
+                          "Device {} has no fabric role, could it be an intermediate node?".format(self.mgmtip))
+            #print("Device {} has no fabric role, could it be an intermediate node?".format(self.mgmtip))
             netdevice_detail_api = "/dna/intent/api/v1/device-detail?searchBy={}&identifier=uuid".format(self.deviceuuid)
             netdevicedetail_response = radkit_cli.get_catc_api(self.dnac, netdevice_detail_api, service)['response']
             self.isfabric = False
             self.siteNameHierarchy = netdevicedetail_response['location']
 
 
-        fabric_details = fabric_sites(self.siteNameHierarchy,self.dnac,service)
+        fabric_details = fabric_sites(self.siteNameHierarchy,self.dnac,service,self.step)
         self.ispubsub = fabric_details[0]
         self.fabric_id = fabric_details[1]
         self.fabric_site_id = fabric_details[2]
@@ -161,13 +195,15 @@ class Device:
         if self.reachabilitystatus != 'Unreachable':
             fabric_roles_withlo0 = ['Edge Node', 'Border Node']
             if  any(x  in fabric_role for x in fabric_roles_withlo0):
-                loopback_parameters = rloc_definition(self.hostname, self.deviceuuid, self.dnac, service)
+                loopback_parameters = rloc_definition(self.hostname, self.deviceuuid, self.dnac, service, self.step)
                 self.loopback = (loopback_parameters[0])
                 self.mask = (loopback_parameters[1])
                 self.rlocdef = loopback_parameters[2]
                 lispsum = radkit_cli.get_single_output_genie(self.hostname,"show lisp service ipv4", service)
                 pitr = (lispsum['lisp_id'][0]['itr']['proxy_itr_rloc'])
                 if pitr!=self.loopback:
+                    logging_error(self.step, "Device-Profiling",None, self.hostname,
+                                  "Device {} PITR address is not the same as Loopback0, correct this configuration".format(self.hostname))
                     sys.exit("Device {} PITR address is not the same as Loopback0, correct this configuration".format(self.hostname))
                 petrflag = lispsum['lisp_id'][0]['etr']['proxy_etr_router']
                 if petrflag is True:
