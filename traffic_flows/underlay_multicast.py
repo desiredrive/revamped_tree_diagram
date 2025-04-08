@@ -146,12 +146,13 @@ def anyinterface_pim_status(inputinterface,interface_list,hostname):
                 return True
 
 class UnderlayMulticastDevice:
-    def __init__(self,vrf, mgmtip):
+    def __init__(self,vrf, mgmtip,step):
         self.mgmtip = mgmtip
         self.vrf = vrf
+        self.step = step
 
     def device_profiler(self, catc,service):
-        devprof = Device(self.mgmtip,catc)
+        devprof = Device(self.mgmtip,catc,self.step)
         devprof.profile_device(service)
         self.profiled_device = devprof
 
@@ -160,21 +161,21 @@ class UnderlayMulticastDevice:
 
     def multicast_enablement(self,service):
         hostname = self.profiled_device.hostname
-        print("Verifying Global Underlay Multicast Status for device: {} ...\n".format(hostname))
+        print("Verifying Global Underlay Multicast Status for device: {} ...".format(hostname))
         mcaststatus = MulticastConfiguration(self.vrf, hostname)
         mcaststatus.multicast_enabled(service)
         self.mcastconfig = mcaststatus
 
     def pim_interfaces (self, service):
         hostname = self.profiled_device.hostname
-        print("Retrieving PIM interfaces for device: {} ...\n".format(hostname))
+        print("Retrieving PIM interfaces for device: {} ...".format(hostname))
         pimintfstatus = PimConfiguration(self.vrf, hostname)
         pimintfstatus.pim_interfaces(service)
         self.piminterfaces = pimintfstatus
 
     def pim_neighbors(self,service):
         hostname = self.profiled_device.hostname
-        print("Retrieving PIM Neighbors for device: {} ...\n".format(hostname))
+        print("Retrieving PIM Neighbors for device: {} ...".format(hostname))
         pimneighbors = PimConfiguration(self.vrf, hostname)
         pimneighbors.pim_neighbors(service)
         self.pimneighbors = pimneighbors
@@ -182,7 +183,7 @@ class UnderlayMulticastDevice:
     def l2lispinterface(self,vlan, service):
         hostname = self.profiled_device.hostname
         #L2LISP interface Status:
-        print("Validating L2LISP Interface Parameters for device: {} ...\n".format(hostname))
+        print("Validating L2LISP Interface Parameters for device: {} ...".format(hostname))
         l2lispinterfacestatus = L2LISPInterface(vlan,hostname)
         l2lispinterfacestatus.l2lispinterfacestatus(service)
         self.l2lispinterfacestatus = l2lispinterfacestatus
@@ -190,14 +191,14 @@ class UnderlayMulticastDevice:
     def broadcast_underlay_properties(self,iid,service):
         hostname = self.profiled_device.hostname
         self.iid = iid
-        print("Verifying L2Flooding Configuration for instance {} in device: {} ...\n".format(iid,hostname))
+        print("Verifying L2Flooding Configuration for instance {} in device: {} ...".format(iid,hostname))
         l2floodingproperties = L2LISPConfiguration(iid, hostname)
         l2floodingproperties.l2flooding_configuration(service)
         self.l2floodingproperties = l2floodingproperties
 
     def rp_identification(self,group, service):
         hostname = self.profiled_device.hostname
-        print("Verifying RP information in device: {} ...\n".format(hostname))
+        print("Verifying RP information in device: {} ...".format(hostname))
         rpinformation = PimConfiguration(self.vrf,hostname)
         rpinformation.pim_rp(group,service)
         self.rpinformation = rpinformation
@@ -205,14 +206,14 @@ class UnderlayMulticastDevice:
     def rpf_to_rp(self,rp,service):
         hostname = self.profiled_device.hostname
         self.rp = rp
-        print("Verifying RPF information for RP {} in device: {} ...\n".format(rp, hostname))
+        print("Verifying RPF information for RP {} in device: {} ...".format(rp, hostname))
         rpfinformation = PimConfiguration(self.vrf,hostname)
         rpfinformation.pim_rpf_neighbor(rp,service)
         self.rpfinformation = rpfinformation
 
     def ssm_underlay_group(self,service):
         hostname = self.profiled_device.hostname
-        print("Verifying SSM configuration in device: {} ...\n".format(hostname))
+        print("Verifying SSM configuration in device: {} ...".format(hostname))
         ssminformation = PimConfiguration(self.vrf,hostname)
         ssminformation.pim_ssm_range(service)
         self.ssminformation = ssminformation
@@ -240,7 +241,7 @@ class UnderlayMulticastDevice:
 
     def multicast_range(self,service):
         hostname = self.profiled_device.hostname
-        print("Verifying if multicast range is allowing the L2 Flooding Group\n".format(hostname))
+        print("Verifying if multicast range is allowing the L2 Flooding Group".format(hostname))
         mcastrangeinfo = MulticastConfiguration(self.vrf,hostname)
         mcastrangeinfo.multicast_ranges(service)
         self.mcastrangestatus = mcastrangeinfo.mcastrange
@@ -263,20 +264,20 @@ class UnderlayMulticastDevice:
 
     def pim_statistics(self,service):
         hostname = self.profiled_device.hostname
-        print ("Collecting Global PIM statistics on this node: {}\n".format(hostname))
+        print ("Collecting Global PIM statistics on this node: {}".format(hostname))
         pimstatistics = PimConfiguration(None,hostname)
         pimstatistics.ip_pim_statistics(service)
         self.pimstatistics = pimstatistics
         if pimstatistics.pimchecksum_errors != 0:
-            print ("WARNING!: PIM Checksum Errors found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
+            print ("WARNING!: PIM Checksum Errors found on device: {} verify if these are increasing with \"show ip traffic\" ".format(hostname))
         if pimstatistics.pimformat_errors != 0:
-            print("WARNING!: PIM Format Errors found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
+            print("WARNING!: PIM Format Errors found on device: {} verify if these are increasing with \"show ip traffic\" ".format(hostname))
         if pimstatistics.pimqueuedrops != 0:
-            print("WARNING!: PIM Queue Drops found on device: {} verify if these are increasing with \"show ip traffic\" \n".format(hostname))
+            print("WARNING!: PIM Queue Drops found on device: {} verify if these are increasing with \"show ip traffic\" ".format(hostname))
 
     def igmp_verifications(self,service):
         hostname = self.profiled_device.hostname
-        print("Verifying IGMP Configuration of L2LISP interface on device: {} ...\n".format(hostname))
+        print("Verifying IGMP Configuration of L2LISP interface on device: {} ...".format(hostname))
         interface = self.l2lispinterfacestatus.l2lispfinalinterface
         igmpinterfaces = IGMP(None,hostname)
         igmpinterfaces.igmp_groups_interface_interface(interface,service)
@@ -284,7 +285,7 @@ class UnderlayMulticastDevice:
 
     def local_star_g(self,service):
         hostname = self.profiled_device.hostname
-        print("Verifying *,G multicast route on this node: {} ...\n".format(hostname))
+        print("Verifying *,G multicast route on this node: {} ...".format(hostname))
         l2floodinggroup = self.l2floodingproperties.broadcastunderlay
         source = '255.255.255.255'
         stargmroute = MulticastRoutes(None,hostname)
@@ -298,12 +299,12 @@ class UnderlayMulticastDevice:
 
     def anypiminterface(self,interface,intflist):
         hostname = self.profiled_device.hostname
-        print("Validating {} PIM configuration for device: {} ...\n".format(interface,hostname))
+        print("Validating {} PIM configuration for device: {} ...".format(interface,hostname))
         self.isinterfacepimenabled = anyinterface_pim_status(interface,intflist,hostname)
 
     def floodingacls(self, interface, service):
         hostname = self.profiled_device.hostname
-        print("Retrieving ACLs on Interface: {} for device: {} ...\n".format(interface, hostname))
+        print("Retrieving ACLs on Interface: {} for device: {} ...".format(interface, hostname))
         if interface == 'L2LISP0':
             acls = AccessList(hostname)
             acls.aclbyinterface(interface,service)
@@ -343,7 +344,7 @@ class UnderlayMulticastDevice:
                 aclcontents.append(aclinfo)
             self.l2floodacls = aclcontents
 
-def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
+def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service,step):
     '''
     Main Local Verifications
     *)Which traffic are you troubleshooting?
@@ -372,7 +373,7 @@ def single_device_underlay_profiling(mgmtip,vlan,l2lispiid,catc_name,service):
     print("Starting Underlay Multicast Flows!...\n")
     # Starting Underlay Multicast Flows!
     # Underlay Multicast Validations for FHR:
-    umcastdevice = UnderlayMulticastDevice(None, mgmtip)
+    umcastdevice = UnderlayMulticastDevice(None, mgmtip,step)
     umcastdevice.device_profiler(catc_name, service)
     hostname = umcastdevice.profiled_device.hostname
     #print("Profiled device {}:\n".format(hostname))
@@ -794,18 +795,18 @@ def lhr_sg_validations(fhrdevice,lhrdevice,service):
         mrouteflags = remotemroute.mrouteinfo[0]['flags']
         sptflags = ['J','T']
         if all(x in mrouteflags for x in sptflags):
-            print ("Remote S,G for {},{} has correct flags for this mroute: {}  on device {}\n".format(loopback0,group, mrouteflags, hostname))
+            print ("Remote S,G for {},{} has correct flags for this mroute: {}  on device {}".format(loopback0,group, mrouteflags, hostname))
         else:
-            print ("Remote S,G for {},{} is missing the expected JT flags , flags for this mroute are: {}  on device {}\n".format(loopback0,group, mrouteflags, hostname))
+            print ("Remote S,G for {},{} is missing the expected JT flags , flags for this mroute are: {}  on device {}".format(loopback0,group, mrouteflags, hostname))
         #L2LISP or Tunnel interface in OIL?
         expectedoil = lhrdevice.l2lispinterfacestatus.l2lispfinalinterface
         mrouteoils = remotemroute.mrouteinfo[0]['outgoinginterfacelist']
         if len(mrouteoils) == 0:
-            print("WARNING: Remote S,G for {},{} has no OILs on device {}\n".format(loopback0,group,hostname))
+            print("WARNING: Remote S,G for {},{} has no OILs on device {}".format(loopback0,group,hostname))
             fwdingoils = False
         else:
             fwdingoils = True
-            print("Remote S,G for {},{} has OILs on device {}\n".format(loopback0, group, hostname))
+            print("Remote S,G for {},{} has OILs on device {}".format(loopback0, group, hostname))
             l2lispinoil = False
             for oil in mrouteoils:
                 currentoilinterface = oil['interface']

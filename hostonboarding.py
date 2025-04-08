@@ -116,6 +116,7 @@ class endpoint_info:
         if self.sourcevrf != None:
             l2vni_pool_api = "/dna/intent/api/v1/business/sda/virtualnetwork/ippool?siteNameHierarchy={}&virtualNetworkName={}&ipPoolName={}".format(fabric_site,self.sourcevrf,self.sourcevlanname)
             l2vni_pool_response = radkit_cli.get_catc_api(dnac,l2vni_pool_api,service)
+            #Test for L2 Only - Soon
             self.isl2only = l2vni_pool_response['isLayer2OnlyPool']
             self.isipdb = l2vni_pool_response['isIpDirectedBroadcast']
             self.isl2flood = l2vni_pool_response['isSelectiveFloodingEnabled']
@@ -128,7 +129,12 @@ class endpoint_info:
             #print ("Endpoint found in VLAN {}, not L2 Only, retrieving Anycast Gateway information...\n".format(self.sourcevlan))
             sviip_cmd = "show ip interface vlan {}".format(self.sourcevlan)
             sviip_op = radkit_cli.get_single_output_genie(hostname, sviip_cmd, service)
-            interface_name = sviip_op['Vlan1021']
+            vlanname = None
+            if sviip_op is not None:
+                for vlan_name in sviip_op:
+                    if "Vlan" in vlan_name:
+                        vlanname = vlan_name
+            interface_name = sviip_op[vlanname]
             ip_schema = interface_name['ipv4']
             for i in ip_schema:
                 if  (ip_schema[i]['secondary'] is False):

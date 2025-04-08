@@ -3,6 +3,22 @@ from switchingmodules import etherchannel
 from switchingmodules.arp import arp_modules
 from switchingmodules.maclearning import mac_learning
 from re import compile
+from radkit_cli import logging_info,logging_error,logging_warning
+import sys
+
+def ip_cef_collection(ipcef,step):
+    hostname = ipcef.hostname
+    collection_summary = "Prefix: {}, VRF: {}, NextHop(s): {}, Sources: {}".format(ipcef.ip,ipcef.vrf,ipcef.nexthops,ipcef.sources)
+    string = "Result: Success"
+    logging_info(step, "Underlay", "[CEF]",hostname, collection_summary)
+    logging_info(step, "Underlay", "[CEF]",hostname, string)
+
+def phy_cef_collection(interface,step):
+    hostname = interface.hostname
+    collection_summary = "Interface: {}, OperState: {}, MTU: {}, OutputDrops: {}, IQDrops: {}".format(interface.interface,interface.operstate,interface.mtu,interface.outputdrops,interface.iqdrops)
+    string = "Result: Success"
+    logging_info(step, "Underlay", "[PHY]",hostname, collection_summary)
+    logging_info(step, "Underlay", "[PHY]",hostname, string)
 
 class IPCef:
 
@@ -13,7 +29,7 @@ class IPCef:
 
     def get_cef_internal(self,service):
         #Route_Inspection:
-        print("Processing CEF Internal Information for prefix: {}\n".format(self.ip))
+        #print("Processing CEF Internal Information for prefix: {}\n".format(self.ip))
 
         if self.vrf == "default":
             vrf_mode = ""
@@ -115,12 +131,12 @@ class physical_recursion():
         self.vrf = cef_hops.vrf
         self.nexthops = cef_hops.nexthops
     
-    def get_physical_interfaces(self,service):
+    def get_physical_interfaces(self,service,step):
 
         #VRF Is needed for ARP recursion
 
         
-        print("Calculating Physical Interfaces\n")
+        #print("Calculating Physical Interfaces\n")
 
         #Current state supports the following Next Hop parsing form CEF: L3 Port-Channel, SVI and Physical (L2 or L3)
         #Support for Tunnel, Apphosting, VTI, LISP and NVE interfaces is not yet considered...
@@ -143,12 +159,14 @@ class physical_recursion():
                 try:
                     mac = arp.mac
                 except:
+                    logging_error(step, "PHY", "[ARP]", self.hostname,"ARP Is Incomplete for next hop {}".format(nhop))
                     sys.exit("ARP Is Incomplete for next hop {}".format(nhop))
                 
                 mac_ports = mac_learning(self.hostname)
                 mac_ports.mac_learning_mac(mac, vid, service)
 
                 if mac_ports == None:
+                    logging_error(step, "PHY", "[MAC]", self.hostname,"MAC not learned for ARP {}".format(nhop))
                     sys.exit("MAC not learned for ARP {}".format(nhop))
                 
                 for i in mac_ports.port:
@@ -161,6 +179,7 @@ class physical_recursion():
             else:
                 nhphys.append(interface)
             if len(nhphys)==0:
+                logging_error(step,"PHY","[PHY]", self.hostname, "Unable to find the outgoing physical interfaces for next_hop {}, confirm the outgoing interface on the device itself.".format(self.route))
                 sys.exit("Unable to find the outgoing physical interfaces for next_hop {}, confirm the outgoing interface on the device itself.".format(self.route))
             else:
                 total_phys.append(nhphys)

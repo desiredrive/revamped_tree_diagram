@@ -5,6 +5,20 @@ from ipverifications import inside_subnet
 from ipverifications import ipsubnet_validator_no_return
 from switchingmodules.interfaces_l2 import interface_switchport
 from switchingmodules.interfaces import show_run_interface
+from radkit_cli import logging_info,logging_error,logging_warning
+
+def cts_ep_collection(cts_ep,step):
+    hostname = cts_ep.hostname
+    collection_summary = "IP: {}, VRF: {}, SGT: {}, Source: {}, GlobalEnforcement: {}".format(cts_ep.endpoint_ip,cts_ep.vrf,cts_ep.sgt,cts_ep.source,cts_ep.globalenforcement)
+    string = "Result: Success"
+    logging_info(step, "CTS", "[Endpoint]",hostname, collection_summary)
+    logging_info(step, "CTS", "[Endpoint]",hostname, string)
+def cts_rule_collection(cts_policy,step):
+    hostname = cts_policy.hostname
+    collection_summary = "SGT: {}, DGT: {}, IsDefaultRule: {}, RBACL: {}, HWPermit: {}, HWDeny: {}".format(cts_policy.srcsgt,cts_policy.dstsgt,cts_policy.isdefaultrule,cts_policy.rbacl,cts_policy.hw_permit_count,cts_policy.hw_denied_count)
+    string = "Result: Success"
+    logging_info(step, "CTS", "[Policy]",hostname, collection_summary)
+    logging_info(step, "CTS", "[Policy]",hostname, string)
 
 def cts_all_parser(output):
     #Binding Format = {'ip': x.x.x.x, 'sgt': x, 'source' : }

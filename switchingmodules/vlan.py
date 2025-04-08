@@ -9,7 +9,6 @@ class VlanInformation:
     def vlanbrief(self,service):
         vlanid_cmd = "show vlan id {}".format(self.vlan)
         vlanid_op = radkit_cli.get_single_output_genie(self.hostname, vlanid_cmd, service)
-        print (vlanid_op)
         if vlanid_op is not None:
             self.vlanname = vlanid_op['vlan-name']
             self.status = vlanid_op['status']
@@ -20,7 +19,6 @@ class VlanInformation:
     def vlanbrief_manual(self,service):
         vlanid_cmd = "show vlan id {}".format(self.vlan)
         vlanid_op = radkit_cli.get_any_single_output(self.hostname, vlanid_cmd, service)
-        print (vlanid_op)
         self.status = "lshut"
         if vlanid_op is not None:
             for line in vlanid_op.splitlines():

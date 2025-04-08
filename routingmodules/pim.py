@@ -268,7 +268,7 @@ class PimConfiguration:
         else:
             #Route to RP:
             rp_route = IPRoute(self.rp, vrf,self.hostname)
-            rp_route.iproute_prefix(service)
+            rp_route.iproute_prefix(service,None)
             cef_route = IPCef(self.rp, vrf, self.hostname)
             cef_route.get_cef_internal(service)
             self.rproute = rp_route

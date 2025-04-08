@@ -73,7 +73,7 @@ class controlplane_eid:
                 self.arbinding = host_path['hardware_address'] 
 
     def ethernet_q(self, service):
-        hostname = self.hostname
+        hostname = self.queriedcp
         process = "LISP"
         subprocess = "[Control-Plane]"
         wlc_cmd = "show run | se set WLC"
@@ -227,7 +227,7 @@ class l2lisp_info:
                 sys.exit("Signal Supression is enabled, no more map-requests will be created for this instance!")
 
             #Searching the source MAC in LISP L2 Dynamic EID
-            eids = lispdyneidop['lisp_id'][0]['instance_id'][self.l2lispiid]['dynamic_eids']['Auto-L2-group-8192']['eids']
+            eids = lispdyneidop['lisp_id'][0]['instance_id'][self.l2lispiid]['dynamic_eids']['Auto-L2-group-{}'.format(self.l2lispiid)]['eids']
             if any(x  in self.sourcemac for x in eids):
                 self.l2dynstate = True
             else:

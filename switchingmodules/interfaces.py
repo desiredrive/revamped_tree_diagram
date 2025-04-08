@@ -13,8 +13,8 @@ def show_run_interface(interface, pattern, device, service):
                 parsedstring = parsedstring+"\n"+i
         
         return parsedstring
-                
-class Interfaces():
+
+class Interfaces:
 
     def __init__(self, interface, device):
         self.hostname = device
@@ -91,9 +91,7 @@ class Interfaces():
     def show_interface_counters(self,service):
         intfc_cmd = "show interface {} counter".format(self.interface)
         intfc_op = radkit_cli.get_single_output_genie(self.hostname, intfc_cmd, service)
-        print (intfc_op)
         if intfc_op is not None:
-            print ("elo")
             intfcounterpath = intfc_op['interface'][self.interface]
             self.inoctets = intfcounterpath['in']['octets']
             self.inunicastpackets = intfcounterpath['in']['ucast_pkts']

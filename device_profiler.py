@@ -145,7 +145,6 @@ class Device:
 
         netdevice_response = radkit_cli.get_catc_api(self.dnac, netdevice_api,service)['response']
         fabricdevice_response = radkit_cli.get_catc_api(self.dnac, fabricdevice_api,service)
-
         if fabricdevice_response['status'] == "failed":
             logging_warning(self.step, "Device-Profiling", self.dnac,
                           "WARNING!: Device {} is not a fabric device".format(self.hostname))
