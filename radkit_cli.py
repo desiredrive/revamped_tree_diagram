@@ -30,18 +30,21 @@ def logging_info(step,process,subprocess,device,message):
     if subprocess is None:
         subprocess = ""
     string = "[STEP:{}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
+    append_to_logging_file(string)
     logger.info(string)
 
 def logging_error(step,process,subprocess,device,message):
     if subprocess is None:
         subprocess = ""
-    string = "[STEP: {}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
+    string = "[STEP:{}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
+    append_to_logging_file(string)
     logging.error(string)
 
 def logging_warning(step,process,subprocess,device,message):
     if subprocess is None:
         subprocess = ""
-    string = "[STEP: {}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
+    string = "[STEP:{}][{}]{}[{}]: {}".format(step,process,subprocess,device,message)
+    append_to_logging_file(string)
     logging.warning(string)
 
 def main(service: radkit_client.Service):
@@ -53,13 +56,18 @@ def loggin_file():
     currenttime = datetime.now()
     f = open("collection_logfile.txt", "w")
     f.write("File Created on {}".format(currenttime))
-    f.write("\n----------------------------------------------------------------------------------------------------------------------------\n")
+    f.write("----------------------------------------------------------------------------------------------------------------------------\n")
+    f.write("\n")
     f.close()
 
 def append_to_logging_file(content):
     f = open("collection_logfile.txt", "a")
+    if "STEP" in content:
+        f.write("\n")
+        f.write(
+            "----------------------------------------------------------------------------------------------------------------------------\n")
     f.write(content)
-    f.write("\n----------------------------------------------------------------------------------------------------------------------------\n")
+    f.write("\n")
     f.close()
 
 
@@ -113,6 +121,9 @@ def get_catc_api(dnac, api_url: str,service):
         try:
             response = device_inventory.http.get(api_url).wait()
             response_js = json.loads(response.content)
+            formatted_json = json.dumps(response_js, indent=2)
+            to_file = "Catalyst Center API: {}".format(api_url)+"\n"+str(formatted_json)
+            append_to_logging_file(to_file)
             return response_js
         except:
             return None

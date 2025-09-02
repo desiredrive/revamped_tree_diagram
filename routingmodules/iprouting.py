@@ -1,6 +1,5 @@
 import sys
-import radkit_cli
-from radkit_cli import logging_info,logging_error,logging_warning
+from radkit_cli import logging_info,logging_error,logging_warning,get_single_output_genie
 
 def ip_route_collection(iproute,step):
     hostname = iproute.hostname
@@ -20,19 +19,19 @@ class IPRoute:
 
         #Route_Inspection:
         #print("Collecting RIB Information for prefix: {}\n".format(self.route))
-
+        process = "ipRouting"
         if self.vrf == "default":
             vrf_mode = ""
-            vrf = ''
         elif self.vrf is None:
             vrf_mode = ""
-            vrf = ''
+        elif self.vrf == "None":
+            vrf_mode = ""
         else:
             vrf_mode = "vrf "+self.vrf+" "
     
         #show ip route command:
-        iproute_cmd = "show ip route {} {}".format(self.route, vrf_mode, self.vrf)
-        iproute_output = radkit_cli.get_single_output_genie(self.hostname,iproute_cmd,service)
+        iproute_cmd = "show ip route {} {}".format(vrf_mode, self.route)
+        iproute_output = get_single_output_genie(self.hostname,iproute_cmd,service)
         #If specific route exists:
         if iproute_output is not None:
             route_path = iproute_output['entry']
@@ -63,10 +62,18 @@ class IPRoute:
          #If specific route does not exist: aka, validate if default route exists:
             prefix = "0.0.0.0 0.0.0.0"
             iproute_cmd = "show ip route {} {}".format(prefix, vrf_mode, self.vrf)
-            iproute_output = radkit_cli.get_single_output_genie(self.hostname,iproute_cmd,service)
+            iproute_output = get_single_output_genie(self.hostname,iproute_cmd,service)
             if iproute_output is None:
-                logging_error(step, "IPRouting", "[RIB]", self.hostname,"No route to prefix {}! (not even default-route) traffic will be dropped".format(self.route))
-                sys.exit("No route to prefix {}! (not even default-route) traffic will be dropped".format(self.route))
+                subprocess = "[rib]"
+                hostname = self.hostname
+                error = "IP Routing - No Route"
+                message = "No route to prefix {} (not even default-route) traffic will be dropped, fix the route to {} in device: {}".format(
+                    self.route, self.route, hostname)
+                logging_error(step, process, subprocess, hostname, error)
+                logging_info(step, process, subprocess, hostname, message)
+                #raise BDBTaskError("Error: {} | {}".format(error, message))
+                sys.exit("Error: {} | {}".format(error, message))
+
             else:
                 route_path = iproute_output['entry']
                 for i in route_path:

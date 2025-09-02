@@ -5,7 +5,9 @@ from ipverifications import (
    ipsubnet_validator_no_return
 )
 from switchingmodules.maclearning import mac_learning
-from routingmodules.lisp import l2lisp_info,LISPLocalDB,LISPEIDWatch
+from routingmodules.lisp import l2lisp_info,LISPLocalDB,LISPEIDWatch,lisp_map_servers,LISPInstanceStatus
+from radkit_cli import logging_info,logging_error,logging_warning,get_catc_api,get_any_single_output,get_single_output_genie
+from pprint import pformat
 
 #LISP Session Troubleshooting Steps:
 #1 Identify the EID to register (MAC (UDP/TCP), IP (UDP/TCP), AR(TCP)
@@ -39,6 +41,48 @@ from routingmodules.lisp import l2lisp_info,LISPLocalDB,LISPEIDWatch
 
 #1 Identify the EID to register (MAC (UDP/TCP), IP (UDP/TCP), AR(TCP)
 #2 Identify if the method for LISP DB insertion (DynamicEID/SISF, Route-Import, Static, WLC notification).
+
+def exit_program(step, process, subprocess, hostname, error, message):
+    logging_error(step, process, subprocess, hostname, error)
+    logging_info(step, process, subprocess, hostname, message)
+    sys.exit("Error: {} | {}".format(error, message))
+
+def find_mismatch_key_and_proxy_reply(output):
+    # Split the output into lines
+    lines = output.strip().split("\n")
+
+    # Dictionaries to count "key" and "proxy-reply" occurrences for each IP
+    key_counts = {}
+    proxy_reply_counts = {}
+
+    for line in lines:
+        # Check if the line contains "etr map-server"
+        if "etr map-server" in line:
+            parts = line.split()
+            ip = parts[2]  # Extract the IP address
+
+            # Count occurrences of "key"
+            if "key" in line:
+                if ip not in key_counts:
+                    key_counts[ip] = 0
+                key_counts[ip] += 1
+
+            # Count occurrences of "proxy-reply"
+            if "proxy-reply" in line:
+                if ip not in proxy_reply_counts:
+                    proxy_reply_counts[ip] = 0
+                proxy_reply_counts[ip] += 1
+
+    # Find IPs where the "key" count doesn't match the "proxy-reply" count
+    mismatched_ips = []
+    for ip in key_counts:
+        key_count = key_counts.get(ip, 0)
+        proxy_reply_count = proxy_reply_counts.get(ip, 0)
+        if key_count != proxy_reply_count:
+            mismatched_ips.append(ip)
+
+    return mismatched_ips
+
 class EIDIdentification():
     def __init__(self, device,eid):
         self.device = device
@@ -61,6 +105,10 @@ class EIDIdentification():
         origin = None
         origin_state = None
         iid = None
+
+        step = "X"
+        process = "lispSession"
+        subprocess ="eidIdentification"
         #Identify if the EID is a MAC or an IP:
         if mac_address_validator(eid)[0] is True:
             eid_type = "MAC"
@@ -85,7 +133,13 @@ class EIDIdentification():
                 mac = None
                 origin_state = None
             if mac is None:
-                sys.exit("WARNING!: MAC Address {} not found in the MAC Address Table for VLAN {}".format(eid,vlan))
+                error = "EID Identification - MAC Learning"
+                message = "The following MAC {} is NOT found in the MAC Address Table for VLAN {}. Review the GPS_SDA Collection logfile for more information.".format(eid,vlan)
+                exit_program(step, process, subprocess, device, error, message)
+            if macstate.port == "L2LI0":
+                error = "EID Identification - MAC Learning"
+                message = "The following MAC {} is NOT a local MAC address, it points to a LISP Interface. Review the GPS_SDA Collection logfile for more information.".format(mac)
+                exit_program(step, process, subprocess, device, error, message)
 
             #L2SISF - Nathan
                 #1 Search for MAC entry, reachable state
@@ -96,8 +150,11 @@ class EIDIdentification():
             iid.l2_lisp_instance(device,vlan,service)
             iid = iid.l2lispiid
             if iid is None:
-                sys.exit("WARNING!: L2LISP Instance not found in the LISP EID Table for VLAN {}".format(vlan))
+                error = "EID Identification - L2LISP Instance"
+                message = "The  L2LISP Instance is NOT found in the LISP EID Table for VLAN {}. Review the GPS_SDA Collection logfile for more information.".format(vlan)
+                exit_program(step, process, subprocess, device, error, message)
 
+            self.iid = iid
             #L2DB Method.
                 #1. Search for database mac under L2LISP, error if not configured.
             lispdb = LISPLocalDB(mac,iid,device)
@@ -188,10 +245,37 @@ class ETRConfiguration():
         self.device = device
 
     def map_servers(self,eidident,service):
+        # 8 Identify the Map-Resolvers for the Registration, verify proxy flag, node must be ETR
+        # 9 Identify LISP registration metrics and statistics
         device = self.device
         map_servers = eidident.mapservers
-        for i in map_servers:
-            print ("elo")
+
+        step = "X"
+        process = "lispSession"
+        subprocess = "[mapServerConfiguration]"
+        #Map Server Configuration Validations:
+            #P-Flag Enablement #Unreliable check...
+            #ETR Status
+        # P-Flag Enablement #Unreliable check...
+        mapservers_shwrun = lisp_map_servers(device,service)
+        map_servers_noflag = find_mismatch_key_and_proxy_reply(mapservers_shwrun)
+        if len(map_servers_noflag) > 0:
+            error = "LISP Configuration - Map Servers"
+            message = "The following Map-Servers {} are NOT configured for Proxy-Reply flag. Review the GPS_SDA Collection logfile for more information.".format(map_servers_noflag)
+            exit_program(step,process,subprocess,device,error,message)
+
+        lisp_iid_status = LISPInstanceStatus(device,eidident.iid)
+        if eidident.eid_type == "MAC":
+            qtype = "ethernet"
+        lisp_iid_status.eidstatus(qtype,service)
+        if lisp_iid_status.etr is not True:
+            error = "LISP Configuration - ETR"
+            message = "ETR Functionality is  NOT configured for the following device {}. Review the GPS_SDA Collection logfile for more information.".format(device)
+            exit_program(step,process,subprocess,device,error,message)
+
+        # 9 Identify LISP registration metrics and statistics
+        lisp_iid_status.eidStatistics(qtype,service)
+
 
 #Classes
 

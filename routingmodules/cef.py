@@ -1,9 +1,9 @@
-import radkit_cli
+
 from switchingmodules import etherchannel
 from switchingmodules.arp import arp_modules
 from switchingmodules.maclearning import mac_learning
 from re import compile
-from radkit_cli import logging_info,logging_error,logging_warning
+from radkit_cli import logging_info,logging_error,get_single_output_genie
 import sys
 
 def ip_cef_collection(ipcef,step):
@@ -33,17 +33,16 @@ class IPCef:
 
         if self.vrf == "default":
             vrf_mode = ""
-            vrf = ''
         elif self.vrf is None:
             vrf_mode = ""
-            vrf = ''
+        elif self.vrf == "None":
+            vrf_mode = ""
         else:
-            vrf = self.vrf
             vrf_mode = "vrf "+self.vrf+" "
         
         #show ip route command:
-        ipcefint_cmd = "show ip cef {} {} internal".format(self.ip, vrf_mode, self.vrf)
-        ipcefint_op = radkit_cli.get_single_output_genie(self.hostname,ipcefint_cmd,service)
+        ipcefint_cmd = "show ip cef {} {} internal".format(self.ip,vrf_mode)
+        ipcefint_op = get_single_output_genie(self.hostname,ipcefint_cmd,service)
         
         #VRF utilization
         prefix = None
@@ -90,6 +89,7 @@ class IPCef:
         if any (x in self.sources for x in special_types):
             special_flag = True
         if (no_ifnums is True) and (special_flag is False):
+            path_list = None
             paths = []
             nexthops = []
             nhlist = []
@@ -132,15 +132,12 @@ class physical_recursion():
         self.nexthops = cef_hops.nexthops
     
     def get_physical_interfaces(self,service,step):
-
+        process = 'CEF'
+        hostname = self.hostname
         #VRF Is needed for ARP recursion
-
-        
         #print("Calculating Physical Interfaces\n")
-
         #Current state supports the following Next Hop parsing form CEF: L3 Port-Channel, SVI and Physical (L2 or L3)
         #Support for Tunnel, Apphosting, VTI, LISP and NVE interfaces is not yet considered...
-        
         total_phys = []
         for i in self.nexthops:
             nhphys = []
@@ -153,21 +150,32 @@ class physical_recursion():
             elif "Vlan" in interface:
                 nhop = i['nexthop']
                 intf = i['oif']
-                vid = compile("(?<=Vlan)[0-9]{4}(?=)").search(intf).group().strip()
+                vid = compile("(?<=Vlan)[0-9]{4}(?=.*)").search(intf).group().strip()
                 arp = arp_modules(self.vrf, self.hostname)
                 arp.arp_resolution_single_ip(nhop, intf, service)
                 try:
                     mac = arp.mac
-                except:
-                    logging_error(step, "PHY", "[ARP]", self.hostname,"ARP Is Incomplete for next hop {}".format(nhop))
-                    sys.exit("ARP Is Incomplete for next hop {}".format(nhop))
-                
+                except KeyError:
+                    subprocess = "[ARP]"
+                    error = "CEF - Incomplete Adjacency"
+                    message = "ARP Is Incomplete for next hop {}, fix the ARP entry for this IP address in device: {}".format(nhop,hostname)
+                    logging_error(step, process, subprocess, hostname, error)
+                    logging_info(step, process, subprocess, hostname, message)
+                    #raise BDBTaskError("Error: {} | {}".format(error, message))
+                    sys.exit("Error: {} | {}".format(error, message))
+
                 mac_ports = mac_learning(self.hostname)
                 mac_ports.mac_learning_mac(mac, vid, service)
 
-                if mac_ports == None:
-                    logging_error(step, "PHY", "[MAC]", self.hostname,"MAC not learned for ARP {}".format(nhop))
-                    sys.exit("MAC not learned for ARP {}".format(nhop))
+                if mac_ports is None:
+                    subprocess = "[macLearning]"
+                    error = "CEF - No Layer2 Recursion"
+                    message = "MAC address {} is not learnt in any port, troubleshoot the MAC learning event in device: {}".format(
+                        mac, hostname)
+                    logging_error(step, process, subprocess, hostname, error)
+                    logging_info(step, process, subprocess, hostname, message)
+                    # raise BDBTaskError("Error: {} | {}".format(error, message))
+                    sys.exit("Error: {} | {}".format(error, message))
                 
                 for i in mac_ports.port:
                     if "Po" in i:
@@ -179,8 +187,14 @@ class physical_recursion():
             else:
                 nhphys.append(interface)
             if len(nhphys)==0:
-                logging_error(step,"PHY","[PHY]", self.hostname, "Unable to find the outgoing physical interfaces for next_hop {}, confirm the outgoing interface on the device itself.".format(self.route))
-                sys.exit("Unable to find the outgoing physical interfaces for next_hop {}, confirm the outgoing interface on the device itself.".format(self.route))
+                subprocess = "[physicalPort]"
+                error = "CEF - No Physical Port Recursion"
+                message = "Unable to resolve the physical port for next-hop {}, validate the physical port recursion for ARP and MAC in device: {}".format(
+                    i, hostname)
+                logging_error(step, process, subprocess, hostname, error)
+                logging_info(step, process, subprocess, hostname, message)
+                # raise BDBTaskError("Error: {} | {}".format(error, message))
+                sys.exit("Error: {} | {}".format(error, message))
             else:
                 total_phys.append(nhphys)
             

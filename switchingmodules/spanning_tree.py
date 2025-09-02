@@ -1,9 +1,7 @@
 import re
 import sys
 from os.path import split
-
-import radkit_cli
-
+from radkit_cli import get_any_single_output,get_single_output_genie
 #Platform Independent = IOS 
 
 class stp_intf:
@@ -28,9 +26,10 @@ class stp_intf:
         unsupported_type = ["LISP", "Tu", "nve"]
         if not any(x  in self.port for x in unsupported_type):
             stp_intf_cmd = "show spanning-tree vlan {} interface {} detail".format(self.vlan,self.port)
-            stp_intf_op = radkit_cli.get_any_single_output(self.hostname,stp_intf_cmd,service)
-            if stp_intf_op == None:
-                print ("\nNo STP information was found for this port\n")
+            stp_intf_op = get_any_single_output(self.hostname,stp_intf_cmd,service)
+            if stp_intf_op is None:
+                return None
+                #print ("\nNo STP information was found for this port\n")
             else:
                 for line in stp_intf_op.splitlines():
                     #Port state and role definition
@@ -70,11 +69,13 @@ class stp_intf:
                     if "BPDU" in line:
                         self.bpdusent = re.compile("(?<=sent )\d+(?=,)").search(line).group()
                         self.bpdurcvd = re.compile("(?<=ved )\d+").search(line).group()
-
+        '''
         elif "Ac" in self.port:
+            
             print("\nAccess-Tunnel Interfaces Are not supported for STP states\n")
         else:
             sys.exit("\n Unsupported interface type, interface name is: {}\n".format(self.port))
+        '''
 
 class stp_vlan_regex:
 
@@ -95,10 +96,10 @@ class stp_vlan_regex:
 
     def stp_vlan_detail(self,service):
         stp_vlan_cmd = "show spanning-tree vlan {} detail | se exec|exist".format(self.vlan)
-        stp_vlan_op = radkit_cli.get_any_single_output(self.hostname,stp_vlan_cmd,service)
+        stp_vlan_op = get_any_single_output(self.hostname,stp_vlan_cmd,service)
         for line in stp_vlan_op.splitlines():
             if "does not exist" in line:
-                print ("\n WARNING: Spanning-Tree instance for VLAN {} is not runnig or does not exist, is there at least one port enabled and active for this VLAN?\n")
+                #print ("\n WARNING: Spanning-Tree instance for VLAN {} is not runnig or does not exist, is there at least one port enabled and active for this VLAN?\n")
                 break
             #STP Mode Definition
             if "executing" in line:
@@ -125,7 +126,7 @@ class stp_vlan_regex:
             if "from" in line:
                 try:
                     self.tcnlastintf = re.compile("(?<=from ).*").search(line).group().strip()           
-                except:
+                except AttributeError:
                     pass
 
 class SpanningTree:
@@ -136,7 +137,7 @@ class SpanningTree:
         #Get Information about a specific VLAN
         self.vlan = vlan
         stpact_cmd = "show spanning-tree vlan {} active".format(vlan)
-        stpact_op = radkit_cli.get_single_output_genie(self.hostname, stpact_cmd, service)
+        stpact_op = get_single_output_genie(self.hostname, stpact_cmd, service)
         fwdinterfaces = []
         blkinterfaces = []
         if stpact_op is not None:

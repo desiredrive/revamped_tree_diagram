@@ -14,7 +14,8 @@ class VlanInformation:
             self.status = vlanid_op['status']
             self.ports = vlanid_op['ports']
             if self.status != 'active':
-                print("WARNING!: VLAN {} is not active on device: {}".format(self.vlan, self.hostname))
+                #print("WARNING!: VLAN {} is not active on device: {}".format(self.vlan, self.hostname))
+                return
 
     def vlanbrief_manual(self,service):
         vlanid_cmd = "show vlan id {}".format(self.vlan)

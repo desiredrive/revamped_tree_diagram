@@ -19,7 +19,6 @@ def cts_rule_collection(cts_policy,step):
     string = "Result: Success"
     logging_info(step, "CTS", "[Policy]",hostname, collection_summary)
     logging_info(step, "CTS", "[Policy]",hostname, string)
-
 def cts_all_parser(output):
     #Binding Format = {'ip': x.x.x.x, 'sgt': x, 'source' : }
     bindings = []
@@ -52,7 +51,6 @@ def cts_all_parser(output):
             binding = {'ip': ipstring[0], 'sgt': ipstring[1], 'source': ipstring[2]}
             bindings.append(binding)
     return bindings
-
 def rbaclparser(aclop):
     aces=[]
     matches = ["#", "show", "ACEs:"]
@@ -62,8 +60,6 @@ def rbaclparser(aclop):
             if line != '':
                 aces.append(line)
     return (aces)
-
-
 def cts_inside_subnet(bind,ip):
     #Validate if Destinatip IP is inside a subnet rather than a host binding
     valid_mappings = []
@@ -93,8 +89,6 @@ def cts_inside_subnet(bind,ip):
         if i['ip'] == prefix:
             elected_binding = i
     return elected_binding
-
-
 def cts_interface_parser(output):
     for i in output['interfaces']:
         interface = i
@@ -249,7 +243,7 @@ class cts_rules():
             ctsrbacpath = ctsrbacperm_op['indexes']
             matches = ["#"]
             for i in ctsrbacpath:
-                if type(i) == int:
+                if type(i) is int:
                     index = i
                     self.srcsgt = ctsrbacpath[index]['src_grp_id']
                     self.dstsgt = ctsrbacpath[index]['dst_group_id']
@@ -257,35 +251,54 @@ class cts_rules():
                     self.dgtname = ctsrbacpath[index]['dst_group_name']
                     rbacls = ctsrbacpath[index]['policy_groups']
                     self.isdefaultrule = False
+                    try:
+                        if ctsrbacpath[index]['action_policy']:
+                            rbacl_name1 = ctsrbacpath[index]['action_policy']
+                            rbacl_ip_version = ctsrbacpath[index]['action_policy_group']
+                            rbacl_name2 = rbacl_ip_version.split("-")[0]
+                            rbacl = rbacl_name1 + " " + rbacl_name2
+                    except KeyError:
+                        pass
                     for j in rbacls:
-                        if not any (x in j for x in matches):
-                            try:
-                                rbacl = re.compile(".*(?=-[0-9]+)").search(j).group().strip()
-                            except:
-                                pass
+                        if not any(x in j for x in matches):
+                            if "-" in j:
+                                try:
+                                    rbacl = re.compile(".*(?=-[0-9]+)").search(j).group().strip()
+                                except:
+                                    pass
+                            else:
+                                rbacl = j
                     self.rbacl = rbacl
         else:
             ctsrbacperm_cmd = "show cts role-based permissions default"
             ctsrbacperm_op = radkit_cli.get_single_output_genie(self.hostname, ctsrbacperm_cmd, service)
-            ctsrbacpath = ctsrbacperm_op['indexes']
-            for i in ctsrbacpath:
-                if type(i) == int:
-                    index = i
-                    self.srcsgt = sgt
-                    self.dstsgt = dgt
-                    self.isdefaultrule = True
-                    try:
-                        self.rbacl = ctsrbacpath[index]['action_policy']+" IP"
-                    except:
-                        matches = ["#"]
-                        rbacls = ctsrbacpath[index]['policy_groups']
-                        for j in rbacls:
-                            if not any(x in j for x in matches):
-                                try:
-                                    rbacl = re.compile(".*(?=-[0-9]+)").search(j).group().strip()
-                                except:
-                                    rbacl = None
-                        self.rbacl = rbacl
+            if ctsrbacperm_op is not None:
+                ctsrbacpath = ctsrbacperm_op['indexes']
+                for i in ctsrbacpath:
+                    if type(i) == int:
+                        index = i
+                        self.srcsgt = sgt
+                        self.dstsgt = dgt
+                        self.isdefaultrule = True
+                        try:
+                            self.rbacl = ctsrbacpath[index]['action_policy']+" IP"
+                        except:
+                            matches = ["#"]
+                            rbacls = ctsrbacpath[index]['policy_groups']
+                            for j in rbacls:
+                                if not any(x in j for x in matches):
+                                    try:
+                                        rbacl = re.compile(".*(?=-[0-9]+)").search(j).group().strip()
+                                    except:
+                                        rbacl = None
+                            self.rbacl = rbacl
+            else:
+                self.srcsgt = sgt
+                self.dstsgt = dgt
+                #If not even the default rule exists in the form of permit or deny, it is treated as permit all.
+                self.isdefaultrule = True
+                self.defaultpermit = True
+                self.rbacl = None
 
     def cts_rbac_rbacls(self, rbacl, service):
         rbaclcmd = "show cts rbacl \"{}\" | se ACEs".format(rbacl)
@@ -309,12 +322,22 @@ class cts_rules():
         else:
             ctsrbaccounter_cmd = "show cts role-based counters default".format()
             ctsrbaccounter_op = radkit_cli.get_single_output_genie(self.hostname, ctsrbaccounter_cmd, service)
-            ctscount_path = ctsrbaccounter_op['cts_rb_count']
-            for i in ctscount_path:
-                self.sw_denied_count = ctscount_path[i]['sw_denied_count']
-                self.hw_denied_count = ctscount_path[i]['hw_denied_count']
-                self.sw_permit_count = ctscount_path[i]['sw_permit_count']
-                self.hw_permit_count = ctscount_path[i]['hw_permit_count']
-                self.sw_monitor_count = ctscount_path[i]['sw_monitor_count']
-                self.hw_monitor_count = ctscount_path[i]['hw_monitor_count']
+            try:
+                ctscount_path = ctsrbaccounter_op['cts_rb_count']
+                for i in ctscount_path:
+                    self.sw_denied_count = ctscount_path[i]['sw_denied_count']
+                    self.hw_denied_count = ctscount_path[i]['hw_denied_count']
+                    self.sw_permit_count = ctscount_path[i]['sw_permit_count']
+                    self.hw_permit_count = ctscount_path[i]['hw_permit_count']
+                    self.sw_monitor_count = ctscount_path[i]['sw_monitor_count']
+                    self.hw_monitor_count = ctscount_path[i]['hw_monitor_count']
+            except TypeError:
+                self.sw_denied_count = 0
+                self.hw_denied_count = 0
+                self.sw_permit_count = 0
+                self.hw_permit_count = 0
+                self.sw_monitor_count = 0
+                self.hw_monitor_count = 0
+
+
  

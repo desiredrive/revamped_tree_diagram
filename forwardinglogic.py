@@ -1,6 +1,7 @@
 import ipverifications
 import sys
-import traffic_flows.l2_lisp_interxtr
+
+from securitymodules.accesslists import AccessList, hexdecimal_representation_acl, hexdecimal_acl_hit
 from traffic_flows.operational_tests import Ping
 from routingmodules import lisp
 from routingmodules import iprouting
@@ -8,11 +9,12 @@ from routingmodules import cef
 from switchingmodules.interfaces import Interfaces
 from catalystcenterapi import catcapi
 from device_profiler import Device, collection_success
-from hostonboarding import endpoint_info,host_onboarding_success
+from hostonboarding import EndpointInfo,host_onboarding_success
 from securitymodules.ciscotrustsec import cts_endpoint_info
 from securitymodules.ciscotrustsec import cts_rules,cts_ep_collection,cts_rule_collection
 from radkit_cli import logging_info,logging_error,logging_warning
 from pprint import pformat
+from traffic_flows import  l2_lisp_interxtr
 from traffic_flows.l2_lisp_interxtr import cp_l2_results,l2_mapcache_results
 from routingmodules.iprouting import ip_route_collection
 from routingmodules.cef import ip_cef_collection,phy_cef_collection
@@ -34,8 +36,8 @@ Are source and destination in the same subnet? If Yes:
         if Flood ARPnd enabled: L2MAC is mandatory, L2AR is relaxed
 '''
 def flowelection(epinfo, dstip,step):
-    process = "Forwarding-Logic"
-    subprocess = "[Flow-Election]"
+    process = "forwardingLogic"
+    subprocess = "[flowElection]"
     issamesubnet=ipverifications.subnet_validator(epinfo.sourceip,dstip,epinfo.mask)
     if issamesubnet==False:
         logging_info(step, process, subprocess,"Main",
@@ -49,10 +51,10 @@ def flowelection(epinfo, dstip,step):
         return ("L2")
 
 def device_flow(flow_type, sourcextr, sourceep, destip, service,step):
-    process = "Forwarding-Logic"
+    process = "forwardingLogic"
     if flow_type == "L2":
-        subprocess = "[L2]"
-        logging_info(step, process, subprocess,"Main",
+        subprocess = "[layer2]"
+        logging_info(step, process, subprocess,"main",
                       "Determining if flow is Inter-XTR or Intra-XTR")
         #print("Determining if flow is Inter-XTR or Intra-XTR")
         
@@ -67,21 +69,160 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service,step):
         logging_info(step, process, subprocess, hostname, string)
         #print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
 
+        #Step 1.5: Verification of LISP ACL for Source and Destination
+        subprocess = "[l2lisp]"
+        logging_info(step, process, subprocess,hostname,
+                      "Validating L2LISP ACL")
+        l2lispaclnamein = l2lispsrc.l2lispaclin
+        l2lispaclnameout = l2lispsrc.l2lispaclout
+        #Ingress ACL validation
+        if l2lispaclnamein is not None:
+            inacl = AccessList(sourcextr.hostname)
+            inacl.aclbyidname(l2lispaclnamein,service)
+            acltype = inacl.acltype
+            aclaces = inacl.aces
+            inacl = {
+                'acltype': acltype,
+                'aces': aclaces
+            }
+            hexacl = hexdecimal_representation_acl(inacl)
+            #Ingress Evaluation
+            evaluation = {
+                'sourceip': sourceep.sourceip,
+                'destinationip': destip,
+                'protocol': None,
+                'srcport': None,
+                'dstport': None
+            }
+            for ace in hexacl:
+                hit = hexdecimal_acl_hit(ace, evaluation)
+                if type(hit) is tuple:
+                    if hit[0] is True:
+                        if hit[1] == 'deny':
+                            error = "L2LISP - Denied by ACL"
+                            message = "The L2LISP0 interface inbound ACL is denying traffic from {} to {} on device {}. ACL is {} and sequence is {}".format(sourceep.sourceip, destip, hostname,l2lispaclnamein,hit[2])
+                            logging_error(step, process, subprocess, hostname, error)
+                            logging_info(step, process, subprocess, hostname, message)
+                            # raise BDBTaskError("Error: {} | {}".format(error,message))
+                            sys.exit("Error: {} | {}".format(error, message))
+                        if hit[1] == 'permit':
+                            in_acl_summary = "The L2LISP0 interface outbound ACL is not denying traffic from {} to {} on device {}.".format(sourceep.sourceip, destip, hostname)
+                            string = "Result: Success"
+                            logging_info(step, process, subprocess, hostname, in_acl_summary)
+                            logging_info(step, process, subprocess, hostname, string)
+                            break
+            #Egress Evaluation
+            evaluation = {
+                'sourceip': destip,
+                'destinationip': sourceep.sourceip,
+                'protocol': None,
+                'srcport': None,
+                'dstport': None
+            }
+            for ace in hexacl:
+                hit = hexdecimal_acl_hit(ace, evaluation)
+                if type(hit) is tuple:
+                    if hit[0] is True:
+                        if hit[1] == 'deny':
+                            error = "L2LISP - Denied by ACL"
+                            message = "The L2LISP0 interface inbound ACL is denying traffic from {} to {} on device {}. ACL is {} and sequence is {}".format(sourceep.sourceip, destip, hostname,l2lispaclnamein,hit[2])
+                            logging_error(step, process, subprocess, hostname, error)
+                            logging_info(step, process, subprocess, hostname, message)
+                            # raise BDBTaskError("Error: {} | {}".format(error,message))
+                            sys.exit("Error: {} | {}".format(error, message))
+                        if hit[1] == 'permit':
+                            in_acl_summary = "The L2LISP0 interface outbound ACL is not denying traffic from {} to {} on device {}.".format(sourceep.sourceip, destip, hostname)
+                            string = "Result: Success"
+                            logging_info(step, process, subprocess, hostname, in_acl_summary)
+                            logging_info(step, process, subprocess, hostname, string)
+                            break
+        else:
+                in_acl_summary = "The L2LISP0 interface inbound ACL is not denying traffic from {} to {} on device {}.".format(sourceep.sourceip, destip, hostname)
+                string = "Result: Success"
+                logging_info(step, process, subprocess, hostname, in_acl_summary)
+                logging_info(step, process, subprocess, hostname, string)
+
+        #Egress ACL Evaluation
+        if l2lispaclnameout is not None:
+            outacl = AccessList(sourcextr.hostname)
+            outacl.aclbyidname(l2lispaclnameout,service)
+            acltype = outacl.acltype
+            aclaces = outacl.aces
+            outacl = {
+                'acltype': acltype,
+                'aces': aclaces
+            }
+            hexacl = hexdecimal_representation_acl(outacl)
+            #Ingress Evaluation
+            evaluation = {
+                'sourceip': sourceep.sourceip,
+                'destinationip': destip,
+                'protocol': None,
+                'srcport': None,
+                'dstport': None
+            }
+            for ace in hexacl:
+                hit = hexdecimal_acl_hit(ace, evaluation)
+                if type(hit) is tuple:
+                    if hit[0] is True:
+                        if hit[1] == 'deny':
+                            error = "L2LISP - Denied by ACL"
+                            message = "The L2LISP0 interface outbound ACL is denying traffic from {} to {} on device {}. ACL is {} and sequence is {}".format(sourceep.sourceip, destip, hostname,l2lispaclnamein,hit[2])
+                            logging_error(step, process, subprocess, hostname, error)
+                            logging_info(step, process, subprocess, hostname, message)
+                            # raise BDBTaskError("Error: {} | {}".format(error,message))
+                            sys.exit("Error: {} | {}".format(error, message))
+                        if hit[1] == 'permit':
+                            in_acl_summary = "The L2LISP0 interface outbound ACL is not denying traffic from {} to {} on device {}.".format(sourceep.sourceip, destip, hostname)
+                            string = "Result: Success"
+                            logging_info(step, process, subprocess, hostname, in_acl_summary)
+                            logging_info(step, process, subprocess, hostname, string)
+                            break
+            #Egress Evaluation
+            evaluation = {
+                'sourceip': destip,
+                'destinationip': sourceep.sourceip,
+                'protocol': None,
+                'srcport': None,
+                'dstport': None
+            }
+            for ace in hexacl:
+                hit = hexdecimal_acl_hit(ace, evaluation)
+                if type(hit) is tuple:
+                    if hit[0] is True:
+                        if hit[1] == 'deny':
+                            error = "L2LISP - Denied by ACL"
+                            message = "The L2LISP0 interface outbound ACL is denying traffic from {} to {} on device {}. ACL is {} and sequence is {}".format(sourceep.sourceip, destip, hostname,l2lispaclnamein,hit[2])
+                            logging_error(step, process, subprocess, hostname, error)
+                            logging_info(step, process, subprocess, hostname, message)
+                            # raise BDBTaskError("Error: {} | {}".format(error,message))
+                            sys.exit("Error: {} | {}".format(error, message))
+                        if hit[1] == 'permit':
+                            in_acl_summary = "The L2LISP0 interface outbound ACL is not denying traffic from {} to {} on device {}.".format(sourceep.sourceip, destip, hostname)
+                            string = "Result: Success"
+                            logging_info(step, process, subprocess, hostname, in_acl_summary)
+                            logging_info(step, process, subprocess, hostname, string)
+                            break
+        else:
+                in_acl_summary = "The L2LISP0 interface outbound ACL is not denying traffic from {} to {} on device {}.".format(sourceep.sourceip, destip, hostname)
+                string = "Result: Success"
+                logging_info(step, process, subprocess, hostname, in_acl_summary)
+                logging_info(step, process, subprocess, hostname, string)
+
         #Step 2: Identify AR for Local MAC and Local AR:
         step = step+1
-        l2lisp_ar_src = traffic_flows.l2_lisp_interxtr.ar_relay_resolution(sourceep.sourceip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy,step)
+        l2lisp_ar_src = l2_lisp_interxtr.ar_relay_resolution(sourceep.sourceip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy,step)
         collection_summary = "EID: {}, L2VNI: {}, ETRs: {}, AR-Binding: {}, Protocol: {}, CP: {}, AuthenticationFailures: {}".format(l2lispsrc.sourcevlan,l2lispsrc.l2lispiid, l2lispsrc.sourcemac,l2lispsrc.l2dynstate,l2lispsrc.l2lispdbstate,l2lispsrc.l2cps,l2lispsrc.l2signalsupressstate)
         string = "Result: Success"
         logging_info(step, process, subprocess, hostname, collection_summary)
         logging_info(step, process, subprocess, hostname, string)
         step = step+1
-        l2lisp_mac = traffic_flows.l2_lisp_interxtr.mac_rloc_resolution(l2lisp_ar_src[0],l2lispsrc.l2lispiid,l2lisp_ar_src[1],service,step)
-
+        l2lisp_mac = l2_lisp_interxtr.mac_rloc_resolution(l2lisp_ar_src[0],l2lispsrc.l2lispiid,l2lisp_ar_src[1],service,step)
 
 
         #Step 2: Identify AR-Request, find the endpoint in Control Plane
         step = step+1
-        l2lisp_ar = traffic_flows.l2_lisp_interxtr.ar_relay_resolution(destip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy,step)
+        l2lisp_ar = l2_lisp_interxtr.ar_relay_resolution(destip, l2lispsrc.l2lispiid,l2lispsrc.l2cps,service,sourcextr.dnac, sourcextr.fabric_site_hierarchy,step)
         collection_summary = "EID: {}, L2VNI: {}, ETRs: {}, AR-Binding: {}, Protocol: {}, CP: {}, AuthenticationFailures: {}".format(l2lispsrc.sourcevlan,l2lispsrc.l2lispiid, l2lispsrc.sourcemac,l2lispsrc.l2dynstate,l2lispsrc.l2lispdbstate,l2lispsrc.l2cps,l2lispsrc.l2signalsupressstate)
         string = "Result: Success"
         logging_info(step, process, subprocess, hostname, collection_summary)
@@ -89,7 +230,7 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service,step):
 
         #Step 3: Identify L2 EID / MAC-Address, extract destination RLOC
         step = step+1
-        l2lisp_mac = traffic_flows.l2_lisp_interxtr.mac_rloc_resolution(l2lisp_ar[0],l2lispsrc.l2lispiid,l2lisp_ar[1],service,step)
+        l2lisp_mac = l2_lisp_interxtr.mac_rloc_resolution(l2lisp_ar[0],l2lispsrc.l2lispiid,l2lisp_ar[1],service,step)
         sourcerloc = sourcextr.loopback
         dstrloc = l2lisp_mac[0]
         mac = l2lisp_mac[1]
@@ -105,13 +246,12 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service,step):
             logging_info(step, process, subprocess, "Main",
                          "Starting Inter-XTR Switching Flow (L2), Flow is East-West")
             #print ("Starting Inter-XTR Switching Flow (L2), Flow is East-West\n")
-            l2_inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, mac, service,step)
-    return None
+            final_objects = l2_inter_xtr_ew(sourcextr, sourceep, l2lispsrc, dstrloc, destip, mac, service,step)
+    return final_objects
 
 def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step):
-    process = "Forwarding-Logic"
-    subprocess = "[East-West]"
-
+    process = "forwardingLogic"
+    subprocess = "[eastWestFlow]"
     #Execution of L2LISP Map Cache
     #Get the hostname of the destination RLOC and then Management IP:
 
@@ -129,6 +269,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step)
     collection_success(dstxtr)
     #print (pformat(vars(dstxtr), indent=4, width =1, sort_dicts=False))
 
+
     step = step+1
     #Determining Inter or Intra Site:
     dstsite = dstxtr.fabric_site_hierarchy
@@ -142,31 +283,51 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step)
         #print ("Source XTR {} in Fabric: {}, not int the same  Fabric Site: {} as Destination XTR {}".format(srcxtr.hostname, srcsite, dstsite, dstxtr.hostname))
     #Remote Map-Cache Calculation
     #[Object: L2LISP Map Cache]
-    l2mapcache = traffic_flows.l2_lisp_interxtr.l2lisp_map_cache_validation(l2lispsrc, dstrloc, srcxtr.hostname, mac, service,step)
+    l2mapcache = l2_lisp_interxtr.l2lisp_map_cache_validation(l2lispsrc, dstrloc, srcxtr.hostname, mac, service,step)
     l2_mapcache_results(l2mapcache,step)
     #print (pformat(vars(l2mapcache), indent=4, width =1, sort_dicts=False))
 
+
+    #L2LISP ACL Verification - Source vs Destination is denied?
+
+
+
     #Underlay Routing Modules:
     step = step+1
-    subprocess = "[Underlay]"
+    subprocess = "[underlay]"
     #[Object: Recursed Route]
     logging_info(step,process,subprocess,srcxtr.hostname,"Collecting RIB Information for prefix: {}".format(l2mapcache.rloc))
     rlocroute = iprouting.IPRoute(l2mapcache.rloc,None,srcxtr.hostname)
     rlocroute.iproute_prefix(service,step)
     ip_route_collection(rlocroute,step)
     #print (pformat(vars(rlocroute), indent=4, width =1, sort_dicts=False))
-
+    hostname = srcxtr.hostname
     #RLOC reachability for L2 requires /32 másk
     if int(rlocroute.mask) != 32:
-        logging_error(step,process,subprocess,srcxtr.hostname,"WARNING!: LISP Layer 2 Extension requires a /32 for each RLOC, RLOC {} is known via route {} with mask {} which is not exact!".format(l2mapcache.rloc, rlocroute.prefix, rlocroute.mask))
-        sys.exit("WARNING!: LISP Layer 2 Extension requires a /32 for each RLOC, RLOC {} is known via route {} with mask {} which is not exact!".format(l2mapcache.rloc, rlocroute.prefix, rlocroute.mask))
-    
+
+        error = "Underlay Validation - Wrong Prefix Mask"
+        message = "LISP Layer 2 Extension requires a /32 for each RLOC, RLOC {} is known via route {} with mask {} which is not exact, consult the GPA_SDA Collection Log file".format(
+            l2mapcache.rloc, rlocroute.prefix, rlocroute.mask)
+        logging_error(step, process, subprocess, hostname, error)
+        logging_info(step, process, subprocess, hostname, message)
+        #raise BDBTaskError("Error: {} | {}".format(error,message))
+        sys.exit("Error: {} | {}".format(error, message))
     #[CEF: Route to Underlay]:
     #[Object: CEF Internal Information]
     step = step+1
     logging_info(step,process,subprocess,srcxtr.hostname,"Processing CEF Internal Information for prefix: {}".format(l2mapcache.rloc))
     rloccef = cef.IPCef(l2mapcache.rloc,None,srcxtr.hostname)
     rloccef.get_cef_internal(service)
+    for nexthop in rloccef.nexthops:
+        interface = nexthop['oif']
+        if interface == "Null0":
+            error = "Underlay Validation - Invalid Adjacency"
+            message = "One of the next-hops to {} is a Null0 route, this can cause total or partial packet loss, please correct this route on device: {}, for more information consult the GPA_SDA Collection Log file".format(
+                rloccef.ip, rloccef.hostname)
+            logging_error(step, process, subprocess, hostname, error)
+            logging_info(step, process, subprocess, hostname, message)
+            # raise BDBTaskError("Error: {} | {}".format(error,message))
+            sys.exit("Error: {} | {}".format(error, message))
     ip_cef_collection(rloccef,step)
     #print (pformat(vars(rloccef), indent=4, width =1, sort_dicts=False))
 
@@ -197,7 +358,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step)
             #print ("\n")
     
     #Minimum MTU calculation
-    subprocess = "[MTU]"
+    subprocess = "[mtu]"
     step = step + 1
     mtus.sort()
     minimum = mtus[0]
@@ -234,19 +395,20 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step)
         #print ("ICMP Connectivity from {} to {} is good at {} % success rate with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
 
     #Profiling Endpoint in Remote XTR
-    process ="Host-Onboarding"
-    subprocess = None,
+    process ="hostOnboarding"
+    subprocess = "[endpointProfiling]",
     step = step+1
     logging_info(step, process, subprocess,dstxtr.hostname, "Gathering information about the destination endpoint")
     #print ("Gathering information about the source endpoint...\n")
-    dstep = endpoint_info(dstip)
+    dstep = EndpointInfo(dstip)
     dstep.host_onboarding_validation(dstxtr,service,step)
     host_onboarding_success(dstep,dstxtr.hostname)
     #print (pformat(vars(dstep), indent=4, width =1, sort_dicts=False))
 
     #Performing CTS evaluations for the Source
     step = step+1
-    subprocess = "[CTS]"
+    process = "policyEvaluation"
+    subprocess = "[ciscoTrustSec]"
     logging_info(step, process, subprocess,srcxtr.hostname, "Gathering CTS information between SGTs")
     #print ("Gathering CTS information between SGTs...\n")
     srcctsinfo = cts_endpoint_info(srcep.sourceip,srcep.sourcevrf, srcxtr.hostname)
@@ -277,9 +439,20 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step)
     ctsrules = cts_rules(dstxtr.hostname)
     ctsrules.cts_rbac_permissions(sgt, dgt, service)
     rbacl = ctsrules.rbacl
-    ctsrules.cts_rbac_rbacls(rbacl,service)
-    ctsrules.cts_rbac_counters(sgt,dgt,service)
-    cts_rule_collection(ctsrules,step)
+    if ctsrules.isdefaultrule is True:
+        ctsrules.cts_rbac_counters(0, 0, service)
+        ctsrules.cts_rbac_rbacls(rbacl, service)
+        cts_rule_collection(ctsrules, 0)
+        try:
+            if ctsrules.defaultpermit is True:
+                ctsrules.aces = None
+        except AttributeError:
+            pass
+        cts_rule_collection(ctsrules, 0)
+    else:
+        ctsrules.cts_rbac_rbacls(rbacl, service)
+        ctsrules.cts_rbac_counters(sgt, dgt, service)
+        cts_rule_collection(ctsrules, 0)
     #print (pformat(vars(ctsrules), indent=4, width =1, sort_dicts=False))
 
     if ctsrules.isdefaultrule is True:
@@ -289,7 +462,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step)
         #print ("Default rule information is: {}\n".format(ctsrules.rbacl))
         #print ("ACEs for the default rule: {}\n".format(ctsrules.aces))
     else:
-        logging_info(step, process, subprocess, dstxtr.hostname, "Specific rule found for SGT {} and Destination SGT {} on device {}, using RBACL:".format(sgt,dgt,dstxtr.hostname, ctsrules.rbacl))
+        logging_info(step, process, subprocess, dstxtr.hostname, "Specific rule found for SGT {} and Destination SGT {} on device {}, using RBACL: {}".format(sgt,dgt,dstxtr.hostname, ctsrules.rbacl))
         logging_info(step, process, subprocess, dstxtr.hostname, "ACEs for the specific rule: {}".format(ctsrules.aces))
 
         #print ("Specific rule found for SGT {} and Destination SGT {} on device {}, using RBACL: \n".format(sgt,dgt,dstxtr.hostname, ctsrules.rbacl))
@@ -301,7 +474,7 @@ def l2_inter_xtr_ew(srcxtr, srcep, l2lispsrc, dstrloc, dstip, mac, service,step)
         logging_info(step, process, subprocess, dstxtr.hostname, "CTS Counters NOT dropping for rule from SGT {} to SGT {} on device: {}".format(sgt, dgt, dstxtr.hostname))
         #print ("CTS Counters NOT dropping for rule from SGT {} to SGT {} on device: {}".format(sgt, dgt, dstxtr.hostname))
 
-    return None
+    return dstxtr,dstep,mtu_ping,ctsrules, l2lispsrc
 
 def site_flow():
     return None

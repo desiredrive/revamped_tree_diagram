@@ -6,7 +6,7 @@ class mac_learning:
         self.hostname = device
 
     def mac_learning_mac(self, mac, vlan, service):
-        mac_cmd = "show mac address-table address {} {}".format(mac, vlan)
+        mac_cmd = "show mac address-table address {} vlan {}".format(mac, vlan)
         mac_op = radkit_cli.get_single_output_genie(self.hostname, mac_cmd, service)
 
         if mac_op == None:
