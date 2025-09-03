@@ -677,3 +677,21 @@ class LISPInstanceStatus:
         lispiidstats_op = get_single_output_genie(device,lispiidstats_cmd,service)
 
         print (lispiidstats_op)
+
+class LISPSession:
+
+    def __init__(self,device):
+        self.device = device
+
+    def globallispsession(self,mapserver,service):
+        device = self.device
+
+        lispsessionall = "show lisp session all"
+        lispsessionallop = get_any_single_output(device, lispsessionall, service)
+        if lispsessionallop is not None:
+            print (lispsessionallop)
+        lispsessionspecific = "show lisp session {}".format(mapserver)
+        lispsessionspecificop = get_any_single_output(device, lispsessionspecific, service)
+        if lispsessionspecificop is not None:
+            print (lispsessionspecificop)
+

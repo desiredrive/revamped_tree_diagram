@@ -5,7 +5,8 @@ from ipverifications import (
    ipsubnet_validator_no_return
 )
 from switchingmodules.maclearning import mac_learning
-from routingmodules.lisp import l2lisp_info,LISPLocalDB,LISPEIDWatch,lisp_map_servers,LISPInstanceStatus
+from routingmodules.lisp import l2lisp_info, LISPLocalDB, LISPEIDWatch, lisp_map_servers, LISPInstanceStatus, \
+    LISPSession
 from radkit_cli import logging_info,logging_error,logging_warning,get_catc_api,get_any_single_output,get_single_output_genie
 from pprint import pformat
 
@@ -17,11 +18,11 @@ from pprint import pformat
 #5 Identify if the EID is in the LISP Database (Can be IP, EID, Prefix, Host, etc)
 #7 Identify the source RLOC for registration (valid RLOC)
 #8 Identify the Map-Resolvers for the Registration, verify proxy flag, node must be ETR
-#9 Identify LISP registration metrics and statistics
-#10 UDP Listen State in MS/MR
-#11 TCP test in ETR
-#10 Identify the status of the LISP session (global)
-#12 Identify the status of the LISP session (per ID, Optional)
+#9 Identify the status of the LISP session (global)
+#10 Identify the status of the LISP session (per ID, Optional)
+#11 Identify LISP registration metrics and statistics
+#12 UDP Listen State in MS/MR
+#13 TCP test in ETR
 #13 Recurse route to the Mpa Servers
 #14 Identify global MTU and egress interface (lowest) MTU towards the Map-Servers
 #15 Identify global MTU and egress interface (lowest) MTU towards the ETR
@@ -244,9 +245,10 @@ class ETRConfiguration():
     def __init__(self,device):
         self.device = device
 
-    def map_servers(self,eidident,service):
+    def etr_map_servers(self,eidident,service):
         # 8 Identify the Map-Resolvers for the Registration, verify proxy flag, node must be ETR
-        # 9 Identify LISP registration metrics and statistics
+        # 9 Identify the status of the LISP session (global)
+        # 10 Identify the status of the LISP session (per ID, Optional)
         device = self.device
         map_servers = eidident.mapservers
 
@@ -273,8 +275,21 @@ class ETRConfiguration():
             message = "ETR Functionality is  NOT configured for the following device {}. Review the GPS_SDA Collection logfile for more information.".format(device)
             exit_program(step,process,subprocess,device,error,message)
 
-        # 9 Identify LISP registration metrics and statistics
-        lisp_iid_status.eidStatistics(qtype,service)
+        # 9 Identify the status of the LISP session (global)
+        # 10 Identify the status of the LISP session (per ID, Optional)
+        mapserverips = []
+        for mapserver in map_servers:
+            mapserverips.append((mapserver['mapserver']))
+        if mapserverips == 0:
+            error = "LISP Configuration - Map Servers"
+            message = "Map Servers are not configured for the following device {}. Review the GPS_SDA Collection logfile for more information.".format(device)
+            exit_program(step,process,subprocess,device,error,message)
+        for ip in mapserverips:
+            lisp_session_status = LISPSession(device)
+            lisp_session_status.globallispsession(ip,service)
+
+
+
 
 
 #Classes
