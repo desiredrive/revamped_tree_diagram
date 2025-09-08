@@ -1,9 +1,14 @@
 import sys
+
+from device_profiler import Device
 from ipverifications import (
    mac_address_validator,
    ipaddress_validator_no_return,
    ipsubnet_validator_no_return
 )
+from routingmodules.cef import IPCef, physical_recursion
+from routingmodules.iprouting import IPRoute, IGPInfo
+from securitymodules.accesslists import AccessList
 from switchingmodules.maclearning import mac_learning
 from routingmodules.lisp import l2lisp_info, LISPLocalDB, LISPEIDWatch, lisp_map_servers, LISPInstanceStatus, \
     LISPSession
@@ -43,46 +48,6 @@ from pprint import pformat
 #1 Identify the EID to register (MAC (UDP/TCP), IP (UDP/TCP), AR(TCP)
 #2 Identify if the method for LISP DB insertion (DynamicEID/SISF, Route-Import, Static, WLC notification).
 
-def exit_program(step, process, subprocess, hostname, error, message):
-    logging_error(step, process, subprocess, hostname, error)
-    logging_info(step, process, subprocess, hostname, message)
-    sys.exit("Error: {} | {}".format(error, message))
-
-def find_mismatch_key_and_proxy_reply(output):
-    # Split the output into lines
-    lines = output.strip().split("\n")
-
-    # Dictionaries to count "key" and "proxy-reply" occurrences for each IP
-    key_counts = {}
-    proxy_reply_counts = {}
-
-    for line in lines:
-        # Check if the line contains "etr map-server"
-        if "etr map-server" in line:
-            parts = line.split()
-            ip = parts[2]  # Extract the IP address
-
-            # Count occurrences of "key"
-            if "key" in line:
-                if ip not in key_counts:
-                    key_counts[ip] = 0
-                key_counts[ip] += 1
-
-            # Count occurrences of "proxy-reply"
-            if "proxy-reply" in line:
-                if ip not in proxy_reply_counts:
-                    proxy_reply_counts[ip] = 0
-                proxy_reply_counts[ip] += 1
-
-    # Find IPs where the "key" count doesn't match the "proxy-reply" count
-    mismatched_ips = []
-    for ip in key_counts:
-        key_count = key_counts.get(ip, 0)
-        proxy_reply_count = proxy_reply_counts.get(ip, 0)
-        if key_count != proxy_reply_count:
-            mismatched_ips.append(ip)
-
-    return mismatched_ips
 
 class EIDIdentification():
     def __init__(self, device,eid):
@@ -266,33 +231,201 @@ class ETRConfiguration():
             message = "The following Map-Servers {} are NOT configured for Proxy-Reply flag. Review the GPS_SDA Collection logfile for more information.".format(map_servers_noflag)
             exit_program(step,process,subprocess,device,error,message)
 
-        lisp_iid_status = LISPInstanceStatus(device,eidident.iid)
-        if eidident.eid_type == "MAC":
-            qtype = "ethernet"
-        lisp_iid_status.eidstatus(qtype,service)
-        if lisp_iid_status.etr is not True:
-            error = "LISP Configuration - ETR"
-            message = "ETR Functionality is  NOT configured for the following device {}. Review the GPS_SDA Collection logfile for more information.".format(device)
-            exit_program(step,process,subprocess,device,error,message)
+def exit_program(step, process, subprocess, hostname, error, message):
+    logging_error(step, process, subprocess, hostname, error)
+    logging_info(step, process, subprocess, hostname, message)
+    sys.exit("Error: {} | {}".format(error, message))
 
-        # 9 Identify the status of the LISP session (global)
-        # 10 Identify the status of the LISP session (per ID, Optional)
-        mapserverips = []
-        for mapserver in map_servers:
-            mapserverips.append((mapserver['mapserver']))
-        if mapserverips == 0:
-            error = "LISP Configuration - Map Servers"
-            message = "Map Servers are not configured for the following device {}. Review the GPS_SDA Collection logfile for more information.".format(device)
-            exit_program(step,process,subprocess,device,error,message)
-        for ip in mapserverips:
-            lisp_session_status = LISPSession(device)
-            lisp_session_status.globallispsession(ip,service)
+def find_mismatch_key_and_proxy_reply(output):
+    # Split the output into lines
+    lines = output.strip().split("\n")
+
+    # Dictionaries to count "key" and "proxy-reply" occurrences for each IP
+    key_counts = {}
+    proxy_reply_counts = {}
+
+    for line in lines:
+        # Check if the line contains "etr map-server"
+        if "etr map-server" in line:
+            parts = line.split()
+            ip = parts[2]  # Extract the IP address
+
+            # Count occurrences of "key"
+            if "key" in line:
+                if ip not in key_counts:
+                    key_counts[ip] = 0
+                key_counts[ip] += 1
+
+            # Count occurrences of "proxy-reply"
+            if "proxy-reply" in line:
+                if ip not in proxy_reply_counts:
+                    proxy_reply_counts[ip] = 0
+                proxy_reply_counts[ip] += 1
+
+    # Find IPs where the "key" count doesn't match the "proxy-reply" count
+    mismatched_ips = []
+    for ip in key_counts:
+        key_count = key_counts.get(ip, 0)
+        proxy_reply_count = proxy_reply_counts.get(ip, 0)
+        if key_count != proxy_reply_count:
+            mismatched_ips.append(ip)
+
+    return mismatched_ips
+
+class ETRDevice:
+    def __init__(self, mgmtip,step):
+        self.mgmtip = mgmtip
+        self.step = step
+
+    def device_profiler(self, catc,service):
+        devprof = Device(self.mgmtip,catc,self.step)
+        devprof.profile_device(service)
+        self.profiled_device = devprof
+
+    def existing_profiled(self, profiled_device):
+        self.profiled_device = profiled_device
+
+    def eid_identification(self,eid,vlan,vrf,service):
+        hostname = self.profiled_device.hostname
+        print("Identifying EID properties for device: {} ...".format(hostname))
+        eid_properties = EIDIdentification(hostname, eid)
+        eid_properties.eid_identification(vlan,vrf,service)
+        self.eid_properties = eid_properties
+
+    def eid_configuration(self,eid_properties,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying LISP Map-Server configuration".format(hostname))
+        etr_configuration = ETRConfiguration(hostname)
+        etr_configuration.etr_map_servers(eid_properties,service)
+        self.eid_configuration = etr_configuration
+
+    def global_lisp_session(self,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying Local LISP session status for device: {} ...".format(hostname))
+        etr_lispsessions = LISPSession(hostname)
+        etr_lispsessions.globallispsession(service)
+        self.global_lisp_sessions = etr_lispsessions
+
+    def specific_lisp_session(self,mapserver,service):
+        hostname = self.profiled_device.hostname
+        print("Verifying Specific LISP session status for mapserver {} on device: {} ...".format(mapserver,hostname))
+        etr_specificsession = LISPSession(hostname)
+        etr_specificsession.specificlispsession(mapserver,service)
+        self.specific_lisp_session = etr_specificsession
 
 
+def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step):
+
+    print("Starting LISP Session-related Flows...\n")
+    #ETR
+    step = step + 1
+    etrdefinition = ETRDevice(mgmtip,step)
+    etrdefinition.device_profiler(catc_name, service)
+    hostname = etrdefinition.profiled_device.hostname
+    #print("Profiled device {}:\n".format(hostname))
+    #print(pformat(vars(etrdefinition.profiled_device), indent=4, width=1, sort_dicts=False))
+
+    step = step+1
+    # ETR Identification and Configuration (Steps 1-8)
+    etrdefinition.eid_identification(eid,vlan,vrf,service)
+    #print(pformat(vars(etrdefinition.eid_properties), indent=4, width=1, sort_dicts=False))
+    etrdefinition.eid_configuration(etrdefinition.eid_properties,service)
+
+    step = step + 1
+    # LISP Session Local Status (Global)
+    etrdefinition.global_lisp_session(service)
+    #print(pformat(vars(etrdefinition.global_lisp_sessions), indent=4, width=1, sort_dicts=False))
+    process = "lispSession"
+    subprocess = "[globalLISPSession]"
+    #Bad LISP Session states: Down, Init, NoRoute, at least 1 LISP session must be up to the map-servers and not itself.
+    etr_rloc = etrdefinition.profiled_device.loopback
+    lisp_sessions = etrdefinition.global_lisp_sessions.peers
+    single_up = False
+    for peer in lisp_sessions:
+        if peer != etr_rloc:
+            state = lisp_sessions[peer][0]['state']
+            if state == 'Up':
+                single_up = True
+    if single_up is False:
+        error = "LISP Sessions - All Down"
+        message = "All LISP sessions are down  on device {}.".format(hostname)
+        logging_warning(step, process, subprocess, hostname, error+"|"+message)
+
+    step = step + 1
+    process = "lispSession"
+    subprocess = "[specificLISPSession]"
+    # LISP Session Specific Status (Only to map-servers)
+    eid_map_servers = etrdefinition.eid_properties.mapservers
+    map_server_ips = []
+    for map_server in eid_map_servers:
+        map_server_ip = map_server['map_server']
+        if map_server_ip != etr_rloc:
+            map_server_ips.append(map_server_ip)
+    specific_lisp_sessions = []
+    for ip in map_server_ips:
+        a = LISPSession(hostname)
+        a.specificlispsession(ip,service)
+        specific_lisp_sessions.append(a)
+    # If all of specific sessions are in the wrong state, RCA will be attempted on all, depending on the code status:
+        #No Route: call underlay recursion
+        #Down/Init : Route check, cef check, ACL check, ping check, ping MTU check, telnet test.
+    if single_up is False:
+        for specific_lisp_session in specific_lisp_sessions:
+            mapserverip = specific_lisp_session.peer_addr
+            state = specific_lisp_session.session_state
+            if (state=="Down") or (state=="Init"):
+                error = "LISP Specific Sessions - Down or Init"
+                message = "LISP Session to {} is in state {} on device {}. Performing checks".format(mapserverip,state,hostname)
+                logging_warning(step, process, subprocess, hostname, error + " | " + message)
+                #Route Check:
+                route = IPRoute(mapserverip,None,hostname)
+                route.iproute_prefix(service,step)
+                if route.mask == '0':
+                    error = "LISP Specific Session - IP Routing"
+                    message = "LISP Session to {} is in state {} on device {}. The routing table entry to the Map-Server is not specific, it uses a default route".format(mapserverip,state,hostname)
+                    exit_program(step, process, subprocess, hostname, error, message)
+                else:
+                    error = "LISP Specific Session - IP Routing"
+                    message = "A valid/specific route exists to the Map-Server {}, nexthop(s) are: {}".format(mapserverip,route.nexthop,hostname)
+                    logging_info(step, process, subprocess, hostname, error+" | "+message)
+                #IGP Neighbors
+                cef = IPCef(mapserverip,None,hostname)
+                cef.get_cef_internal(service)
+                error = "LISP Specific Session - CEF"
+                message = "A valid/specific CEF entry exists to the Map-Server {}, nexthop(s) are: {}".format(mapserverip,
+                                                                                                          cef.nexthops,
+                                                                                                          hostname)
+                logging_info(step, process, subprocess, hostname, error + " | " + message)
+                #Physical Recursion:
+                igp = route.protocol
+                phys = IGPInfo(hostname)
+                phys.igp_neighbors(igp,service)
+                if phys.igp_neighbors is None:
+                    error = "LISP Specific Sessions - Unable to recurse route"
+                    message = "LISP Session to {} is in state {} on device {}. but the flow was unable to find the neighbor interfaces for the IGP: {}".format(mapserverip,state,hostname,igp)
+                    logging_warning(step, process, subprocess, hostname, error + " | " + message)
+                else:
+                    phyinterfaces = phys.neighbor_interfaces
+                    error = "LISP Specific Session - Physical Interfaces"
+                    message = "A valid/specific CEF entry exists to the Map-Server {}, physical interfaces towards CP are: {}".format(
+                        mapserverip,phyinterfaces,hostname)
+                    logging_info(step, process, subprocess, hostname, error + " | " + message)
+
+                #ACL Validation
+                total_acls = []
+                interfaces = phyinterfaces
+                for interface in interfaces:
+                    acls = AccessList(hostname)
+                    acls.aclbyinterface(interface,service)
+                    if len(acls.aclnames) != 0:
+                        for acl in acls.aclnames:
+                            total_acls.append(acl)
+                total_acls = set(total_acls)
+                if len(total_acls) !=0:
+                    error = "LISP Specific Session - ACLs"
+                    message = "ACLs found on physical interfaces in the direction to the Map-Server {} on device: {}, evaluating ACLs".format(mapserverip,hostname)
+                    logging_info(step, process, subprocess, hostname, error + " | " + message)
+            
 
 
-
-#Classes
-
-#LISP Session (Global, Per IID, TCP Status, TCB Status)
 

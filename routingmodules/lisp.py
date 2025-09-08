@@ -8,6 +8,63 @@ from switchingmodules.spanning_tree import SpanningTree
 from switchingmodules.vlan import VlanInformation
 from radkit_cli import logging_info, logging_error, logging_warning, get_any_single_output,get_single_output_genie
 
+def parse_lisp_session(output):
+    result = {}
+    # Peer address and port
+    peer_match = re.search(r"Peer address:\s+([\d\.]+):(\d+)", output)
+    if peer_match:
+        result['peer_addr'] = peer_match.group(1)
+        result['peer_port'] = int(peer_match.group(2))
+    else:
+        # If port is missing, try without port
+        peer_match = re.search(r"Peer address:\s+([\d\.]+)", output)
+        if peer_match:
+            result['peer_addr'] = peer_match.group(1)
+            result['peer_port'] = None
+    # Local address and port (port may be missing)
+    local_match = re.search(r"Local address:\s+([\d\.]+)(?::(\d+))?", output)
+    if local_match:
+        result['local_address'] = local_match.group(1)
+        result['local_port'] = int(local_match.group(2)) if local_match.group(2) else None
+    # Session Type
+    session_type_match = re.search(r"Session Type:\s+(\S+)", output)
+    if session_type_match:
+        result['session_type'] = session_type_match.group(1)
+    # Session State and uptime
+    session_state_match = re.search(r"Session State:\s+(\S+)(?: \(([^)]+)\))?", output)
+    if session_state_match:
+        result['session_state'] = session_state_match.group(1)
+        result['session_state_time'] = session_state_match.group(2) if session_state_match.group(2) else None
+    # Messages in/out
+    messages_match = re.search(r"Messages in/out:\s+(\d+)/(\d+)", output)
+    if messages_match:
+        result['messages_in'] = int(messages_match.group(1))
+        result['messages_out'] = int(messages_match.group(2))
+    # Fatal errors
+    fatal_errors_match = re.search(r"Fatal errors:\s+(\d+)", output)
+    if fatal_errors_match:
+        result['fatal_errors'] = int(fatal_errors_match.group(1))
+    # Rcvd unsupported
+    rcvd_unsupported_match = re.search(r"Rcvd unsupported:\s+(\d+)", output)
+    if rcvd_unsupported_match:
+        result['rcvd_unsupported'] = int(rcvd_unsupported_match.group(1))
+    # Rcvd invalid VRF
+    rcvd_invalid_vrf_match = re.search(r"Rcvd invalid VRF:\s+(\d+)", output)
+    if rcvd_invalid_vrf_match:
+        result['rcvd_invalid_vrf'] = int(rcvd_invalid_vrf_match.group(1))
+    # Rcvd override
+    rcvd_override_match = re.search(r"Rcvd override:\s+(\d+)", output)
+    if rcvd_override_match:
+         result['rcvd_override'] = int(rcvd_override_match.group(1))
+    #Rcvd malformed
+    rcvd_malformed_match = re.search(r"Rcvd malformed:\s+(\d+)", output)
+    if rcvd_malformed_match:
+        result['rcvd_malformed'] = int(rcvd_malformed_match.group(1))
+    # Sent deferred
+    sent_deferred_match = re.search(r"Sent deferred:\s+(\d+)", output)
+    if sent_deferred_match:
+        result['sent_defferred'] = int(sent_deferred_match.group(1))
+    return result
 
 def lisp_map_servers(device,service):
     lisp_cmd = "show run | i map-server"
@@ -683,15 +740,58 @@ class LISPSession:
     def __init__(self,device):
         self.device = device
 
-    def globallispsession(self,mapserver,service):
+    def globallispsession(self,service):
         device = self.device
-
         lispsessionall = "show lisp session all"
-        lispsessionallop = get_any_single_output(device, lispsessionall, service)
+        lispsessionallop = get_single_output_genie(device, lispsessionall, service)
         if lispsessionallop is not None:
-            print (lispsessionallop)
+            path = lispsessionallop['vrf']['default']
+            self.totalsessions = int(path['total'])
+            self.establishedsessions = int(path['established'])
+            self.peers = path['peers']
+
+    def specificlispsession(self,mapserver,service):
+        device = self.device
         lispsessionspecific = "show lisp session {}".format(mapserver)
-        lispsessionspecificop = get_any_single_output(device, lispsessionspecific, service)
+        lispsessionspecificop = get_single_output_genie(device, lispsessionspecific, service)
         if lispsessionspecificop is not None:
-            print (lispsessionspecificop)
+            path = lispsessionspecificop['lisp_id'][0]
+            self.peer_addr = path["peer_addr"]
+            self.peer_port = path["peer_port"]
+            self.local_address = path["local_address"]
+            self.local_port = path["local_port"]
+            self.session_type = path["session_type"]
+            self.session_state = path["session_state"]
+            self.session_state_time = path["session_state_time"]
+            self.messages_in = path["messages_in"]
+            self.messages_out = path["messages_out"]
+            self.fatal_errors = path["fatal_errors"]
+            self.rcvd_unsupported = path["rcvd_unsupported"]
+            self.rcvd_invalid_vrf = path["rcvd_invalid_vrf"]
+            self.rcvd_override = path["rcvd_override"]
+            self.rcvd_malformed = path["rcvd_malformed"]
+            self.sent_defferred = path["sent_defferred"]
+        if lispsessionspecificop is None:
+            lispsessionspecific = "show lisp session {}".format(mapserver)
+            lispsessionspecificop = get_any_single_output(device, lispsessionspecific, service)
+            if lispsessionspecificop is not None:
+                parsed_data = parse_lisp_session(lispsessionspecificop)
+                self.peer_addr = parsed_data["peer_addr"]
+                self.peer_port = parsed_data["peer_port"]
+                self.local_address = parsed_data["local_address"]
+                self.local_port = parsed_data["local_port"]
+                self.session_type = parsed_data["session_type"]
+                self.session_state = parsed_data["session_state"]
+                self.session_state_time = parsed_data["session_state_time"]
+                self.messages_in = parsed_data["messages_in"]
+                self.messages_out = parsed_data["messages_out"]
+                self.fatal_errors = parsed_data["fatal_errors"]
+                self.rcvd_unsupported = parsed_data["rcvd_unsupported"]
+                self.rcvd_invalid_vrf = parsed_data["rcvd_invalid_vrf"]
+                self.rcvd_override = parsed_data["rcvd_override"]
+                self.rcvd_malformed = parsed_data["rcvd_malformed"]
+                self.sent_defferred = parsed_data["sent_defferred"]
+
+
+
 

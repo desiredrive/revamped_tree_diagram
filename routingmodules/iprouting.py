@@ -1,5 +1,9 @@
 import sys
+from pprint import pformat
+
 from radkit_cli import logging_info,logging_error,logging_warning,get_single_output_genie
+from routingmodules.cef import IPCef, physical_recursion
+
 
 def ip_route_collection(iproute,step):
     hostname = iproute.hostname
@@ -41,7 +45,7 @@ class IPRoute:
             self.mask = route_path['mask']
             self.metric = route_path['metric']
             self.distance = route_path['distance']
-            self.protocol = route_path['known_via']
+            self.protocol = route_path['known_via'].strip()
             paths = route_path['paths']
             nexthops = []
             try:
@@ -82,7 +86,7 @@ class IPRoute:
                 self.mask = route_path['mask']
                 self.metric = route_path['metric']
                 self.distance = route_path['distance']
-                self.protocol = route_path['known_via']
+                self.protocol = route_path['known_via'].strip()
                 paths = route_path['paths']
                 nexthops = []
                 try:
@@ -98,3 +102,57 @@ class IPRoute:
                     self.nexthop = nexthops
                 else:
                     self.nexthop = "Null0"
+
+class IGPInfo():
+    def __init__(self,device):
+        self.device = device
+    def igp_neighbors(self,igp,service):
+        step = "X"
+        hostname = self.device
+        if igp == 'isis':
+            command = "show isis neighbor"
+            output = get_single_output_genie(hostname,command,service)
+            if output is not None:
+                interfaces = []
+                neighbors = output.get("isis", {}).get("null", {}).get("neighbors", {})
+                for neighbor in neighbors.values():
+                    types = neighbor.get("type", {})
+                    for t in ["L2", "L1L2", "L1"]:
+                        if t in types and "interfaces" in types[t]:
+                            interfaces.extend(types[t]["interfaces"].keys())
+            self.neighbor_interfaces = interfaces
+        if igp == 'ospf':
+            command = 'show ip ospf neighbor'
+            output = get_single_output_genie(hostname, command, service)
+            if output is not None:
+                self.neighbor_interfaces = list(output.get("interfaces", {}).keys())
+        if igp == 'eigrp':
+            command = "show ip eigrp neighbor"
+            output = get_single_output_genie(hostname, command, service)
+            if output is not None:
+                try:
+                    self.neighbor_interfaces = list(
+                        output['eigrp_instance']['100']['vrf']['default']['address_family']['ipv4']['eigrp_interface'].keys()
+                    )
+                except KeyError:
+                    return None
+        if igp == 'connected'.casefold():
+            return None
+        if igp == 'static':
+            return None
+        if 'bgp' in igp:
+            command =  "show ip bgp summary"
+            output = get_single_output_genie(hostname,command,service)
+            if output is not None:
+                neighbors = output.get('vrf', {}).get('default', {}).get('neighbor', {})
+                neighbor_nexthops = list(neighbors.keys())
+                interfaces = []
+                for nexthop in neighbor_nexthops:
+                    cef = IPCef(nexthop, None,hostname)
+                    cef.get_cef_internal(service)
+                    phys = physical_recursion(cef,hostname)
+                    phys.get_physical_interfaces(service,step)
+                    for interface in phys.total_phys[0]:
+                        interfaces.append(interface)
+                self.neighbor_interfaces = interfaces
+

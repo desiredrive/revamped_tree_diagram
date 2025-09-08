@@ -197,7 +197,7 @@ class physical_recursion():
                 sys.exit("Error: {} | {}".format(error, message))
             else:
                 total_phys.append(nhphys)
-            
+            self.total_phys = total_phys
             
 
 

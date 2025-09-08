@@ -5,6 +5,7 @@ import sys
 import json
 import radkit_genie
 import logging
+import time
 
 from radkit_client.sync import (
     # For the creation of the context.
@@ -124,7 +125,34 @@ def get_catc_api(dnac, api_url: str,service):
             formatted_json = json.dumps(response_js, indent=2)
             to_file = "Catalyst Center API: {}".format(api_url)+"\n"+str(formatted_json)
             append_to_logging_file(to_file)
-            return response_js
+            #Handling BAPI Exceptions
+            attempts = 0
+            limit = False
+            try:
+                error = response_js['error']
+                if "Rate Limit" in error:
+                    #BAPI Limits Reached (Rate Limiter), waiting 3 seconds before reattempt.
+                    attempts = 1
+                    while (attempts < 6) and limit is True:
+                        time.sleep(3)
+                        response = device_inventory.http.get(api_url).wait()
+                        response_js = json.loads(response.content)
+                        attempts = +1
+                        try:
+                            error = response_js['error']
+                            if "Rate Limit" in error:
+                                formatted_json = json.dumps(response_js, indent=2)
+                                to_file = "Catalyst Center API: {}".format(api_url) + "\n" + str(formatted_json)
+                                append_to_logging_file(to_file)
+                                continue
+                        except KeyError:
+                            formatted_json = json.dumps(response_js, indent=2)
+                            to_file = "Catalyst Center API: {}".format(api_url) + "\n" + str(formatted_json)
+                            append_to_logging_file(to_file)
+                            return response_js
+            except KeyError:
+                return response_js
+
         except:
             return None
     except ValueError:
@@ -135,6 +163,9 @@ def get_catc_name(service):
         try:
             device_inventory = service.inventory.filter('device_type', 'CENTER')
             device_name = list(device_inventory.keys())
+            if len(device_name) == 0:
+                device_inventory = service.inventory.filter('device_type', 'DNAC')
+                device_name = list(device_inventory.keys())
             #Validation - Does this device exists?
             hostname = device_name[0]
             device_inventory = service.inventory[hostname]
