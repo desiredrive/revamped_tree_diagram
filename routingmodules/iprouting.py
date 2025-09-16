@@ -55,8 +55,9 @@ class IPRoute:
                 specialintf = interface
             except KeyError:
                 specialintf = True
-
-            if specialintf != "Null0":
+            if self.protocol == 'connected':
+                self.nexthop = specialintf
+            elif specialintf != "Null0":
                 for i in paths:
                     nexthops.append(paths[i]['nexthop'])
                 self.nexthop = nexthops
@@ -96,7 +97,9 @@ class IPRoute:
                     specialintf = interface
                 except KeyError:
                     specialintf = True
-                if specialintf != "Null0":
+                if self.protocol == 'connected':
+                    self.nexthop = specialintf
+                elif specialintf != "Null0":
                     for i in paths:
                         nexthops.append(paths[i]['nexthop'])
                     self.nexthop = nexthops

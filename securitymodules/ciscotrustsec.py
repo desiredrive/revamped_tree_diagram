@@ -187,10 +187,11 @@ class cts_endpoint_info():
         self.ctsportenabled = True
         #Unless CTS is removed with "no cts role-based enforcement"
         pattern = "no cts role-based enforcement"
-        cts_interface_enforcement = show_run_interface(interface,pattern,self.hostname, service)
-        for i in cts_interface_enforcement:
-            if "pattern" in i:
-                self.ctsportenabled = False 
+        if interface is not None:
+            cts_interface_enforcement = show_run_interface(interface,pattern,self.hostname, service)
+            for i in cts_interface_enforcement.splitlines():
+                if pattern in i:
+                    self.ctsportenabled = False
         #Global Enforcement Enablement
 
         ctsenforcementcmd = "show cts"
@@ -228,7 +229,8 @@ class cts_endpoint_info():
                                 self.enforcingvlan = True        
         else:
             self.vlanenforcement = False
-
+        if vlan is None:
+            self.vlanenforcement = False
 class cts_rules():
     
     def __init__(self, device):
@@ -247,8 +249,14 @@ class cts_rules():
                     index = i
                     self.srcsgt = ctsrbacpath[index]['src_grp_id']
                     self.dstsgt = ctsrbacpath[index]['dst_group_id']
-                    self.sgtname = ctsrbacpath[index]['src_grp_name']
-                    self.dgtname = ctsrbacpath[index]['dst_group_name']
+                    try:
+                        self.sgtname = ctsrbacpath[index]['src_grp_name']
+                    except KeyError:
+                        self.sgtname = None
+                    try:
+                        self.dgtname = ctsrbacpath[index]['dst_group_name']
+                    except KeyError:
+                        self.dgtname = None
                     rbacls = ctsrbacpath[index]['policy_groups']
                     self.isdefaultrule = False
                     try:

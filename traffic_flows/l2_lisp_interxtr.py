@@ -18,6 +18,7 @@ def l2_mapcache_results(l2mapcache,step):
     logging_info(step, "L2LISP", "[L2-Map-Cache]",l2mapcache.queriedev, string)
 
 
+
 def ar_relay_resolution(dstip, iid, l2cps, service, dnac, fabricsite,step):
         process = "controlPlaneL2lisp"
         subprocess = '[addresResolutionQuery]'

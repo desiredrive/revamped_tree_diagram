@@ -1,3 +1,5 @@
+from pprint import pformat
+
 import radkit_cli
 import re
 from ipverifications import (
@@ -94,11 +96,42 @@ protocol_port_map = {
     "www": 80
 }
 
+def acl_evaluation(service, hostname, aclname, rb_flag,evaluation):
+    '''
+    Sample evaluation payload:
+    sourceip = evaluation['sourceip']
+    destinationip = evaluation['destinationip']
+    protocol = evaluation['protocol']
+    srcport = evaluation['srcport']
+    dstport = evaluation['dstport']
+    '''
+    #Get the ACL details by its name:
+    if rb_flag is True:
+        acl = AccessList(hostname)
+        acl.rbaclacl(aclname,service)
+    else:
+        acl = AccessList(hostname)
+        acl.aclbyidname(aclname,service)
+
+    #Extract ACEs from ACL:
+    acltype = acl.acltype
+    aclaces = acl.aces
+    acld = {
+        'acltype': acltype,
+        'aces': aclaces
+    }
+    #Create the Hexdecimal equivalent for each ACE
+    hexacl = hexdecimal_representation_acl(acld)
+    #Evaluate the hexdecimal ACE against the evaluation parameters
+    for ace in hexacl:
+        hit = hexdecimal_acl_hit(ace, evaluation)
+        if type(hit) is tuple:
+            if hit[0] is True:
+                return hit
 
 def hexdecimal_representation_acl(acl_object):
     HEX_DIGITS_FOR_32_BIT = 8
     #HEX_DIGITS_FOR_16_BIT = 4
-
     hex_aces = []
     for aces in acl_object['aces']:
         # 32bitsequence - 32 bit
@@ -172,14 +205,15 @@ def hexdecimal_representation_acl(acl_object):
                 if srcports.lower() == 'any':
                     hex_sourcestartrangeport = '0000'
                     hex_sourcesendrangeport = 'FFFF'
-            if type(srcports) is not str:
+                else:
+                    for protocol in protocol_port_map:
+                        if srcports == protocol:
+                            hex_sourcestartrangeport = f"{protocol_port_map[srcports]:04X}"
+                            hex_sourcesendrangeport = f"{protocol_port_map[srcports]:04X}"
+            elif type(srcports) is not str:
                 hex_sourcestartrangeport = f"{int(srcports):04X}"
                 hex_sourcesendrangeport = f"{int(srcports):04X}"
-            elif type(srcports) is str:
-                for protocol in protocol_port_map:
-                    if srcports == protocol:
-                        hex_sourcestartrangeport = f"{protocol_port_map[srcports]:04X}"
-                        hex_sourcesendrangeport = f"{protocol_port_map[srcports]:04X}"
+
         else:
             lowerport = int(srcports['lower_port'])
             upperport = int(srcports['upper_port'])
@@ -193,14 +227,15 @@ def hexdecimal_representation_acl(acl_object):
                 if dstports.lower() == 'any':
                     hex_dststartrangeport = '0000'
                     hex_dstendrangeport = 'FFFF'
+                else:
+                    for protocol in protocol_port_map:
+                        if dstports == protocol:
+                            hex_dststartrangeport = f"{protocol_port_map[dstports]:04X}"
+                            hex_dstendrangeport = f"{protocol_port_map[dstports]:04X}"
             elif type(dstports) is not str:
                 hex_dststartrangeport = f"{int(dstports):04X}"
                 hex_dstendrangeport = f"{int(dstports):04X}"
-            elif type(dstports) is str:
-                for protocol in protocol_port_map:
-                    if dstports == protocol:
-                        hex_dststartrangeport = f"{protocol_port_map[dstports]:04X}"
-                        hex_dstendrangeport = f"{protocol_port_map[dstports]:04X}"
+
         else:
             lowerport = int(dstports['lower_port'])
             upperport = int(dstports['upper_port'])
@@ -272,7 +307,8 @@ def hexdecimal_acl_hit(hexace, evaluation):
         if ace_protocol != "FF":
             for l4protocol in ip_protocol_map:
                 if protocol == l4protocol:
-                    protocolflag = True
+                    if ip_protocol_map[protocol].lower() == ace_protocol.lower():
+                        protocolflag = True
             if protocolflag is not True:
                 return False
 
@@ -355,6 +391,92 @@ def is_acl_denying_dst(acldetails,destination):
                             return False
     return False
 
+def parse_rbacl_ace(line):
+    """
+    Parse a single ACE line from the raw CLI output and convert it into the specified dictionary format.
+    Assumptions:
+    - ace_source and ace_destination are always set to "any"
+    - ace_protocol is the protocol keyword (tcp, udp, ip, icmp, etc.)
+    - ace_srcoperator_type and ace_dstoperator_type are "eq", "range", or None
+    - Ports follow src and dst keywords with operator and port(s)
+    - Port ranges are represented as dictionaries with 'lower_port' and 'upper_port'
+    """
+
+    ace = {
+        'index': None,
+        'forwarding': None,
+        'ace_source': "any",
+        'ace_destination': "any",
+        'ace_protocol': None,
+        'ace_srcoperator_type': None,
+        'ace_srcports': "any",
+        'ace_dstoperator_type': None,
+        'ace_dstports': "any"
+    }
+
+    tokens = line.strip().split()
+    if not tokens:
+        return None
+
+    # Parse index
+    if tokens[0].isdigit():
+        ace['index'] = int(tokens[0])
+        tokens = tokens[1:]
+    else:
+        return None
+
+    # Parse forwarding action
+    if tokens and tokens[0] in ('permit', 'deny'):
+        ace['forwarding'] = tokens[0]
+        tokens = tokens[1:]
+    else:
+        return None
+
+    # Parse protocol
+    if tokens:
+        ace['ace_protocol'] = tokens[0]
+        tokens = tokens[1:]
+    else:
+        return None
+
+    def parse_port_segment(tokens):
+        if not tokens:
+            return None, None, tokens
+        operator = None
+        ports = None
+        if tokens[0] in ('eq', 'range'):
+            operator = tokens[0]
+            tokens = tokens[1:]
+            if operator == 'eq':
+                if tokens:
+                    ports = (tokens[0])
+                    try:
+                        ports = int(ports)
+                    except ValueError:
+                        pass
+                    tokens = tokens[1:]
+            elif operator == 'range':
+                if len(tokens) >= 2:
+                    ports = {
+                        'lower_port': int(tokens[0]),
+                        'upper_port': int(tokens[1])
+                    }
+                    tokens = tokens[2:]
+        return operator, ports, tokens
+
+    # Parse src ports
+    if tokens and tokens[0] == 'src':
+        tokens = tokens[1:]
+        ace['ace_srcoperator_type'], ace['ace_srcports'], tokens = parse_port_segment(tokens)
+
+    # Parse dst ports
+    if tokens and tokens[0] == 'dst':
+        tokens = tokens[1:]
+        ace['ace_dstoperator_type'], ace['ace_dstports'], tokens = parse_port_segment(tokens)
+
+    # Ignore remaining tokens like 'established'
+    return ace
+
 class AccessList:
     def __init__(self,device):
         self.hostname = device
@@ -395,7 +517,7 @@ class AccessList:
                     ace_srcoperator_type = operator_type
                     if operator_type == 'operator':
                         ace_srcoperator_type = ace_srcports['operator']
-                        ace_srcports = ace_srcports['port']
+                        ace_srcports = int(ace_srcports['port'])
                 except KeyError:
                     ace_srcoperator_type = None
                     ace_srcports = "Any"
@@ -415,14 +537,16 @@ class AccessList:
                         ace_dstoperator_type = operator_type
                         if operator_type == 'operator':
                             ace_dstoperator_type = ace_dstports['operator']
-                            ace_dstports = ace_dstports['port']
+                            ace_dstports = int(ace_dstports['port'])
                     else:
                         ace_dstoperator_type = None
                         ace_dstports = "Any"
-                except KeyError:
-                    ace_destination = None
-                    ace_dstoperator_type = None
-                    ace_dstports = "Any"
+                except KeyError as e:
+                    if e == 'destination_network':
+                        ace_destination = None
+                    else:
+                        ace_dstoperator_type = None
+                        ace_dstports = "Any"
                 ace = {
                     'index': index,
                     'forwarding': ace_type,
@@ -453,3 +577,24 @@ class AccessList:
                     aclnames.append(aclname)
             aclnames = list(set(aclnames))
             self.aclnames = aclnames
+
+    def rbaclacl(self,aclname,service):
+        hostname = self.hostname
+        rbaclcmd= "show ip access-list  {}".format(aclname)
+        rbaclop = radkit_cli.get_any_single_output(hostname,rbaclcmd,service)
+        if rbaclop is not None:
+            parsed_aces = []
+            for line in rbaclop.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Skip header/footer lines that do not start with a digit
+                if not line[0].isdigit():
+                    continue
+                ace = parse_rbacl_ace(line)
+                if ace:
+                    parsed_aces.append(ace)
+            self.aclname = aclname
+            self.acltype = 'role-based'
+            self.aclaftype = 'ipv4-acl-type'
+            self.aces = parsed_aces

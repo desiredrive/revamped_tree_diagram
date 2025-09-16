@@ -1,6 +1,6 @@
 import sys
 from device_profiler import Device
-from radkit_cli import logging_info,logging_error,get_catc_api
+from radkit_cli import logging_info, logging_error, get_catc_api, get_hostname_from_mgmtip
 import re
 
 
@@ -60,7 +60,7 @@ def get_device_from_ip(ip,catc,service):
     try:
         for i in devices:
             if i['adminStatus'] == 'UP':
-                device_list.append({'portName' : i['portName'], 'deviceUUID' : i['deviceId']})
+                device_list.append({'portName' : i['portName'], 'deviceUUID' : i['deviceId']}, )
         if len(device_list) is None:
             return None
         else:
@@ -78,7 +78,18 @@ def get_network_device_byuuid(uuid,catc,service):
         return None
     else:
         return mgmtip
-
+def get_network_device_byuuid_detailed(uuid,catc,service):
+    # Get Network_Device Management IP by UUID
+    api_url = "/dna/intent/api/v1/network-device/{}".format(uuid)
+    api_response = get_catc_api(catc,api_url,service)
+    response = api_response['response']
+    mgmtip = response['managementIpAddress']
+    status = response['reachabilityStatus']
+    hostname = response['hostname']
+    if mgmtip is None:
+        return None
+    else:
+        return mgmtip, status, hostname
 def profile_devices_with_ip(ip,catc,service):
     #Warning, Do not use with anycast IPs! It can take long processing times; restricting the entry for maximum 4 entries
     deviceswithip = get_device_from_ip(ip, catc, service)
@@ -136,4 +147,35 @@ def validate_cp_infabric(cpmgmtip,sitehierarchy,catc,service,step):
         #raise BDBTaskError("Error: {} | {}".format(error, message))
         sys.exit("Error: {} | {}".format(error, message))
 
-    
+def find_control_plane(cp,dnac,service,step, process,subprocess):
+    # Step 1, identify Control Plane
+    device = get_device_from_lo0(cp, dnac, service)
+    if device is None:
+        error = "Catalyst Center API - No Device Found"
+        message = "No Control Planes found with Loopback 0 with IP {} in Catalyst Center Inventory, make sure these are in Managed state".format(cp)
+        logging_error(step, process, subprocess, dnac, error)
+        logging_info(step, process, subprocess, dnac, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+    # Step 2, identify Management IP for CPs
+    control_planes = []
+    for match in device:
+        response = get_network_device_byuuid_detailed(match['deviceUUID'], dnac, service)
+        cpmgmtip = response[0]
+        state = response[1]
+        hostname = response[2]
+        control_plane = {'hostname': hostname,  'mgmtip' : cpmgmtip, 'reachability': state}
+        if cpmgmtip is not None:
+            control_planes.append(control_plane)
+    if len(control_planes) == 1:
+        hostname = get_hostname_from_mgmtip(control_planes[0]['mgmtip'],service)
+    else:
+        error = "Catalyst Center API - Multiple Control Planes"
+        message = "Multiple Control Planes sharing the same Loopback 0 with IP {} in Catalyst Center Inventory, unsupported flow".format(cp)
+        logging_error(step, process, subprocess, dnac, error)
+        logging_info(step, process, subprocess, dnac, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+    control_plane = control_planes[0]
+    control_plane.update({'radkithostname':hostname})
+    return control_plane

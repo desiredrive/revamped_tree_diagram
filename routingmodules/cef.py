@@ -55,7 +55,10 @@ class IPCef:
         cefpath = cefpath[prefix]
 
         #CEF sources
-        self.sources = cefpath['sources']
+        try:
+            self.sources = cefpath['sources']
+        except KeyError:
+            self.sources = None
         
         try:
             subblocks = cefpath['subblocks']
@@ -86,43 +89,64 @@ class IPCef:
         special_flag = False
 
         #Next Hop Calculation
-        if any (x in self.sources for x in special_types):
-            special_flag = True
-        if (no_ifnums is True) and (special_flag is False):
-            path_list = None
-            paths = []
-            nexthops = []
-            nhlist = []
-            cefpath_list = cefpath['path_list']
-            for i in cefpath_list:
-                path_list = i
-            cefpath_list = cefpath_list[path_list]
-            for i in cefpath_list['path']:
-                paths.append(i)
-            cefpath_list = cefpath_list['path']
-            for i in paths:
-                nexthops.append(cefpath_list[i]['nexthop'])
-            for i in nexthops:
-                for j in i:
-                    oif = i[j]['outgoing_interface']
-                    nexthop_format = {'nexthop' : j, 'oif': oif}
-                    nhlist.append(nexthop_format)
-            self.nexthops = nhlist
-        elif (special_flag is False):
-            nhlist = []
-            for i in ifnums:
-                oif = i
-                try:
-                    j = ifnums[oif]['address']
-                    nexthop_format = {'nexthop' : j, 'oif': oif}
-                    nhlist.append(nexthop_format)
-                except KeyError:
-                    nexthop_format = {'nexthop' : None, 'oif': oif}
-                    nhlist.append(nexthop_format)
-            self.nexthops = nhlist
+        if self.sources is not None:
+            if any (x in self.sources for x in special_types):
+                special_flag = True
+            if (no_ifnums is True) and (special_flag is False):
+                path_list = None
+                paths = []
+                nexthops = []
+                nhlist = []
+                cefpath_list = cefpath['path_list']
+                for i in cefpath_list:
+                    path_list = i
+                cefpath_list = cefpath_list[path_list]
+                for i in cefpath_list['path']:
+                    paths.append(i)
+                cefpath_list = cefpath_list['path']
+                for i in paths:
+                    nexthops.append(cefpath_list[i]['nexthop'])
+                for i in nexthops:
+                    for j in i:
+                        oif = i[j]['outgoing_interface']
+                        nexthop_format = {'nexthop' : j, 'oif': oif}
+                        nhlist.append(nexthop_format)
+                self.nexthops = nhlist
+            elif (special_flag is False):
+                nhlist = []
+                for i in ifnums:
+                    oif = i
+                    try:
+                        j = ifnums[oif]['address']
+                        nexthop_format = {'nexthop' : j, 'oif': oif}
+                        nhlist.append(nexthop_format)
+                    except KeyError:
+                        nexthop_format = {'nexthop' : None, 'oif': oif}
+                        nhlist.append(nexthop_format)
+                self.nexthops = nhlist
+            else:
+                #Empty next hop! (Special Adjacency???)
+                self.nexthops = None
         else:
-            #Empty next hop! (Special Adjacency???)
-            self.nexthops = None
+            rib_flag = cefpath['rib']
+            # CEF Type: Connected
+            if "C" in rib_flag:
+                ipcef_cmd = "show ip cef {} {}".format(self.ip, vrf_mode)
+                ipcef_op = get_single_output_genie(self.hostname, ipcef_cmd, service)
+                if ipcef_op is not None:
+                    vanillacefpath = ipcef_op['vrf'][vrf]['address_family'][addipv4]['prefix']
+                    nexthops = []
+                    nhlist = []
+                    for prefix in vanillacefpath:
+                        cefpath_list = vanillacefpath[prefix]
+                        for i in cefpath_list:
+                            nexthops.append(cefpath_list[i])
+                        for i in nexthops:
+                            for j in i:
+                                oif = i[j]['outgoing_interface']
+                                nexthop_format = {'nexthop': j, 'oif': oif}
+                                nhlist.append(nexthop_format)
+                    self.nexthops = nhlist
 
 class physical_recursion():
 
