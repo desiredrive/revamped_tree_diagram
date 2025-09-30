@@ -1,7 +1,6 @@
 import sys
-
-from genie.libs.sdk.apis.iosxe.platform.configure import configure_platform_mgmt_interface
-
+import re
+from collections import defaultdict
 from catalystcenterapi.catcapi import find_control_plane
 from device_profiler import Device
 from ipverifications import (
@@ -9,19 +8,21 @@ from ipverifications import (
    ipaddress_validator_no_return,
    ipsubnet_validator_no_return
 )
-from routingmodules.cef import IPCef, physical_recursion, phy_cef_collection
+from routingmodules.cef import IPCef, phy_cef_collection
 from routingmodules.iprouting import IPRoute, IGPInfo
-from securitymodules.accesslists import AccessList, hexdecimal_representation_acl, acl_evaluation
+from routingmodules.tcp import TCPSocket
+from securitymodules.accesslists import AccessList,acl_evaluation
 from securitymodules.ciscotrustsec import cts_endpoint_info, cts_rules, cts_rule_collection
+from securitymodules.type7decryptor import decrypt_password
 from switchingmodules.interfaces import Interfaces
 from switchingmodules.maclearning import mac_learning
 from routingmodules.lisp import l2lisp_info, LISPLocalDB, LISPEIDWatch, lisp_map_servers, LISPInstanceStatus, \
-    LISPSession
-from radkit_cli import logging_info,logging_error,logging_warning,get_catc_api,get_any_single_output,get_single_output_genie
+    LISPSession, L2LISPControlPlane
+from radkit_cli import logging_info,logging_error,logging_warning
 from pprint import pformat
 
+from traffic_flows.core import CoreDevice, cpu_utilization_warning, cpu_platform_utilization_warning
 from traffic_flows.operational_tests import Ping
-
 
 #LISP Session Troubleshooting Steps:
 #1 Identify the EID to register (MAC (UDP/TCP), IP (UDP/TCP), AR(TCP)
@@ -50,7 +51,6 @@ from traffic_flows.operational_tests import Ping
 #24 Authentication Counters for EID in both ETR and MS/MR (looking for logs as well?)
 #25 Session State between CPs
 #26 Registration is in both CPs?
-#27 L2LISP Statistics
 #28 WLC RLOC definition and passiveopen
 
 class EIDIdentification():
@@ -129,6 +129,10 @@ class EIDIdentification():
                 #1. Search for database mac under L2LISP, error if not configured.
             lispdb = LISPLocalDB(mac,iid,device)
             lispdb.L2LISPDyn(service)
+            if lispdb.dynmacconfig is False:
+                error = "EID Identification - L2LISP Instance"
+                message = "The database-mapping configuration is NOT found in the LISP EID Table for VLAN {}. Review the GPS_SDA Collection logfile for more information.".format(vlan)
+                exit_program(step, process, subprocess, device, error, message)
 
                 #2. Search for DynEID entry
             dynmacs = lispdb.dynmacs
@@ -145,6 +149,7 @@ class EIDIdentification():
                     if eid == mac:
                         print("MAC Address {} not found in Dynamic EID for IID {} but it is configured as Static Binding, this is not standard SD-Access Configuration".format(eid,iid))
                         is_mac_static = True
+
 
             # 4. If not in any of these methods:
             if is_mac_dyn is False and is_mac_static is False:
@@ -214,31 +219,196 @@ class ETRConfiguration():
     def __init__(self,device):
         self.device = device
 
-    def etr_map_servers(self,eidident,service):
+    def etr_map_servers(self,eidident, servicetype, service):
         # 8 Identify the Map-Resolvers for the Registration, verify proxy flag, node must be ETR
         # 9 Identify the status of the LISP session (global)
         # 10 Identify the status of the LISP session (per ID, Optional)
         device = self.device
         map_servers = eidident.mapservers
-
         step = "X"
         process = "lispSession"
         subprocess = "[mapServerConfiguration]"
         #Map Server Configuration Validations:
             #P-Flag Enablement #Unreliable check...
             #ETR Status
-        # P-Flag Enablement #Unreliable check...
-        mapservers_shwrun = lisp_map_servers(device,service)
+            #Authentication Key
+
+        mapservers_shwrun = lisp_map_servers(device,servicetype,service)
+        mapservers_shwrunparsed = ''
+        for line in mapservers_shwrun.splitlines():
+            if "map-server" in line:
+                mapservers_shwrunparsed = mapservers_shwrunparsed + '\n' + line
+        mapservers_shwrun = mapservers_shwrunparsed
         map_servers_noflag = find_mismatch_key_and_proxy_reply(mapservers_shwrun)
+
+        # P-Flag Enablement #Unreliable check...
         if len(map_servers_noflag) > 0:
             error = "LISP Configuration - Map Servers"
             message = "The following Map-Servers {} are NOT configured for Proxy-Reply flag. Review the GPS_SDA Collection logfile for more information.".format(map_servers_noflag)
             exit_program(step,process,subprocess,device,error,message)
 
+        #Map-Server-Key Evaluation:
+        map_server_config = mismatch_keys_servers(mapservers_shwrun)
+        keys_per_ip = defaultdict(set)
+
+        for entry in map_server_config:
+            if entry['decrypted']:
+                keys_per_ip[entry['map_server_ip']].add(entry['authentication_key'])
+        # Check for inconsistencies
+        for ip, keys in keys_per_ip.items():
+            if len(keys) > 1:
+                error = "LISP Configuration - Map Servers"
+                message = "Error: Multiple different keys (decrypted) found for map_server_ip {}: {}".format(ip, keys)
+                exit_program(step, process, subprocess, device, error, message)
+        self.mapserverconfiguration = map_server_config
+
+class ETRDevice:
+    def __init__(self, mgmtip,step):
+        self.mgmtip = mgmtip
+        self.step = step
+
+    def device_profiler(self, catc,service):
+        devprof = Device(self.mgmtip,catc,self.step)
+        devprof.profile_device(service)
+        self.profiled_device = devprof
+
+    def existing_profiled(self, profiled_device):
+        self.profiled_device = profiled_device
+
+    def eid_identification(self,eid,vlan,vrf,step,service):
+        hostname = self.profiled_device.hostname
+        eid_properties = EIDIdentification(hostname, eid)
+        eid_properties.eid_identification(vlan,vrf,service,step)
+        self.eid_properties = eid_properties
+
+    def cp_configuration(self,iid,service):
+        hostname = self.profiled_device.hostname
+        cp_configuration = L2LISPControlPlane(hostname)
+        cp_configuration.lisp_service_ethernet(service)
+        cp_configuration.site_uci(iid,service)
+        cp_configuration.rloc_members(service)
+        cp_configuration.domains(service)
+        self.cp_configuration = cp_configuration
+
+    def eid_configuration(self,eid_properties,servicetype,service):
+        hostname = self.profiled_device.hostname
+        etr_configuration = ETRConfiguration(hostname)
+        etr_configuration.etr_map_servers(eid_properties,servicetype,service)
+        self.eid_configuration = etr_configuration
+
+    def global_lisp_session(self,service):
+        hostname = self.profiled_device.hostname
+        etr_lispsessions = LISPSession(hostname)
+        etr_lispsessions.globallispsession(service)
+        self.global_lisp_sessions = etr_lispsessions
+
+    def specific_lisp_session(self,mapserver,service):
+        hostname = self.profiled_device.hostname
+        etr_specificsession = LISPSession(hostname)
+        etr_specificsession.specificlispsession(mapserver,service)
+        self.specific_lisp_session = etr_specificsession
+
+    def lisp_statistics(self,iid,servicetype,service):
+        hostname = self.profiled_device.hostname
+        lispstatistics = LISPInstanceStatus(hostname,iid)
+        lispstatistics.eidStatistics(servicetype,service)
+        self.lispstatistics = lispstatistics
+
+    def tcp_tcb_statistics(self,srcetr,dstetr,srcport,service):
+        hostname = self.profiled_device.hostname
+        tcp_information = TCPSocket(hostname)
+        tcp_information.tcpbrief(service)
+        matching_sockets = []
+        for entry in tcp_information.tcbs:
+            if (entry.get('source_ip') == srcetr and
+                    entry.get('destination_ip') == dstetr and
+                    entry.get('source_port') == srcport):
+                matching_sockets.append(entry)
+        tcb_statistics = []
+        for socket in matching_sockets:
+            tcb = socket['tcb']
+            socket = TCPSocket(hostname)
+            socket.tcptcb(tcb,service)
+            tcb_statistics.append(socket)
+        self.tcb_statistics = tcb_statistics
+
+    def cpu_utilization(self,service):
+        hostname = self.profiled_device.hostname
+        cpu = CoreDevice(hostname)
+        cpu.cpu_utilization(service)
+        cpu.cpu_utilization_platform(service)
+        self.cpu_statistics = cpu
+
 def exit_program(step, process, subprocess, hostname, error, message):
     logging_error(step, process, subprocess, hostname, error)
     logging_info(step, process, subprocess, hostname, message)
     sys.exit("Error: {} | {}".format(error, message))
+
+def parse_uptime_to_minutes(uptime_str):
+    """
+    Parses an uptime string (e.g., '04:02:00' or '1d06h') into total minutes.
+    """
+    total_minutes = 0
+    if 'd' in uptime_str:
+        # Format like '1d06h'
+        match = re.match(r'(\d+)d(?:(\d+)h)?', uptime_str)
+        if match:
+            days = int(match.group(1))
+            hours = int(match.group(2)) if match.group(2) else 0
+            total_minutes = (days * 24 * 60) + (hours * 60)
+    elif ':' in uptime_str:
+        # Format like 'HH:MM:SS'
+        parts = uptime_str.split(':')
+        if len(parts) >= 2: # At least HH:MM
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            total_minutes = (hours * 60) + minutes
+    return total_minutes
+
+def mismatch_keys_servers(lines):
+    unique_entries = {}
+    for line in lines.splitlines():
+        line = line.strip()
+        if not line.startswith("etr map-server"):
+            continue
+        parts = line.split()
+        # Expected format: etr map-server <ip> key <type> <key>
+        if len(parts) < 6:
+            continue
+        if parts[3] != "key":
+            continue
+        map_server_ip = parts[2]
+        key_type_str = parts[4]
+        auth_key = parts[5]
+
+        # Use tuple key to ensure uniqueness by IP, key_type, and auth_key
+        unique_key = (map_server_ip, key_type_str, auth_key)
+        if unique_key in unique_entries:
+            continue
+
+        try:
+            key_type = int(key_type_str)
+        except ValueError:
+            key_type = -1  # Unknown type
+
+        if key_type == 7:
+            decrypted_value = decrypt_password(auth_key)
+            decrypted = decrypted_value is not None
+            auth_key_final = decrypted_value if decrypted else auth_key
+        elif key_type == 0:
+            decrypted = True
+            auth_key_final = auth_key
+        else:
+            decrypted = False
+            auth_key_final = auth_key
+
+        unique_entries[unique_key] = {
+            "map_server_ip": map_server_ip,
+            "key_type": key_type,
+            "decrypted": decrypted,
+            "authentication_key": auth_key_final
+        }
+    return list(unique_entries.values())
 
 def find_mismatch_key_and_proxy_reply(output):
     # Split the output into lines
@@ -275,6 +445,79 @@ def find_mismatch_key_and_proxy_reply(output):
             mismatched_ips.append(ip)
 
     return mismatched_ips
+
+def unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name,etrdefinition,vni):
+    process = "lispSession"
+    subprocess = "[specificLISPSession]"
+    msg1 = "LISP Sessions - Specific LISP Sessions"
+    message = "Verifying Specific LISP session status for Map-Servers on device:  {}.".format(hostname)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    map_server_ips = []
+    for map_server in eid_map_servers:
+        map_server_ip = map_server['map_server']
+        if map_server_ip != etr_rloc:
+            map_server_ips.append(map_server_ip)
+    specific_lisp_sessions = []
+
+    #Remove the local ETR_RLOC form the map-server list, useful when validating CP-to-CP LISP Sessions.
+    while etr_rloc in map_server_ips:
+        map_server_ips.remove(etr_rloc)
+
+    for ip in map_server_ips:
+        a = LISPSession(hostname)
+        a.specificlispsession(ip, service)
+        specific_lisp_sessions.append(a)
+    # If all of specific sessions are in the wrong state, RCA will be attempted on all, depending on the code status:
+    # No Route: call underlay recursion
+    # Down/Init : Route check, cef check, ACL check, ping check, ping MTU check, telnet test.
+    for specific_lisp_session in specific_lisp_sessions:
+        mapserverip = specific_lisp_session.peer_addr
+        state = specific_lisp_session.session_state
+        if (state == "Down") or (state == "Init") or (state is None):
+            error = "LISP Specific Sessions - Down, Init or Not Found"
+            message = "LISP Session to {} is in state {} on device {}. Performing checks".format(mapserverip, state,
+                                                                                                 hostname)
+            logging_warning(step, process, subprocess, hostname, error + " | " + message)
+            # Verifications for down/init session to a CP
+            down_init_cp = down_init_procedure(mapserverip, catc_name, service, step, hostname, etrdefinition,
+                                               specific_lisp_session)
+            step = down_init_cp[0]
+            control_plane = down_init_cp[1]
+            cp_state = control_plane['reachability']
+            cp_hostname = control_plane['radkithostname']
+            if cp_state == 'Reachable':
+                # Routing/CEF/Physical Interfaces
+                cpstatus = map_server_local_session(step, mapserverip, state, control_plane, catc_name, service, vni)
+                step = cpstatus[0]
+                cpstatus_routing = cpstatus[1]
+                interfaces = cpstatus_routing[2]
+                # ACL
+                step = step + 1
+                total_acls = []
+                for interface in interfaces:
+                    acls = AccessList(hostname)
+                    acls.aclbyinterface(interface, service)
+                    if len(acls.aclnames) != 0:
+                        for acl in acls.aclnames:
+                            total_acls.append(acl)
+                total_acls = set(total_acls)
+                step = session_access_lists(total_acls, hostname, service, mapserverip, step, etrdefinition)
+
+                # End of Self-LISP Session
+                # Start of LISP Session validation to the ETR
+                cpdefinition = cpstatus[2]
+                down_init_etr = down_init_procedure_to_etr(step, cp_hostname, etr_rloc, service, cpdefinition)
+        if state == "NoRoute":
+            error = "LISP Specific Sessions - No Route"
+            message = "LISP Session to {} is in state {} on device {}. Performing checks".format(mapserverip, state,
+                                                                                                 hostname)
+            logging_warning(step, process, subprocess, hostname, error + " | " + message)
+            # Verifications for down/init session to a CP
+            down_init_cp = down_init_procedure(mapserverip, catc_name, service, step, hostname, etrdefinition,
+                                               specific_lisp_session)
+            step = down_init_cp[0]
+
+        return step, map_server_ips,
 
 def cp_routing(step,specific_lisp_session, mapserverip,hostname,service):
     # Route Check:
@@ -345,7 +588,7 @@ def session_access_lists(acls,hostname,service,mapserverip,step,etrdefinition):
     total_acls = acls
     if len(total_acls) != 0:
         error = "LISP Specific Session - ACLs"
-        message = "ACLs found on physical interfaces in the direction to the Map-Server {} on device: {}, evaluating ACLs".format(
+        message = "ACLs found on physical interfaces in the direction to the node {} on device: {}, evaluating ACLs".format(
             mapserverip, hostname)
         logging_info(step, process, subprocess, hostname, error + " | " + message)
         # Verifying if LISP attributes are blocked by any of the ACLs: tcp/udp, any-to-4342 and 4342-to-any
@@ -608,7 +851,7 @@ def down_init_procedure(mapserverip,catc_name,service,step,hostname,etrdefinitio
 
     return step,control_plane
 
-def map_server_local_session(step,mapserverip,state, control_plane,catc_name,service):
+def map_server_local_session(step,mapserverip,state,control_plane,catc_name,service,vni):
     # Map-Server Check: Self LISP Session.
     cp_mgmtip = control_plane['mgmtip']
     cp_hostname = control_plane['radkithostname']
@@ -625,13 +868,30 @@ def map_server_local_session(step,mapserverip,state, control_plane,catc_name,ser
     cp = ETRDevice(cp_mgmtip, step)
     cp.device_profiler(catc_name, service)
 
+    # 21 MS/MR Site_UCI configuration (definition as map-server, map-resolver, site_uci, rloc_members distribute, domain/MID consistency (pubsub)
+    cp.cp_configuration(vni, service)
+    # Validations
+    cp_configuration = cp.cp_configuration
+    cp_configuration_validation(step, cp_configuration, vni)
+
+    #Authentication Match
+
     # LISP Session to the CP itself:
     cplisp = LISPSession(cp_hostname)
     cplisp.specificlispsession(mapserverip, service)
     cp_routing_state = None
     # If the Self Local LISP Session is down:
     if cplisp.session_state == 'Up':
-        error = "LISP Specific Sessions - Down or Init"
+        error = "LISP Specific Sessions - Session UP"
+        message = "LISP Session to {} is in state {} on device {}. Performing checks".format(mapserverip,
+                                                                                             cplisp.session_state,
+                                                                                             cp_hostname)
+        logging_info(step, process, subprocess, cp_hostname, error + " | " + message)
+
+        # Routing, CEF and Phy Validation
+        cp_routing_state = cp_routing(step, cplisp, mapserverip, cp_hostname, service)
+    if cplisp.session_state != 'Up':
+        error = "LISP Specific Sessions - Down, Init or Not Found"
         message = "LISP Session to {} is in state {} on device {}. Performing checks".format(mapserverip,
                                                                                              cplisp.session_state,
                                                                                              cp_hostname)
@@ -725,85 +985,244 @@ def down_init_procedure_to_etr(step,cp_hostname,etrloopback,service,cpdefinition
 
     return step
 
-class ETRDevice:
-    def __init__(self, mgmtip,step):
-        self.mgmtip = mgmtip
-        self.step = step
+def cp_configuration_validation(step,cp_configuration,vni):
+    cp_hostname = cp_configuration.device
+    process = "lispConfiguration"
+    subprocess = "[cpConfigurationValidation]"
+    error = "LISP Control Plane - Control Plane Configuration"
+    message = "Verifying configuration of CP {}".format(cp_hostname)
+    logging_info(step, process, subprocess, cp_hostname, error + " | " + message)
+    # 21 MS/MR Site_UCI configuration (definition as map-server, map-resolver, site_uci, rloc_members distribute, domain/MID consistency (pubsub)
 
-    def device_profiler(self, catc,service):
-        devprof = Device(self.mgmtip,catc,self.step)
-        devprof.profile_device(service)
-        self.profiled_device = devprof
+    #Map-Server & Map-Resolver Role
+    if cp_configuration.map_server is not True:
+        error = "LISP Control Plane - Control Plane Configuration"
+        message = "LISP Control Plane {} is not configured as Map Server, correct this configuration under router-lisp".format(cp_hostname)
+        exit_program(step, process, subprocess, cp_hostname, error, message)
+    if cp_configuration.map_resolver is not True:
+        error = "LISP Control Plane - Control Plane Configuration"
+        message = "LISP Control Plane {} is not configured as Map Resolver, correct this configuration under router-lisp".format(
+            cp_hostname)
+        exit_program(step, process, subprocess, cp_hostname, error, message)
+    #Site_UCI is configured and the required VNI is configured as well:
+    if cp_configuration.site_uci is not True:
+        error = "LISP Control Plane - Control Plane Configuration"
+        message = "LISP Control Plane {} does not have site_uci defined, correct this configuration under router-lisp".format(
+            cp_hostname)
+        exit_program(step, process, subprocess, cp_hostname, error, message)
+    if cp_configuration.authenkey is not True:
+        error = "LISP Control Plane - Control Plane Configuration"
+        message = "LISP Control Plane {} does not have an authentication key configured under site_uci, correct this configuration under router-lisp".format(
+            cp_hostname)
+        exit_program(step, process, subprocess, cp_hostname, error, message)
+    if cp_configuration.iid_site is not True:
+        error = "LISP Control Plane - Control Plane Configuration"
+        message = "LISP Control Plane {} does not have LISP IID {} configured under site_uci, correct this configuration under router-lisp".format(
+            cp_hostname,vni)
+        exit_program(step, process, subprocess, cp_hostname, error, message)
 
-    def existing_profiled(self, profiled_device):
-        self.profiled_device = profiled_device
+def authentication_key_validation(step,cp_configuration,cp_hostname,etr_mapservers,cp_loopback,hostname):
+    process = "lispConfiguration"
 
-    def eid_identification(self,eid,vlan,vrf,step,service):
-        hostname = self.profiled_device.hostname
-        eid_properties = EIDIdentification(hostname, eid)
-        eid_properties.eid_identification(vlan,vrf,service,step)
-        self.eid_properties = eid_properties
+    map_server_configuration = etr_mapservers
+    cp_authenkey = cp_configuration.authentication_key[1]
+    cp_decrypted = cp_configuration.decrypted
+    # If the cp_decrypted value is False, keys cannot be evaluated
+    if cp_decrypted is False:
+        subprocess = "[controlPlaneAuthentication]"
+        msg1 = "LISP Control Plane - Authentication Key"
+        message = "Authentication key on device:  {} cannot be decrypted due it's encryption type, skipping validation".format(
+            cp_hostname)
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    else:
+        subprocess = "[controlPlaneAuthentication]"
+        msg1 = "LISP Control Plane - Authentication Key"
+        message = "Validating authentication keys for device:  {}".format(cp_hostname)
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        for map_server in map_server_configuration:
+            if map_server['map_server_ip'] == cp_loopback:
+                etr_key = map_server['authentication_key'][1]
+                if etr_key == cp_authenkey:
+                    message = "Authentication keys are matching between Control Plane {} and {} ".format(cp_hostname,hostname)
+                    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                else:
+                    error = "LISP Control Plane - Authentication Key"
+                    message = "Authentication keys are not matching between  Control Plane {} : Key: {} and {} : Key {}, correct the authentication keys".format(
+                        cp_hostname, cp_authenkey, hostname, etr_key)
+                    exit_program(step, process, subprocess, cp_hostname, error, message)
 
-    def cp_configuration(self,vni,vrf,step,service):
-        hostname = self.profiled_device.hostname
+def lispstatisticsparser(step,lispstatistics,cp_hostname):
+    vni = lispstatistics.iid
+    process = "lispStatistics"
+    subprocess = "[lispStatisticsControlPlane]"
+    step = step + 1
+    error = "LISP Statistics - IID Statistics"
+    message = "Verifying LISP Statistics for Instance-ID {} for CP {}".format(vni,cp_hostname)
+    logging_info(step, process, subprocess, cp_hostname, error + " | " + message)
+
+    #Map Request Counters
+    map_request_counters = lispstatistics.map_requests
+    if map_request_counters['in'] == 0:
+        error = "LISP Statistics - Map-Request"
+        message = "No Map-Requests messages have been received by the Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.map_request_invalid_source_rloc_drops !=0:
+        error = "LISP Statistics - Map-Request"
+        message = "Invalid RLOC source drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.map_request_format_errors != 0:
+        error = "LISP Statistics - Map-Request"
+        message = "Map Request format errors have been detected in Control Plane {}, common causes are invalid VNID or special attributes (SGT Distribution)".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    #Map Reply Counters
+    map_reply_counters = lispstatistics.map_reply
+    if map_reply_counters['out'] == 0:
+        error = "LISP Statistics - Map-Reply"
+        message = "No Map-Reply messages have been forwarded by the Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    #Map Register Counters
+    map_register_counters = lispstatistics.map_register
+    if map_register_counters['in'] == 0:
+        error = "LISP Statistics - Map-Register"
+        message = "No Map-Register messages have been received by the Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if map_register_counters['authentication_failures'] != 0:
+        error = "LISP Statistics - Map-Register"
+        message = "Authentication Failures have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if map_register_counters['disallowed_locators'] != 0:
+        error = "LISP Statistics - Map-Register"
+        message = "Disallowed Locator failures have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.map_register_invalid_source_rloc_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "Invalid Source RLOC drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    #WLC Registration Errors:
+    wlc_map_register_counters = lispstatistics.wlc_map_registers
+    if wlc_map_register_counters['in'] == 0:
+        error = "LISP Statistics - WLC Map-Register"
+        message = "No WLC Map-Register messages have been received by the Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if wlc_map_register_counters['failures']['in'] != 0:
+        error = "LISP Statistics - WLC Map-Register"
+        message = "WLC Registration failures have been detected in Control Plane {} , these are often caused by invalid VNID attributes".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    #Misc Errors
+    if lispstatistics.rejected_eid_prefix_due_to_limit != 0:
+        error = "LISP Statistics - Rejected EID"
+        message = "Some EIDs might have been rejected due to limit or scale Control Plane {}, total rejected : {}".format(cp_hostname,lispstatistics.rejected_eid_prefix_due_to_limit)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.ip_version_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "IP version drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.ip_header_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "IP header drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.ip_proto_field_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "IP protocol drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.packet_size_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "IP packet size drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.lisp_control_port_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "Invalid LISP control port drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.unsupported_lisp_packet_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "Unsupported LISP packet type drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+    if lispstatistics.lisp_checksum_drops !=0:
+        error = "LISP Statistics - Map-Register"
+        message = "Invalid LISP checksum drops have been detected in Control Plane {}.".format(cp_hostname)
+        logging_warning(step, process, subprocess, cp_hostname, error+" | "+message)
+
+def tcbstatistcisparser(step,tcbstatistics,cp_hostname):
+    process = "tcpStatistics"
+    subprocess = "[tcpTCBStatistics]"
+    step = step + 1
+    error = "TCP Statistics - TCB Statistics"
+
+    for element in tcbstatistics:
+        sourceip = element.local_host
+        destip = element.foreign_host
+        sourceport = element.local_port
+        destport = element.foreign_port
+        mss = element.mss
+        message = "Verifying TCP Socket Statistics for {}:{} to {}:{} with MSS of {} on device: {}".format(sourceip,sourceport,destip,destport,mss,cp_hostname)
+        logging_info(step, process, subprocess, cp_hostname, error + " | " + message)
+
+        #Retransmit Queue status:
+        retransmitqueuecounter = element.retransmitqueue
+        if retransmitqueuecounter != 0:
+            error = "TCP Statistics - Retransmit Queue"
+            message = "Retransmission Queue counters have been detected for {}:{} to {}:{} on device: {}, possible packet loss scenario".format(sourceip,sourceport,destip,destport,cp_hostname)
+            logging_warning(step, process, subprocess, cp_hostname, error + " | " + message)
+        #Retransmit Counters
+        retransmitcounter = element.retransmitcounter
+        if retransmitcounter != 0:
+            error = "TCP Statistics - Retransmit Counters"
+            message = "Retransmission counters have been detected for {}:{} to {}:{} on device: {}, possible packet loss scenario".format(sourceip,sourceport,destip,destport,cp_hostname)
+            logging_warning(step, process, subprocess, cp_hostname, error + " | " + message)
+        #Fast Retransmit Counters
+        fastretransmitcounter = element.fastretransmitcounter
+        if fastretransmitcounter != 0:
+            error = "TCP Statistics - Fast Retransmit Counters"
+            message = "Fast retransmission counters have been detected for {}:{} to {}:{} on device: {}, possible packet loss scenario".format(sourceip,sourceport,destip,destport,cp_hostname)
+            logging_warning(step, process, subprocess, cp_hostname, error + " | " + message)
 
 
-    def eid_configuration(self,eid_properties,service):
-        hostname = self.profiled_device.hostname
-        etr_configuration = ETRConfiguration(hostname)
-        etr_configuration.etr_map_servers(eid_properties,service)
-        self.eid_configuration = etr_configuration
+##### Main Troubleshooting Flow #####
 
-    def global_lisp_session(self,service):
-        hostname = self.profiled_device.hostname
-        etr_lispsessions = LISPSession(hostname)
-        etr_lispsessions.globallispsession(service)
-        self.global_lisp_sessions = etr_lispsessions
+def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
 
-    def specific_lisp_session(self,mapserver,service):
-        hostname = self.profiled_device.hostname
-        etr_specificsession = LISPSession(hostname)
-        etr_specificsession.specificlispsession(mapserver,service)
-        self.specific_lisp_session = etr_specificsession
-
-        
-def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step):
-
-    #ETR
-    etrdefinition = ETRDevice(mgmtip,step)
-    etrdefinition.device_profiler(catc_name, service)
-    hostname = etrdefinition.profiled_device.hostname
+    if sourcextr is None:
+        #ETR
+        etrdefinition = ETRDevice(mgmtip,step)
+        etrdefinition.device_profiler(catc_name, service)
+        hostname = etrdefinition.profiled_device.hostname
+    else:
+        etrdefinition = ETRDevice(sourcextr.mgmtip,step)
+        etrdefinition.existing_profiled(sourcextr)
+        hostname = etrdefinition.profiled_device.hostname
 
     process = "lispSession"
     subprocess = "[main]"
     msg1 = "LISP Sessions - Main"
     message = "Starting LISP Session validations on device {}.".format(hostname)
-    logging_info(step, process, subprocess, hostname, msg1 + "|" + message)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     step = step+1
     # ETR Identification and Configuration (Steps 1-8)
 
     subprocess = "[eidIdentification]"
     msg1 = "LISP Sessions - EID Identification"
     message = "Identifying EID properties for device: {}.".format(hostname)
-    logging_info(step, process, subprocess, hostname, msg1 + "|" + message)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     etrdefinition.eid_identification(eid,vlan,vrf,step,service)
+    etrloopback = etrdefinition.profiled_device.loopback
     step = step + 1
-    #print(pformat(vars(etrdefinition.eid_properties), indent=4, width=1, sort_dicts=False))
 
     subprocess = "[eidConfiguration]"
     msg1 = "LISP Sessions - EID Configuration"
     message = "Verifying LISP Map-Server configuration on device: {}.".format(hostname)
-    logging_info(step, process, subprocess, hostname, msg1 + "|" + message)
-    etrdefinition.eid_configuration(etrdefinition.eid_properties,service)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    eid_type = etrdefinition.eid_properties.eid_type
+    if eid_type == "MAC":
+        servicetype = "ethernet"
+    etrdefinition.eid_configuration(etrdefinition.eid_properties,servicetype,service)
     step = step + 1
 
     # LISP Session Local Status (Global)
     subprocess = "[globalLISPSession]"
     msg1 = "LISP Sessions - Global LISP Sessions"
     message = "Verifying Local LISP session status for device:  {}.".format(hostname)
-    logging_info(step, process, subprocess, hostname, msg1 + "|" + message)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     etrdefinition.global_lisp_session(service)
-    #print(pformat(vars(etrdefinition.global_lisp_sessions), indent=4, width=1, sort_dicts=False))
 
     #Bad LISP Session states: Down, Init, NoRoute, at least 1 LISP session must be up to the map-servers and not itself.
     etr_rloc = etrdefinition.profiled_device.loopback
@@ -817,111 +1236,136 @@ def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step):
     if single_up is False:
         error = "LISP Sessions - All Down"
         message = "All LISP sessions are down  on device {}.".format(hostname)
-        logging_warning(step, process, subprocess, hostname, error+"|"+message)
+        logging_warning(step, process, subprocess, hostname, error+" | "+message)
     step = step + 1
 
     #Verifying unique LISP sessions.
-    subprocess = "[specificLISPSession]"
-    msg1 = "LISP Sessions - Specific LISP Sessions"
-    message = "Verifying Specific LISP session status for Map-Servers on device:  {}.".format(hostname)
-    logging_info(step, process, subprocess, hostname, msg1 + "|" + message)
     # LISP Session Specific Status (Only to map-servers)
+    vni = etrdefinition.eid_properties.iid
     eid_map_servers = etrdefinition.eid_properties.mapservers
-    map_server_ips = []
-    for map_server in eid_map_servers:
-        map_server_ip = map_server['map_server']
-        if map_server_ip != etr_rloc:
-            map_server_ips.append(map_server_ip)
-    specific_lisp_sessions = []
-    for ip in map_server_ips:
-        a = LISPSession(hostname)
-        a.specificlispsession(ip,service)
-        specific_lisp_sessions.append(a)
-    # If all of specific sessions are in the wrong state, RCA will be attempted on all, depending on the code status:
-        #No Route: call underlay recursion
-        #Down/Init : Route check, cef check, ACL check, ping check, ping MTU check, telnet test.
 
-    for specific_lisp_session in specific_lisp_sessions:
-        mapserverip = specific_lisp_session.peer_addr
-        state = specific_lisp_session.session_state
-        if (state=="Down") or (state=="Init"):
-            error = "LISP Specific Sessions - Down or Init"
-            message = "LISP Session to {} is in state {} on device {}. Performing checks".format(mapserverip,state,hostname)
-            logging_warning(step, process, subprocess, hostname, error + " | " + message)
-            #Verifications for down/init session to a CP
-            down_init_cp = down_init_procedure(mapserverip,catc_name, service, step, hostname, etrdefinition, specific_lisp_session)
-            step = down_init_cp[0]
-            control_plane = down_init_cp[1]
-            cp_state = control_plane['reachability']
-            cp_hostname = control_plane['radkithostname']
-            if cp_state == 'Reachable':
-                #Routing/CEF/Physical Interfaces
-                cpstatus = map_server_local_session(step,mapserverip,state,control_plane,catc_name,service)
-                step = cpstatus[0]
-                cpstatus_routing = cpstatus[1]
-                interfaces = cpstatus_routing[2]
-                #ACL
-                step = step + 1
-                total_acls = []
-                for interface in interfaces:
-                    acls = AccessList(hostname)
-                    acls.aclbyinterface(interface, service)
-                    if len(acls.aclnames) != 0:
-                        for acl in acls.aclnames:
-                            total_acls.append(acl)
-                total_acls = set(total_acls)
-                step = session_access_lists(total_acls, hostname, service, mapserverip, step, etrdefinition)
+    step,map_server_ips = unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name, etrdefinition, vni)
 
-                #End of Self-LISP Session
-                #Start of LISP Session validation to the ETR
-                cpdefinition = cpstatus[2]
-                down_init_etr = down_init_procedure_to_etr(step,cp_hostname,etr_rloc,service,cpdefinition)
-        if state=="NoRoute":
-            error = "LISP Specific Sessions - No Route"
-            message = "LISP Session to {} is in state {} on device {}. Performing checks".format(mapserverip,state,hostname)
-            logging_warning(step, process, subprocess, hostname, error + " | " + message)
-            #Verifications for down/init session to a CP
-            down_init_cp = down_init_procedure(mapserverip,catc_name, service, step, hostname, etrdefinition, specific_lisp_session)
-            step = down_init_cp[0]
+    ## Highlight on UPtime Status (flapping) criteria - Less than 5 minutes.
+    step = step + 1
+    for ip_address, sessions_list in lisp_sessions.items():
+        for session in sessions_list:
+            if session.get('state') == 'Up':
+                uptime_str = session.get('time')
+                if uptime_str:
+                    uptime_minutes = parse_uptime_to_minutes(uptime_str)
+                    if uptime_minutes < 5:
+                        error = "LISP Specific Sessions - Uptime"
+                        message = "LISP Session to {} uptime is less than 5 minutes on device {}, consider verifying the underlay network stability".format(
+                            ip_address, hostname)
+                        logging_warning(step, process, subprocess, hostname, error + " | " + message)
+                    else:
+                        error = "LISP Specific Sessions - Uptime"
+                        message = "LISP Session to {} has been stable for more than 5 minutes on device {}".format(
+                            ip_address, hostname)
+                        logging_info(step, process, subprocess, hostname, error + " | " + message)
 
     #### Starting this, the status of LISP session establishment between XTR and Map-Servers have been validated.
     #Steps covered are now:
-    vni = etrdefinition.eid_properties.iid
     subprocess = "[mapServerConfiguration]"
     msg1 = "LISP Sessions - Map-Server Configuration"
     message = "All LISP Sessions in correct state, verifying CP configuration and statistics for VNI {}".format(vni)
-    logging_info(step, process, subprocess, hostname, msg1 + "|" + message)
-    step = step + 1
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
 
+    map_server_configuration = etrdefinition.eid_configuration.mapserverconfiguration
+    control_plane_information = []
     for cp in map_server_ips:
         control_plane = find_control_plane(cp, catc_name, service, step, process, subprocess)
         cp_status = control_plane['reachability']
         cp_mgmtip = control_plane['mgmtip']
+        cp_hostname = control_plane['hostname']
 
         #Is the CP available?
         if cp_status == 'Reachable':
             control_plane = ETRDevice(cp_mgmtip,step)
             control_plane.device_profiler(catc_name,service)
-            cp_hostname = control_plane.profiled_device.hostname
-            
+            cp_loopback = control_plane.profiled_device.loopback
 
+            # 21 MS/MR Site_UCI configuration (definition as map-server, map-resolver, site_uci, rloc_members distribute, domain/MID consistency (pubsub)
+            # 22 MS/MR has EID space configured (L2,L3)
+            step = step + 1
+            control_plane.cp_configuration(vni,service)
+            #Validations
+            cp_configuration = control_plane.cp_configuration
+            cp_configuration_validation(step,cp_configuration, vni)
 
+            # 24 Authentication Counters for EID in both ETR and MS/MR (looking for logs as well?)
+            step = step + 1
+            authentication_key_validation(step,cp_configuration,cp_hostname,map_server_configuration,cp_loopback, hostname)
 
+            # 23 MS/MR limits and statistics
+            step = step + 1
+            control_plane.lisp_statistics(vni,servicetype,service)
+            lisp_statistics = control_plane.lispstatistics
+            lispstatisticsparser(step,lisp_statistics,cp_hostname)
 
-    # 21 MS/MR Site_UCI configuration (definition as map-server, map-resolver, site_uci, rloc_members distribute, domain/MID consistency (pubsub)
-    # 22 MS/MR has EID space configured (L2,L3)
-    # 23 MS/MR limits and statistics
-    # 24 Authentication Counters for EID in both ETR and MS/MR (looking for logs as well?)
-    # 27 L2LISP Statistics
+            # 19 Identify the status of the TCP socket
+            step = step + 1
+            control_plane.tcp_tcb_statistics(cp_loopback,etrloopback,4342,service)
+            # 20 Identify the status of the TCB (mss, retransmissions, pmtud)
+            tcb_stats = control_plane.tcb_statistics
+            tcbstatistcisparser(step,tcb_stats,cp_hostname)
 
-    ### Map_Server configuration and statistics are correct for each "valid" Map-Server (reachable from CatC). Next steps are:
-    # 19 Identify the status of the TCP socket
-    # 20 Identify the status of the TCB (mss, retransmissions, pmtud)
+            # 26 CPU Utilization
+            step = step + 1
+            control_plane.cpu_utilization(service)
+            highcpuprocesses = control_plane.cpu_statistics.high_cpu_processes
+            highplatcpuprocesses =control_plane.cpu_statistics.plat_high_cpu_processes
+            cpu_utilization_warning(step, highcpuprocesses, cp_hostname)
+            cpu_platform_utilization_warning(step, highplatcpuprocesses, cp_hostname)
+
+            #Append CP information
+            control_plane_information.append(control_plane)
 
     ### Inter-Map-Server verifications (up to 4)
-    # 25 Session State between CPs
-    # 26 Registration is in both CPs?
+    # Get all "reachable" CPs from Catalyst Center
+    subprocess = "[interCPSession]"
+    msg1 = "LISP Sessions - Session between CPs"
+    message = "Verifying LISP sessions between CPs reachable by Catalyst Center (Site-wide)."
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step = step + 1
 
+    reachable_cp_information = []
+    for cp in control_plane_information:
+        reachable_status = cp.profiled_device.reachabilitystatus
+        if reachable_status == 'Reachable':
+            reachable_cp_information.append(cp)
+
+    # 25 Session State between CPs
+    for cp in reachable_cp_information:
+        etr_rloc = cp.profiled_device.loopback
+        hostname = cp.profiled_device.hostname
+        map_server_ips = []
+        for map_server in eid_map_servers:
+            map_server_ip = map_server['map_server']
+            if map_server_ip != etr_rloc:
+                map_server_ips.append(map_server_ip)
+        # Remove the local ETR_RLOC form the map-server list, useful when validating CP-to-CP LISP Sessions.
+        while etr_rloc in map_server_ips:
+            map_server_ips.remove(etr_rloc)
+        map_server_strings = ", ".join(map_server_ips)
+
+        if len(map_server_ips) != 0:
+            subprocess = "[interCPSession]"
+            msg1 = "LISP Sessions - Session between CPs"
+            message = "Verifying LISP sessions from CP {} to CPs : {}".format(etr_rloc,map_server_strings)
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step = step + 1
+
+            step, map_server_ips = unique_lisp_session(hostname, step, eid_map_servers, etr_rloc, service, catc_name,cp, vni)
+
+        else:
+            subprocess = "[interCPSession]"
+            msg1 = "LISP Sessions - Session between CPs"
+            message = "Control Plane {} is the sole reachable CP in the fabric site; skipping inter-CP session validation.".format(hostname)
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step = step + 1
+    return step
     ## Extra: WLC
     # 28 WLC RLOC definition and passiveopen
 

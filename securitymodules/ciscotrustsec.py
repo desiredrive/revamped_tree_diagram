@@ -196,9 +196,21 @@ class cts_endpoint_info():
 
         ctsenforcementcmd = "show cts"
         ctsenforcementop = radkit_cli.get_single_output_genie(self.hostname, ctsenforcementcmd,service)
-
-        globalenforcement = ctsenforcementop['ip_sgt_bindings']['cts_role_based_enforcement']
-        vlanenforcement = ctsenforcementop['ip_sgt_bindings']['cts_role_based_vlan_enforcement']
+        if ctsenforcementop is not None:
+            globalenforcement = ctsenforcementop['ip_sgt_bindings']['cts_role_based_enforcement']
+            vlanenforcement = ctsenforcementop['ip_sgt_bindings']['cts_role_based_vlan_enforcement']
+        else:
+            globalenforcement = 'Disabled'
+            vlanenforcement = 'Disabled'
+            ctsenforcementcmd = "show cts | i Enforcement"
+            ctsenforcementop = radkit_cli.get_any_single_output(self.hostname, ctsenforcementcmd, service)
+            for line in ctsenforcementop.splitlines():
+                if "CTS Role Based VLAN Enforcement:" in line:
+                    if "Enabled" in line:
+                        vlanenforcement = 'Enabled'
+                if "CTS Role Based Enforcement:" in line:
+                    if "Enabled" in line:
+                        globalenforcement = 'Enabled'
 
         if globalenforcement == 'Enabled':
             self.globalenforcement = True

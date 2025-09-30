@@ -101,13 +101,49 @@ def rloc_definition(hostname, uuid, dnac, service,step):
             sys.exit("Error: {} | {}".format(error, message))
     else:
         error = "Error determining Remote Locator information"
-        message = "Empty output when profiling RLOC information on device: {}, veirfy it's Managed state on Catalyst Center".format(
+        message = "Empty output when profiling RLOC information on device: {}, veirfy it's Managed state on Catalyst Center or accessible via SSH/Telnet.".format(
             hostname)
         logging_error(step, process, subprocess, hostname, error)
         logging_info(step, process, subprocess, hostname, message)
         #raise BDBTaskError("Error: {} | {}".format(error, message))
         sys.exit("Error: {} | {}".format(error, message))
     return ip,mask,rlocs[0]
+
+def cp_loopback(hostname, uuid, dnac, service,step):
+
+    process = 'deviceProfiler'
+    subprocess = '[rlocDefinition]'
+     # Verifying if the configured Loopback0 is defined as the SINGLE LISP RLOC.
+    loopback_api = "/dna/intent/api/v1/interface/network-device/{}/interface-name?name=Loopback0".format(uuid)
+    loopback_response = get_catc_api(dnac,loopback_api,service)['response']
+    ip, mask = None, None
+    try:
+        if "Not found" in loopback_response['errorCode']:
+            error = "Catalyst Center could not retrieve the Loopback0 information for device {}".format(hostname)
+            message = "Review the latest API retrieved in Catalyst Center in the GPS_SDA Collection"
+            logging_error(step, process, subprocess, dnac, error)
+            logging_info(step, process, subprocess, dnac, message)
+            #raise BDBTaskError("Error: {} | {}".format(error, message))
+            sys.exit("Error: {} | {}".format(error, message))
+    except KeyError:
+        pass
+
+    #LoopbackState
+    lo0state = loopback_response['status']
+    if lo0state != 'up':
+        error = "Error collecting Loopback0 information"
+        message = "Loopback0 is down at device: {} , unshut the interface".format(hostname)
+        logging_error(step, process, subprocess, hostname, error)
+        logging_info(step, process, subprocess, hostname, message)
+        #raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+
+    for i in loopback_response['addresses']:
+        if "IPV4_PRIMARY" in i['type']:
+            ip = (i['address']['ipAddress']['address'])
+            mask = (i['address']['ipMask']['address'])
+
+    return ip,mask
 
 def fabric_sites(siteNameHierarchy, dnac, service,step):
 
@@ -261,6 +297,9 @@ class Device:
         fabric_roles_cp = ['Control Plane']
         if  any(x  in fabric_role for x in fabric_roles_cp):
             self.cp = True
+            loopback_parameters = cp_loopback(self.hostname, self.deviceuuid, self.dnac, service, self.step)
+            self.loopback = (loopback_parameters[0])
+            self.mask = (loopback_parameters[1])
 
         #Loopback validation (Edges and Borders)
         #PITR Validation From: show lisp service ipv4
