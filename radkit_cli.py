@@ -122,8 +122,8 @@ def get_catc_api(dnac, api_url: str,service):
         try:
             response = device_inventory.http.get(api_url).wait()
             response_js = json.loads(response.content)
-            formatted_json = json.dumps(response_js, indent=2)
-            to_file = "Catalyst Center API: {}".format(api_url)+"\n"+str(formatted_json)
+            #formatted_json = json.dumps(response_js, indent=2)
+            to_file = "Catalyst Center API: {}".format(api_url)+"\n"+str(response_js)
             append_to_logging_file(to_file)
             #Handling BAPI Exceptions
             attempts = 0

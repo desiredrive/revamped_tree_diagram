@@ -3,6 +3,7 @@ import sys
 
 from asn1crypto.pkcs12 import AttributeType
 
+from securitymodules.type7decryptor import decrypt_password
 from switchingmodules.interfaces import Interfaces
 from switchingmodules.spanning_tree import SpanningTree
 from switchingmodules.vlan import VlanInformation
@@ -66,10 +67,516 @@ def parse_lisp_session(output):
         result['sent_defferred'] = int(sent_deferred_match.group(1))
     return result
 
-def lisp_map_servers(device,service):
-    lisp_cmd = "show run | i map-server"
+def lisp_map_servers(device,servicetype,service):
+    lisp_cmd = "show run | section service {}".format(servicetype)
     lisp_op = get_any_single_output(device,lisp_cmd,service)
     return (lisp_op)
+
+def parse_lisp_ethernet_statistics(cli_output):
+    """
+    Parses the 'show lisp instance-id <id> ethernet statistics' CLI output
+    and returns a dictionary similar to the specified structure.
+    """
+    data = {}
+    lines = cli_output.strip().split('\n')
+
+    # Helper function to extract in/out values (e.g., "4/0")
+    def parse_in_out(line_text):
+        match = re.search(r'(\d+)/(\d+)', line_text)
+        if match:
+            return {'in': int(match.group(1)), 'out': int(match.group(2))}
+        return {'in': 0, 'out': 0} # Default if not found
+
+    # Helper function to extract 5 sec/1 min/5 min values (e.g., "0/0/0")
+    def parse_time_stats(line_text):
+        match = re.search(r'\((\d+) sec/(\d+) min/(\d+) min\)', line_text)
+        if match:
+            return {'5_sec': int(match.group(1)), '1_min': int(match.group(2)), '5_min': int(match.group(3))}
+        return {'5_sec': 0, '1_min': 0, '5_min': 0} # Default if not found
+
+    current_section = None
+    instance_id = None
+    last_cleared_eid = "never"
+
+    # Find instance ID and initial last cleared from the first relevant line
+    for line in lines:
+        match = re.search(r'LISP EID Statistics for instance ID (\d+) - last cleared: (.*)', line)
+        if match:
+            instance_id = int(match.group(1))
+            last_cleared_eid = match.group(2)
+            break
+
+    if instance_id is None:
+        return {} # Could not find instance ID, return empty dict
+
+    # Initialize the main dictionary structure with default values
+    # This ensures all expected keys from the example are present.
+    data = {
+        'lisp_id': {
+            0: {
+                'instance_id': {
+                    instance_id: {
+                        'last_cleared': last_cleared_eid,
+                        'control_packets': {},
+                        'errors': {}, # EID errors
+                        'cache_related': {},
+                        'forwarding': {},
+                        'itr_map_resolvers': {}, # Not in CLI output, but in example structure
+                        'etr_map_servers': {},   # Not in CLI output, but in example structure
+                        'rloc_statistics': {},
+                        'misc_statistics': {}
+                    }
+                }
+            }
+        }
+    }
+    instance_data = data['lisp_id'][0]['instance_id'][instance_id]
+
+    # Initialize nested structures with default values (0 or 'never')
+    instance_data['control_packets'] = {
+        'map_requests': {
+            'in': 0, 'out': 0, '5_sec': 0, '1_min': 0, '5_min': 0,
+            'encapsulated': {'in': 0, 'out': 0},
+            'rloc_probe': {'in': 0, 'out': 0},
+            'smr_based': {'in': 0, 'out': 0},
+            'expired': {'on_queue': 0, 'no_reply': 0},
+            'map_resolver_forwarded': 0,
+            'map_server_forwarded': 0
+        },
+        'map_reply': {
+            'in': 0, 'out': 0,
+            'authoritative': {'in': 0, 'out': 0},
+            'non_authoritative': {'in': 0, 'out': 0},
+            'negative': {'in': 0, 'out': 0},
+            'rloc_probe': {'in': 0, 'out': 0},
+            'map_server_proxy_reply': {'out': 0}
+        },
+        'wlc_map_subscribe': {'in': 0, 'out': 0, 'failures': {'in': 0, 'out': 0}},
+        'wlc_map_unsubscribe': {'in': 0, 'out': 0, 'failures': {'in': 0, 'out': 0}},
+        'map_register': {
+            'in': 0, 'out': 0, '5_sec': 0, '1_min': 0, '5_min': 0,
+            'map_server_af_disabled': 0,
+            'not_valid_site_eid_prefix': 0,
+            'authentication_failures': 0,
+            'disallowed_locators': 0,
+            'misc': 0
+        },
+        'wlc_map_registers': {
+            'in': 0, 'out': 0,
+            'ap': {'in': 0, 'out': 0},
+            'client': {'in': 0, 'out': 0},
+            'failures': {'in': 0, 'out': 0}
+        },
+        'map_notify': {'in': 0, 'out': 0, 'authentication_failures': 0},
+        'wlc_map_notify': {
+            'in': 0, 'out': 0,
+            'ap': {'in': 0, 'out': 0},
+            'client': {'in': 0, 'out': 0},
+            'failures': {'in': 0, 'out': 0}
+        },
+        'publish_subscribe': {
+            'subscription_request': {
+                'in': 0, 'out': 0,
+                'iid': {'in': 0, 'out': 0},
+                'pub_refresh': {'in': 0, 'out': 0},
+                'policy': {'in': 0, 'out': 0},
+                'failures': {'in': 0, 'out': 0}
+            },
+            'subscription_status': {
+                'in': 0, 'out': 0,
+                'end_of_publication': {'in': 0, 'out': 0},
+                'subscription_rejected': {'in': 0, 'out': 0},
+                'subscription_removed': {'in': 0, 'out': 0},
+                'failures': {'in': 0, 'out': 0}
+            },
+            'solicit_subscription': {'in': 0, 'out': 0, 'failures': {'in': 0, 'out': 0}},
+            'publication': {'in': 0, 'out': 0, 'failures': {'in': 0, 'out': 0}}
+        }
+    }
+
+    instance_data['errors'] = {
+        'mapping_rec_ttl_alerts': 0,
+        'map_request_invalid_source_rloc_drops': 0,
+        'map_register_invalid_source_rloc_drops': 0,
+        'ddt_requests_failed': 0,
+        'ddt_itr_map_requests': {'dropped': 0, 'nonce_collision': 0, 'bad_xtr_nonce': 0}
+    }
+
+    instance_data['cache_related'] = {
+        'cache_entries': {'created': 0, 'deleted': 0},
+        'nsf_cef_replay_entry_count': 0,
+        'eid_prefix_map_cache': 0,
+        'rejected_eid_prefix_due_to_limit': 0,
+        'times_signal_suppresion_turned_on': 0,
+        'time_since_last_signal_suppressed': 'never',
+        'negative_entries_map_cache': 0,
+        'total_rlocs_map_cache': 0,
+        'average_rlocs_per_eid_prefix': 0,
+        'policy_active_entries': 0
+    }
+
+    instance_data['forwarding'] = {
+        'data_signals': {'processed': 0, 'dropped': 0},
+        'reachability_reports': {'count': 0, 'dropped': 0},
+        'smr_signals': {'dropped': 0}
+    }
+
+    instance_data['rloc_statistics'] = {
+        'last_cleared': 'never',
+        'control_packets': {
+            'rtr': {'map_requests_forwarded': 0, 'map_notifies_forwarded': 0},
+            'ddt': {'map_requests': {'in': 0, 'out': 0}, 'map_referrals': {'in': 0, 'out': 0}}
+        },
+        'errors': {
+            'map_request_format': 0,
+            'map_reply_format': 0,
+            'map_referral': 0
+        }
+    }
+
+    instance_data['misc_statistics'] = {
+        'invalid': {
+            'ip_version_drops': 0,
+            'ip_header_drops': 0,
+            'ip_proto_field_drops': 0,
+            'packet_size_drops': 0,
+            'lisp_control_port_drops': 0,
+            'lisp_checksum_drops': 0
+        },
+        'unsupported_lisp_packet_drops': 0,
+        'unknown_packet_drops': 0
+    }
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Section headers and state management
+        if "LISP EID Statistics" in line:
+            current_section = "eid_stats_header"
+            continue
+        elif "Control Packets:" in line and current_section == "eid_stats_header":
+            current_section = "control_packets"
+            continue
+        elif line == "Errors:" and current_section in ["control_packets", "eid_stats_header"]: # EID Errors
+            current_section = "eid_errors"
+            continue
+        elif line == "Cache Related:":
+            current_section = "cache_related"
+            continue
+        elif line == "Forwarding:":
+            current_section = "forwarding"
+            continue
+        elif "LISP RLOC Statistics" in line:
+            current_section = "rloc_statistics_header"
+            match = re.search(r'last cleared: (.*)', line)
+            if match:
+                instance_data['rloc_statistics']['last_cleared'] = match.group(1)
+            continue
+        elif "Control Packets:" in line and current_section == "rloc_statistics_header":
+            current_section = "rloc_control_packets"
+            continue
+        elif line == "Errors:" and current_section == "rloc_control_packets": # RLOC Errors
+            current_section = "rloc_errors"
+            continue
+        elif "LISP Miscellaneous Statistics" in line:
+            current_section = "misc_statistics_header"
+            match = re.search(r'last cleared: (.*)', line)
+            if match:
+                instance_data['misc_statistics']['last_cleared'] = match.group(1)
+            continue
+        elif line == "Errors:" and current_section == "misc_statistics_header": # Misc Errors
+            current_section = "misc_errors"
+            continue
+        elif line.startswith("Control-Plane#"):
+            current_section = None # End of statistics
+
+        # Parsing logic based on current_section
+        if current_section == "control_packets":
+            if "Map-Requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_requests'].update(stats)
+            elif "Map-Requests in (5 sec/1 min/5 min):" in line:
+                stats = parse_time_stats(line)
+                instance_data['control_packets']['map_requests'].update(stats)
+            elif "Encapsulated Map-Requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_requests']['encapsulated'].update(stats)
+            elif "RLOC-probe Map-Requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_requests']['rloc_probe'].update(stats)
+            elif "SMR-based Map-Requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_requests']['smr_based'].update(stats)
+            elif "Map-Requests expired on-queue/no-reply" in line:
+                match = re.search(r'expired on-queue/no-reply\s+(\d+)/(\d+)', line)
+                if match:
+                    instance_data['control_packets']['map_requests']['expired']['on_queue'] = int(match.group(1))
+                    instance_data['control_packets']['map_requests']['expired']['no_reply'] = int(match.group(2))
+            elif "Map-Resolver Map-Requests forwarded:" in line:
+                match = re.search(r'forwarded:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_requests']['map_resolver_forwarded'] = int(match.group(1))
+            elif "Map-Server Map-Requests forwarded:" in line:
+                match = re.search(r'forwarded:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_requests']['map_server_forwarded'] = int(match.group(1))
+
+            elif "Map-Reply records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_reply'].update(stats)
+            elif "Authoritative records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_reply']['authoritative'].update(stats)
+            elif "Non-authoritative records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_reply']['non_authoritative'].update(stats)
+            elif "Negative records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_reply']['negative'].update(stats)
+            elif "RLOC-probe records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_reply']['rloc_probe'].update(stats)
+            elif "Map-Server Proxy-Reply records out:" in line:
+                match = re.search(r'out:\s*(\d+)$', line)
+                if match: instance_data['control_packets']['map_reply']['map_server_proxy_reply']['out'] = int(match.group(1))
+
+            elif "WLC Map-Subscribe records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_subscribe'].update(stats)
+            elif "Map-Subscribe failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_subscribe']['failures'].update(stats)
+
+            elif "WLC Map-Unsubscribe records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_unsubscribe'].update(stats)
+            elif "Map-Unsubscribe failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_unsubscribe']['failures'].update(stats)
+
+            elif "Map-Register records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_register'].update(stats)
+            elif "Map-Registers in (5 sec/1 min/5 min):" in line:
+                stats = parse_time_stats(line)
+                instance_data['control_packets']['map_register'].update(stats)
+            elif "Map-Server AF disabled:" in line:
+                match = re.search(r'disabled:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_register']['map_server_af_disabled'] = int(match.group(1))
+            elif "Not valid site eid prefix:" in line:
+                match = re.search(r'prefix:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_register']['not_valid_site_eid_prefix'] = int(match.group(1))
+            elif "Authentication failures:" in line and "Map-Register" in line:
+                match = re.search(r'failures:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_register']['authentication_failures'] = int(match.group(1))
+            elif "Disallowed locators:" in line:
+                match = re.search(r'locators:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_register']['disallowed_locators'] = int(match.group(1))
+            elif "Miscellaneous:" in line and "Map-Register" in line:
+                match = re.search(r'Miscellaneous:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_register']['misc'] = int(match.group(1))
+
+            elif "WLC Map-Register records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_registers'].update(stats)
+            elif "WLC AP Map-Register in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_registers']['ap'].update(stats)
+            elif "WLC Client Map-Register in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_registers']['client'].update(stats)
+            elif "WLC Map-Register failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_registers']['failures'].update(stats)
+
+            elif "Map-Notify records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['map_notify'].update(stats)
+            elif "Authentication failures:" in line and "Map-Notify" in line:
+                match = re.search(r'failures:\s*(\d+)', line)
+                if match: instance_data['control_packets']['map_notify']['authentication_failures'] = int(match.group(1))
+
+            elif "WLC Map-Notify records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_notify'].update(stats)
+            elif "WLC AP Map-Notify in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_notify']['ap'].update(stats)
+            elif "WLC Client Map-Notify in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_notify']['client'].update(stats)
+            elif "WLC Map-Notify failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['wlc_map_notify']['failures'].update(stats)
+
+            # Publish-Subscribe section
+            elif "Subscription Request records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_request'].update(stats)
+            elif "IID subscription requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_request']['iid'].update(stats)
+            elif "Pub-refresh subscription requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_request']['pub_refresh'].update(stats)
+            elif "Policy subscription requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_request']['policy'].update(stats)
+            elif "Subscription Request failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_request']['failures'].update(stats)
+
+            elif "Subscription Status records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_status'].update(stats)
+            elif "End of Publication records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_status']['end_of_publication'].update(stats)
+            elif "Subscription rejected records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_status']['subscription_rejected'].update(stats)
+            elif "Subscription removed records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_status']['subscription_removed'].update(stats)
+            elif "Subscription Status failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['subscription_status']['failures'].update(stats)
+
+            elif "Solicit Subscription records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['solicit_subscription'].update(stats)
+            elif "Solicit Subscription failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['solicit_subscription']['failures'].update(stats)
+
+            elif "Publication records in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['publication'].update(stats)
+            elif "Publication failures in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['control_packets']['publish_subscribe']['publication']['failures'].update(stats)
+
+        elif current_section == "eid_errors":
+            if "Mapping record TTL alerts:" in line:
+                match = re.search(r'alerts:\s*(\d+)', line)
+                if match: instance_data['errors']['mapping_rec_ttl_alerts'] = int(match.group(1))
+            elif "Map-Request invalid source rloc drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['errors']['map_request_invalid_source_rloc_drops'] = int(match.group(1))
+            elif "Map-Register invalid source rloc drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['errors']['map_register_invalid_source_rloc_drops'] = int(match.group(1))
+            elif "DDT Requests failed:" in line:
+                match = re.search(r'failed:\s*(\d+)', line)
+                if match: instance_data['errors']['ddt_requests_failed'] = int(match.group(1))
+            elif "DDT ITR Map-Requests dropped:" in line:
+                match = re.search(r'dropped:\s*(\d+)\s+\(nonce-collision:\s*(\d+),\s*bad-xTR-nonce:\s*(\d+)\)', line)
+                if match:
+                    instance_data['errors']['ddt_itr_map_requests']['dropped'] = int(match.group(1))
+                    instance_data['errors']['ddt_itr_map_requests']['nonce_collision'] = int(match.group(2))
+                    instance_data['errors']['ddt_itr_map_requests']['bad_xtr_nonce'] = int(match.group(3))
+
+        elif current_section == "cache_related":
+            if "Cache entries created/deleted:" in line:
+                match = re.search(r'created/deleted:\s*(\d+)/(\d+)', line)
+                if match:
+                    instance_data['cache_related']['cache_entries']['created'] = int(match.group(1))
+                    instance_data['cache_related']['cache_entries']['deleted'] = int(match.group(2))
+            elif "NSF CEF replay entry count" in line:
+                match = re.search(r'count\s+(\d+)', line)
+                if match: instance_data['cache_related']['nsf_cef_replay_entry_count'] = int(match.group(1))
+            elif "Number of EID-prefixes in map-cache:" in line:
+                match = re.search(r'map-cache:\s*(\d+)', line)
+                if match: instance_data['cache_related']['eid_prefix_map_cache'] = int(match.group(1))
+            elif "Number of rejected EID-prefixes due to limit:" in line:
+                match = re.search(r'limit:\s*(\d+)', line)
+                if match: instance_data['cache_related']['rejected_eid_prefix_due_to_limit'] = int(match.group(1))
+            elif "Number of times signal suppression was turned on:" in line:
+                match = re.search(r'on:\s*(\d+)', line)
+                if match: instance_data['cache_related']['times_signal_suppresion_turned_on'] = int(match.group(1))
+            elif "Time since last signal suppressed change:" in line:
+                match = re.search(r'change:\s*([a-zA-Z0-9\s]+)$', line)
+                if match: instance_data['cache_related']['time_since_last_signal_suppressed'] = match.group(1).strip()
+            elif "Number of negative entries in map-cache:" in line:
+                match = re.search(r'map-cache:\s*(\d+)', line)
+                if match: instance_data['cache_related']['negative_entries_map_cache'] = int(match.group(1))
+            elif "Total number of RLOCs in map-cache:" in line:
+                match = re.search(r'map-cache:\s*(\d+)', line)
+                if match: instance_data['cache_related']['total_rlocs_map_cache'] = int(match.group(1))
+            elif "Average RLOCs per EID-prefix:" in line:
+                match = re.search(r'EID-prefix:\s*(\d+)', line)
+                if match: instance_data['cache_related']['average_rlocs_per_eid_prefix'] = int(match.group(1))
+            elif "Policy active entries:" in line:
+                match = re.search(r'entries:\s*(\d+)', line)
+                if match: instance_data['cache_related']['policy_active_entries'] = int(match.group(1))
+
+        elif current_section == "forwarding":
+            if "Number of data signals processed:" in line:
+                match = re.search(r'processed:\s*(\d+)\s+\(\+ dropped\s*(\d+)\)', line)
+                if match:
+                    instance_data['forwarding']['data_signals']['processed'] = int(match.group(1))
+                    instance_data['forwarding']['data_signals']['dropped'] = int(match.group(2))
+            elif "Number of reachability reports:" in line:
+                match = re.search(r'reports:\s*(\d+)\s+\(\+ dropped\s*(\d+)\)', line)
+                if match:
+                    instance_data['forwarding']['reachability_reports']['count'] = int(match.group(1))
+                    instance_data['forwarding']['reachability_reports']['dropped'] = int(match.group(2))
+            elif "Number of SMR signals dropped:" in line:
+                match = re.search(r'dropped:\s*(\d+)', line)
+                if match: instance_data['forwarding']['smr_signals']['dropped'] = int(match.group(1))
+
+        elif current_section == "rloc_control_packets":
+            if "RTR Map-Requests forwarded:" in line:
+                match = re.search(r'forwarded:\s*(\d+)', line)
+                if match: instance_data['rloc_statistics']['control_packets']['rtr']['map_requests_forwarded'] = int(match.group(1))
+            elif "RTR Map-Notifies forwarded:" in line:
+                match = re.search(r'forwarded:\s*(\d+)', line)
+                if match: instance_data['rloc_statistics']['control_packets']['rtr']['map_notifies_forwarded'] = int(match.group(1))
+            elif "DDT-Map-Requests in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['rloc_statistics']['control_packets']['ddt']['map_requests'].update(stats)
+            elif "DDT-Map-Referrals in/out:" in line:
+                stats = parse_in_out(line)
+                instance_data['rloc_statistics']['control_packets']['ddt']['map_referrals'].update(stats)
+
+        elif current_section == "rloc_errors":
+            if "Map-Request format errors:" in line:
+                match = re.search(r'errors:\s*(\d+)', line)
+                if match: instance_data['rloc_statistics']['errors']['map_request_format'] = int(match.group(1))
+            elif "Map-Reply format errors:" in line:
+                match = re.search(r'errors:\s*(\d+)', line)
+                if match: instance_data['rloc_statistics']['errors']['map_reply_format'] = int(match.group(1))
+            elif "Map-Referral format errors:" in line:
+                match = re.search(r'errors:\s*(\d+)', line)
+                if match: instance_data['rloc_statistics']['errors']['map_referral'] = int(match.group(1))
+
+        elif current_section == "misc_errors":
+            if "Invalid IP version drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['invalid']['ip_version_drops'] = int(match.group(1))
+            elif "Invalid IP header drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['invalid']['ip_header_drops'] = int(match.group(1))
+            elif "Invalid IP proto field drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['invalid']['ip_proto_field_drops'] = int(match.group(1))
+            elif "Invalid packet size drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['invalid']['packet_size_drops'] = int(match.group(1))
+            elif "Invalid LISP control port drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['invalid']['lisp_control_port_drops'] = int(match.group(1))
+            elif "Invalid LISP checksum drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['invalid']['lisp_checksum_drops'] = int(match.group(1))
+            elif "Unsupported LISP packet type drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['unsupported_lisp_packet_drops'] = int(match.group(1))
+            elif "Unknown packet drops:" in line:
+                match = re.search(r'drops:\s*(\d+)', line)
+                if match: instance_data['misc_statistics']['unknown_packet_drops'] = int(match.group(1))
+
+    return data
 
 class lisp_route_import:
 
@@ -630,6 +1137,100 @@ class LISPLocalDB:
             self.locators = None
             self.mapservers = None
 
+class L2LISPControlPlane:
+    def __init__(self, device):
+        self.device = device
+    def lisp_service_ethernet(self,service):
+        hostname = self.device
+        lispservethcmd = "show lisp service ethernet"
+        lispservethop = get_single_output_genie(hostname,lispservethcmd,service)
+        if lispservethop is not None:
+            try:
+                path = lispservethop['lisp_id'][0]
+            except KeyError:
+                path = lispservethop['lisp_id']['default']
+            self.map_server = bool(path['map_server']['enabled'])
+            self.map_resolver = bool(path['map_resolver']['enabled'])
+
+    def site_uci(self,iid,service):
+        hostname = self.device
+        siteuciruncmd = "show run | se site_uci"
+        siteucirunop = get_any_single_output(hostname,siteuciruncmd,service)
+        self.iid_site = False
+        self.site_uci = False
+        self.authenkey = False
+        self.decrypted = False
+        self.authentication_key = None
+        self.key_type = None
+        if siteucirunop is not None:
+            string = "eid-record instance-id {} any-mac".format(iid).strip()
+            authenkey = "authentication-key"
+            vnisite_flag = False
+            for line in siteucirunop.splitlines():
+                if string == line.strip():
+                    vnisite_flag = True
+                    self.site_uci = True
+                if "site site_uci" in line:
+                    self.site_uci = True
+                if authenkey in line:
+                    #Authenticaction Key Parse
+                    parts = line.strip().split()
+                    if len(parts) < 3 or parts[0] != "authentication-key":
+                        raise ValueError("Invalid authentication-key format")
+                    try:
+                        password_type = int(parts[1])
+                    except ValueError:
+                        raise ValueError("Password type must be an integer")
+                    encrypted_key = parts[2]
+                    self.key_type = password_type
+                    if password_type == 0:
+                        self.decrypted = True
+                        self.authentication_key = encrypted_key
+                    elif password_type == 7:
+                        self.decrypted = True
+                        self.authentication_key = decrypt_password(encrypted_key)
+                    else:
+                        self.decrypted = False
+                        self.authentication_key = encrypted_key
+                    self.authenkey = True
+            self.iid_site = vnisite_flag
+
+            #Authentication Key Parse
+
+    def rloc_members(self,service):
+        hostname = self.device
+        rlocmembercmd = "show run | i map-server rloc members"
+        rlocmemberop = get_any_single_output(hostname,rlocmembercmd,service)
+        self.rloc_members_distribute = False
+        if rlocmemberop is not None:
+            for line in rlocmemberop.splitlines():
+                if "distribute" in line:
+                    self.rloc_members_distribute = True
+
+    def domains(self,service):
+        hostname = self.device
+        lispcmd = "show lisp"
+        lispop = get_single_output_genie(hostname,lispcmd,service)
+        self.domainid = 0
+        self.multihomingid = 0
+        if lispop is not None:
+            try:
+                path = lispop['lisp_id'][0]
+            except KeyError:
+                path = lispop['lisp_id']['default']
+            # Try domainid
+            try:
+                domainid = int(path['domain_id'])
+            except KeyError:
+                domainid = 0
+            # Try MultiHoming ID
+            try:
+                multihoming_id = int(path['multihoming_id'])
+            except KeyError:
+                multihoming_id = 0
+            self.domainid = domainid
+            self.multihomingid = multihoming_id
+
 class LISPEIDWatch:
     def __init__(self,device,iid):
         self.iid = iid
@@ -732,8 +1333,71 @@ class LISPInstanceStatus:
 
         lispiidstats_cmd = "show lisp instance-id {} {} statistics".format(iid,qtype)
         lispiidstats_op = get_single_output_genie(device,lispiidstats_cmd,service)
+        if lispiidstats_op is not None:
+            try:
+                path = lispiidstats_op['lisp_id'][0]['instance_id'][iid]
+            except KeyError:
+                path = lispiidstats_op['lisp_id']['default']['instance_id'][iid]
+            control_packets = path['control_packets']
+            misc_errors = path['misc_statistics']['invalid']
+            self.statisticscollected = True
+            self.map_requests = control_packets['map_requests']
+            self.map_reply = control_packets['map_reply']
+            self.wlc_map_subscribe = control_packets['wlc_map_subscribe']
+            self.wlc_map_unsubscribe = control_packets['wlc_map_unsubscribe']
+            self.map_register = control_packets['map_register']
+            self.map_notify = control_packets['map_notify']
+            self.wlc_map_registers = control_packets['wlc_map_registers']
+            self.wlc_map_notify = control_packets['wlc_map_notify']
+            self.subscription_request = control_packets['publish_subscribe']['subscription_request']
+            self.subscription_status = control_packets['publish_subscribe']['subscription_status']
+            self.publication = control_packets['publish_subscribe']['publication']
+            self.map_request_invalid_source_rloc_drops = path['errors']['map_request_invalid_source_rloc_drops']
+            self.map_register_invalid_source_rloc_drops = path['errors']['map_register_invalid_source_rloc_drops']
+            self.rejected_eid_prefix_due_to_limit = path['cache_related']['rejected_eid_prefix_due_to_limit']
+            self.map_request_format_errors = path['rloc_statistics']['errors']['map_request_format']
+            self.ip_version_drops = misc_errors['ip_version_drops']
+            self.ip_header_drops = misc_errors['ip_header_drops']
+            self.ip_proto_field_drops = misc_errors['ip_proto_field_drops']
+            self.packet_size_drops = misc_errors['packet_size_drops']
+            self.lisp_control_port_drops = misc_errors['lisp_control_port_drops']
+            self.unsupported_lisp_packet_drops = path['misc_statistics']['unsupported_lisp_packet_drops']
+            self.lisp_checksum_drops = path['misc_statistics']['unknown_packet_drops']
+        else:
+            lispiidstats_cmd = "show lisp instance-id {} {} statistics".format(iid, qtype)
+            lispiidstats_op = get_any_single_output(device, lispiidstats_cmd, service)
+            lispiidstats_op = parse_lisp_ethernet_statistics(lispiidstats_op)
 
-        print (lispiidstats_op)
+            try:
+                path = lispiidstats_op['lisp_id'][0]['instance_id'][iid]
+            except KeyError:
+                path = lispiidstats_op['lisp_id']['default']['instance_id'][iid]
+
+            control_packets = path['control_packets']
+            misc_errors = path['misc_statistics']['invalid']
+            self.statisticscollected = True
+            self.map_requests = control_packets['map_requests']
+            self.map_reply = control_packets['map_reply']
+            self.wlc_map_subscribe = control_packets['wlc_map_subscribe']
+            self.wlc_map_unsubscribe = control_packets['wlc_map_unsubscribe']
+            self.map_register = control_packets['map_register']
+            self.map_notify = control_packets['map_notify']
+            self.wlc_map_registers = control_packets['wlc_map_registers']
+            self.wlc_map_notify = control_packets['wlc_map_notify']
+            self.subscription_request = control_packets['publish_subscribe']['subscription_request']
+            self.subscription_status = control_packets['publish_subscribe']['subscription_status']
+            self.publication = control_packets['publish_subscribe']['publication']
+            self.map_request_invalid_source_rloc_drops = path['errors']['map_request_invalid_source_rloc_drops']
+            self.map_register_invalid_source_rloc_drops = path['errors']['map_register_invalid_source_rloc_drops']
+            self.rejected_eid_prefix_due_to_limit = path['cache_related']['rejected_eid_prefix_due_to_limit']
+            self.map_request_format_errors = path['rloc_statistics']['errors']['map_request_format']
+            self.ip_version_drops = misc_errors['ip_version_drops']
+            self.ip_header_drops = misc_errors['ip_header_drops']
+            self.ip_proto_field_drops = misc_errors['ip_proto_field_drops']
+            self.packet_size_drops = misc_errors['packet_size_drops']
+            self.lisp_control_port_drops = misc_errors['lisp_control_port_drops']
+            self.unsupported_lisp_packet_drops = path['misc_statistics']['unsupported_lisp_packet_drops']
+            self.lisp_checksum_drops = path['misc_statistics']['unknown_packet_drops']
 
 class LISPSession:
 
@@ -776,22 +1440,36 @@ class LISPSession:
             lispsessionspecificop = get_any_single_output(device, lispsessionspecific, service)
             if lispsessionspecificop is not None:
                 parsed_data = parse_lisp_session(lispsessionspecificop)
-                self.peer_addr = parsed_data["peer_addr"]
-                self.peer_port = parsed_data["peer_port"]
-                self.local_address = parsed_data["local_address"]
-                self.local_port = parsed_data["local_port"]
-                self.session_type = parsed_data["session_type"]
-                self.session_state = parsed_data["session_state"]
-                self.session_state_time = parsed_data["session_state_time"]
-                self.messages_in = parsed_data["messages_in"]
-                self.messages_out = parsed_data["messages_out"]
-                self.fatal_errors = parsed_data["fatal_errors"]
-                self.rcvd_unsupported = parsed_data["rcvd_unsupported"]
-                self.rcvd_invalid_vrf = parsed_data["rcvd_invalid_vrf"]
-                self.rcvd_override = parsed_data["rcvd_override"]
-                self.rcvd_malformed = parsed_data["rcvd_malformed"]
-                self.sent_defferred = parsed_data["sent_defferred"]
-
-
-
+                try:
+                    self.peer_addr = parsed_data["peer_addr"]
+                    self.peer_port = parsed_data["peer_port"]
+                    self.local_address = parsed_data["local_address"]
+                    self.local_port = parsed_data["local_port"]
+                    self.session_type = parsed_data["session_type"]
+                    self.session_state = parsed_data["session_state"]
+                    self.session_state_time = parsed_data["session_state_time"]
+                    self.messages_in = parsed_data["messages_in"]
+                    self.messages_out = parsed_data["messages_out"]
+                    self.fatal_errors = parsed_data["fatal_errors"]
+                    self.rcvd_unsupported = parsed_data["rcvd_unsupported"]
+                    self.rcvd_invalid_vrf = parsed_data["rcvd_invalid_vrf"]
+                    self.rcvd_override = parsed_data["rcvd_override"]
+                    self.rcvd_malformed = parsed_data["rcvd_malformed"]
+                    self.sent_defferred = parsed_data["sent_defferred"]
+                except KeyError:
+                    self.peer_addr = mapserver
+                    self.peer_port = 4342
+                    self.local_address = None
+                    self.local_port = None
+                    self.session_type = None
+                    self.session_state = None
+                    self.session_state_time = None
+                    self.messages_in = None
+                    self.messages_out = None
+                    self.fatal_errors = None
+                    self.rcvd_unsupported = None
+                    self.rcvd_invalid_vrf = None
+                    self.rcvd_override = None
+                    self.rcvd_malformed = None
+                    self.sent_defferred = None
 

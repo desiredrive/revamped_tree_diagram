@@ -2,6 +2,7 @@ import ipverifications
 import sys
 
 from securitymodules.accesslists import AccessList, hexdecimal_representation_acl, hexdecimal_acl_hit
+from traffic_flows.lispsessiontroubleshooting import singleETRProfiling
 from traffic_flows.operational_tests import Ping
 from routingmodules import lisp
 from routingmodules import iprouting
@@ -68,6 +69,9 @@ def device_flow(flow_type, sourcextr, sourceep, destip, service,step):
         logging_info(step, process, subprocess, hostname, collection_summary)
         logging_info(step, process, subprocess, hostname, string)
         #print (pformat(vars(l2lispsrc), indent=4, width =1, sort_dicts=False))
+
+        #Step 1.3: Verification of LISP Host Onboarding (DB/Dyn/LISPSession Troubleshooting)
+        step = singleETRProfiling(None,l2lispsrc.sourcemac,l2lispsrc.sourcevlan,None,sourcextr.dnac,service,step,sourcextr)
 
         #Step 1.5: Verification of LISP ACL for Source and Destination
         subprocess = "[l2lisp]"
