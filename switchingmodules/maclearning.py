@@ -8,7 +8,8 @@ class mac_learning:
     def mac_learning_mac(self, mac, vlan, service):
         mac_cmd = "show mac address-table address {} vlan {}".format(mac, vlan)
         mac_op = radkit_cli.get_single_output_genie(self.hostname, mac_cmd, service)
-
+        self.type = None
+        self.port = None
         if mac_op == None:
             return None
         else:
@@ -23,6 +24,8 @@ class mac_learning:
         mac_intf_cmd = "show mac address-table interface {} ".format(interface)
         mac_op = radkit_cli.get_single_output_genie(self.hostname, mac_intf_cmd, service)
 
+        self.type = None
+        self.port = None
         if mac_op is None:
             return None
         else:

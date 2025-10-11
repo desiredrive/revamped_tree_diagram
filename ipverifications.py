@@ -219,3 +219,26 @@ def wildcard_converter(address,mask):
     upper = ipaddress.IPv4Address(mask_int | address_int)
     subnet_range = list(ipaddress.summarize_address_range(lower, upper))
     return subnet_range
+
+def validate_vlan_number(vlan_input):
+    """
+    Validates if a given VLAN number input is correct.
+    Args:
+        vlan_input (str or int): The VLAN number to validate.
+    Returns:
+        bool: True if the VLAN number is valid, False otherwise.
+        str: A message indicating the reason for invalidity, or None if valid.
+    """
+    try:
+        vlan_num = int(vlan_input)
+    except ValueError:
+        return False, "Error: VLAN must be an integer."
+
+    if vlan_num == 0:
+        return False, "Error: VLAN 0 is reserved and cannot be used."
+    elif 1002 <= vlan_num <= 1005:
+        return False, f"Error: VLAN {vlan_num} is reserved (1002-1005 are reserved)."
+    elif not (1 <= vlan_num <= 4094): # Standard VLAN range (excluding 0 and 4095)
+        return False, f"Error: VLAN {vlan_num} is out of the standard valid range (1-4094)."
+    else:
+        return True, None # Valid VLAN
