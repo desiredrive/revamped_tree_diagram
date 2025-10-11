@@ -90,8 +90,8 @@ def get_network_device_byuuid_detailed(uuid,catc,service):
         return None
     else:
         return mgmtip, status, hostname
-def profile_devices_with_ip(ip,catc,service):
-    #Warning, Do not use with anycast IPs! It can take long processing times; restricting the entry for maximum 4 entries
+def profile_devices_with_ip(step,ip,catc,service):
+    #Warning, Do not use with anycast GW IPs! It can take long processing times; restricting the entry for maximum 4 entries
     deviceswithip = get_device_from_ip(ip, catc, service)
     number_of_nodes = 0
     possible_rps = []
@@ -103,7 +103,7 @@ def profile_devices_with_ip(ip,catc,service):
                 rpdevice = get_network_device_byuuid(deviceuuid, catc, service)
                 possible_rps.append(rpdevice)
             for rp in possible_rps:
-                profiledrp = Device(rp, catc)
+                profiledrp = Device(rp, catc,step)
                 profiledrp.profile_device(service)
                 possible_rps_profiled.append(profiledrp)
             number_of_nodes += 1
