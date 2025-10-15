@@ -10,6 +10,8 @@ class mac_learning:
         mac_op = radkit_cli.get_single_output_genie(self.hostname, mac_cmd, service)
         self.type = None
         self.port = None
+        self.mac = None
+        self.vlan = None
         if mac_op == None:
             return None
         else:

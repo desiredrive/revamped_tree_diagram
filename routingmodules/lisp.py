@@ -3,6 +3,7 @@ import sys
 
 from asn1crypto.pkcs12 import AttributeType
 
+from routingmodules.cef import IPCef, physical_recursion
 from securitymodules.type7decryptor import decrypt_password
 from switchingmodules.interfaces import Interfaces
 from switchingmodules.spanning_tree import SpanningTree
@@ -578,6 +579,109 @@ def parse_lisp_ethernet_statistics(cli_output):
 
     return data
 
+def map_cache_manual_parse(output):
+    result = {"lisp_id": {}}
+
+    # Parse header
+    header = re.search(
+        r"LISP IPv4 Mapping Cache for LISP (\d+) EID-table vrf (\S+) \(IID (\d+)\), (\d+) entries",
+        output
+    )
+    if not header:
+        return result
+
+    lisp_id = int(header.group(1))
+    eid_table = header.group(2)
+    iid = int(header.group(3))
+    entries = int(header.group(4))
+
+    result["lisp_id"][lisp_id] = {"instance_id": {iid: {}}}
+    eid_prefix = None
+    eid = None
+    mask = None
+    uptime = None
+    expires = None
+    via = None
+    sources = None
+    state = None
+    last_modified = None
+    map_source = None
+    activity = None
+    packets_out = None
+    packets_out_bytes = None
+    counters_not_accurate = False
+    locators = {}
+
+    lines = output.splitlines()
+    for idx, line in enumerate(lines):
+        line = line.strip()
+        # EID prefix line
+        m_eid = re.match(r"([\d\.]+)/(\d+), uptime: ([^,]+), expires: ([^,]+), via ([^,]+), (.+)", line)
+        if m_eid:
+            eid_prefix = f"{m_eid.group(1)}/{m_eid.group(2)}"
+            eid = m_eid.group(1)
+            mask = int(m_eid.group(2))
+            uptime = m_eid.group(3)
+            expires = m_eid.group(4)
+            via = m_eid.group(5)
+            activity = m_eid.group(6)
+        # Sources
+        m_sources = re.match(r"Sources: (.+)", line)
+        if m_sources:
+            sources = m_sources.group(1)
+        # State
+        m_state = re.match(r"State: ([^,]+), last modified: ([^,]+), map-source: (\S+)", line)
+        if m_state:
+            state = m_state.group(1)
+            last_modified = m_state.group(2)
+            map_source = m_state.group(3)
+        # Packets out, counters
+        m_packets = re.match(r"Exempt, Packets out: (\d+)\((\d+) bytes\), counters are not accurate", line)
+        if m_packets:
+            packets_out = int(m_packets.group(1))
+            packets_out_bytes = int(m_packets.group(2))
+            counters_not_accurate = True
+        # Locator block
+        m_locator = re.match(r"(\d+\.\d+\.\d+\.\d+)\s+(\S+)\s+(\S+)\s+(\d+)/(\d+)\s+(\S+)", line)
+        if m_locator:
+            loc_ip = m_locator.group(1)
+            loc_uptime = m_locator.group(2)
+            loc_state = m_locator.group(3)
+            loc_priority = int(m_locator.group(4))
+            loc_weight = int(m_locator.group(5))
+            loc_encap_iid = m_locator.group(6)
+            locators[loc_ip] = {
+                "uptime": loc_uptime,
+                "state": loc_state,
+                "priority": loc_priority,
+                "weight": loc_weight,
+                "encap_iid": loc_encap_iid,
+            }
+
+    # Fill the result dictionary
+    result["lisp_id"][lisp_id]["instance_id"][iid] = {
+        "eid_table": eid_table,
+        "entries": entries,
+        "eid_prefix": eid_prefix,
+        "eid": eid,
+        "mask": mask,
+        "uptime": uptime,
+        "expires": expires,
+        "via": via,
+        "sources": sources,
+        "state": state,
+        "last_modified": last_modified,
+        "map_source": map_source,
+        "activity": activity,
+        "packets_out": packets_out,
+        "packets_out_bytes": packets_out_bytes,
+        "counters_not_accurate": counters_not_accurate,
+        "locators": locators
+    }
+
+    return result
+
+
 class lisp_route_import:
 
     def __init__(self, iid, device):
@@ -1012,6 +1116,37 @@ class LISPLocalDB:
         self.iid = iid              #LISP Instance ID for the request
         self.device = device
 
+    def L3LISPDyn(self,service):
+        l3lispdyncmd = "show lisp instance-id {} dynamic-eid detail".format(self.iid)
+        l3lispdynop = get_single_output_genie(self.device,l3lispdyncmd,service)
+        if l3lispdynop is not None:
+            try:
+                path = l3lispdynop['lisp_id'][0]['instance_id'][self.iid]['dynamic_eids']
+            except KeyError:
+                path = l3lispdynop['lisp_id']['default']['instance_id'][self.iid]['dynamic_eids']
+            self.dynamic_eids = []
+            for dynentry in path:
+                dynentryname = dynentry
+                eid = path[dynentry]['database_mapping']['eid_prefix']
+                locator = path[dynentry]['database_mapping']['locator_set']
+                try:
+                    entries = path[dynentry]['eid_entries']
+                except KeyError:
+                    entries = None
+                dynamic_eid = {
+                    'dynamic_eid' : dynentryname,
+                    'eid_subnet': eid,
+                    'locator': locator,
+                    'eid_entries': entries
+                }
+                self.dynamic_eids.append(dynamic_eid)
+
+    def L3LISPDB(self,service):
+        l3lispdbcmd = "show lisp instance-id {} ipv4 database".format(self.iid)
+        l3lispdbop = get_single_output_genie(self.device,l3lispdbcmd,service)
+        if l3lispdbop is not None:
+            return None
+
     def L2LISPDyn(self,service):
         l2lispdyncmd = "show lisp instance-id {} dynamic-eid detail".format(self.iid)
         l2lispdynop = get_single_output_genie(self.device,l2lispdyncmd,service)
@@ -1274,7 +1409,6 @@ class LISPInstanceStatus:
 
         lispiidstatus_cmd = "show lisp instance-id {} {}".format(iid,qtype)
         lispiidstatus_op = get_single_output_genie(device,lispiidstatus_cmd,service)
-
         if lispiidstatus_op is not None:
             path = lispiidstatus_op['lisp_id'][0]['instance_id'][iid]
             # Parameter List
@@ -1288,6 +1422,9 @@ class LISPInstanceStatus:
             self.petr = path['etr']['proxy_etr_router']
             self.ms = path['map_server']
             self.mr = path['map_resolver']
+            self.mapcache = path['map_cache']
+            self.database = path['database']
+            self.locatorstatus = path['locator_status_algorithms']
             self.mapresolvers = []
             mresolvers = path['itr_map_resolvers']
             for i in mresolvers:
@@ -1297,18 +1434,34 @@ class LISPInstanceStatus:
                     mapresolver = {'mapresolver': mapresolver, 'state': state}
                     self.mapresolvers.append(mapresolver)
             self.mapservers = []
-            mservers = path['etr_map_servers']
-            for i in mservers:
-                if "found" not in i:
-                    mapserver = i
-                    try:
-                        transportstate = mservers[i]['last_map_register']['transport_state']
-                    except KeyError:
-                        transportstate = None
-                    mapserver = {'mapserver': mapserver, 'transportstate': transportstate}
-                    self.mapservers.append(mapserver)
+            try:
+                mservers = path['etr_map_servers']
+                for i in mservers:
+                    if "found" not in i:
+                        mapserver = i
+                        try:
+                            transportstate = mservers[i]['last_map_register']['transport_state']
+                        except KeyError:
+                            transportstate = None
+                        mapserver = {'mapserver': mapserver, 'transportstate': transportstate}
+                        self.mapservers.append(mapserver)
+            except KeyError:
+                lispiidstatus_cmd = "show lisp instance-id {} {}".format(iid, qtype)
+                lispiidstatus_op = get_any_single_output(device, lispiidstatus_cmd, service)
+                if lispiidstatus_op is not None:
+                    match = re.search(r"ETR Map-Server\(s\):\s*(.*)", lispiidstatus_op)
+                    map_servers = []
+                    if match:
+                        # Split by comma, extract IPs
+                        items = match.group(1).split(',')
+                        for item in items:
+                            ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', item)
+                            if ip_match:
+                                map_servers.append(ip_match.group(1))
+                    self.mapservers = map_servers
             self.xtrid = path['xtr_id']
             self.encapsulation = path['encapsulation_type']
+
 
         else:
             self.locator_table = None
@@ -1472,4 +1625,151 @@ class LISPSession:
                     self.rcvd_override = None
                     self.rcvd_malformed = None
                     self.sent_defferred = None
+
+class LISPMapCache:
+    def __init__(self,iid,device):
+        self.device = device
+        self.iid = iid
+    def mapcache(self,qtype,eid,service):
+        hostname = self.device
+        iid = self.iid
+        lispmapcachecmd = f"show lisp instance-id {iid} {qtype} map-cache {eid}"
+        lispmapcacheop = get_single_output_genie(hostname,lispmapcachecmd,service)
+        if lispmapcacheop is None:
+            lispmapcachecmd = f"show lisp instance-id {iid} {qtype} map-cache {eid}"
+            lispmapcacheop = get_any_single_output(hostname, lispmapcachecmd, service)
+            lispmapcacheop = map_cache_manual_parse(lispmapcacheop)
+        try:
+            path = lispmapcacheop['lisp_id'][0]['instance_id'][iid]
+        except KeyError:
+            path = lispmapcacheop['lisp_id']['default']['instance_id'][iid]
+
+        self.requested_eid = eid
+        self.eid_table = path['eid_table']
+        self.eid_prefix = path['eid_prefix']
+        self.eid = path['eid']
+        self.mask = path['mask']
+        self.uptime = path['uptime']
+        self.expires = path['expires']
+        self.via = path['via']
+        self.sources = path['sources']
+        self.last_modified = path['last_modified']
+        self.map_source = path['map_source']
+        self.activity = path['activity']
+        rlocs = []
+        try:
+            locators = path['locators']
+            for locator in locators:
+                rloc = locator
+                uptime = path['locators'][rloc]['uptime']
+                state = path['locators'][rloc]['state']
+                priority = path['locators'][rloc]['weight']
+                encap_iid = path['locators'][rloc]['encap_iid']
+                rloc = {
+                    'rloc': rloc,
+                    'uptime': uptime,
+                    'state': state,
+                    'priority': priority,
+                    'encap_iid': encap_iid
+                }
+                rlocs.append(rloc)
+        except KeyError:
+            pass
+        self.rlocs = rlocs
+
+# Operational #
+
+class L3Device:
+    def __init__(self,vrf,device):
+        self.device = device
+        self.vrf = vrf
+
+    #LISP IID from VRF
+    def lispiid(self,service):
+        vrf = self.vrf
+        hostname = self.device
+        #Retrieve LISP IID for IPv4 and IPv6 if available
+        lispvrfcmd = f"show lisp vrf {vrf}"
+        lispvrfop = get_single_output_genie(hostname, lispvrfcmd,service)
+        self.iid = None
+        self.vrfid = None
+        if lispvrfop is not None:
+            path = lispvrfop['vrf'][vrf]
+            self.vrfid = path['vrf_id']
+            iids = path['iid']
+            for entry in iids:
+                iid = entry
+            self.iid = int(iid)
+
+    def instance_properties(self,service):
+        hostname = self.device
+        iid = self.iid
+        iid_configuration = LISPInstanceStatus(hostname,iid)
+        iid_configuration.eidstatus("ipv4",service)
+        iid_configuration.eidStatistics("ipv4",service)
+        self.instance_information = iid_configuration
+
+    def lisp_database_information(self,service):
+        hostname = self.device
+        iid = self.iid
+        lisp_local = LISPLocalDB('0.0.0.0',iid,hostname)
+        lisp_local.L3LISPDyn(service)
+        lisp_local.L3LISPDB(service)
+        self.instance_local_parameters = lisp_local
+
+    def map_cache(self,eids: list,service):
+        hostname = self.device
+        iid = self.iid
+        map_caches = []
+        eids.append("0.0.0.0/0")
+        for eid in eids:
+            map_cache = LISPMapCache(iid,hostname)
+            map_cache.mapcache("ipv4",eid,service)
+            map_caches.append(map_cache)
+        self.map_cache_information = map_caches
+
+    def cef_eids(self,eids: list, service,step):
+        hostname = self.device
+        vrf = self.vrf
+        cef_internal_entries = []
+        physical_next_hops = []
+        for eid in eids:
+            cef_internal = IPCef(eid,vrf,hostname)
+            cef_internal.get_cef_internal(service)
+            physical_ports = physical_recursion(cef_internal.nexthops,hostname)
+            physical_ports.get_physical_interfaces(service,step)
+            cef_internal_entries.append(cef_internal)
+            physical_next_hops.append(physical_ports)
+        self.cef_internal_entries = cef_internal_entries
+        self.physical_next_hops = physical_next_hops
+
+class CEFForwardingState():
+    def __init__(self, vrf, device):
+            self.device = device
+            self.vrf = vrf
+
+    def cef_resolution(self, prefixes: list, service, step):
+            hostname = self.device
+            vrf = self.vrf
+            cefinternal_entries = []
+            for prefix in prefixes:
+                ip = prefix['prefix']
+                expected_rloc = prefix['expectedrlocs']
+                cef_internal = IPCef(ip, vrf, hostname)
+                cef_internal.get_cef_internal(service)
+                cef_internal.expected_rloc = expected_rloc
+                cefinternal_entries.append(cef_internal)
+            self.cef_internal_entries = cefinternal_entries
+
+    def cef_underlay(self, underlay_prefixes: list, service):
+        hostname = self.device
+        cef_internal_underlay = []
+        for prefix in underlay_prefixes:
+            cef_internal = IPCef(prefix,None,hostname)
+            cef_internal.get_cef_internal(service)
+            cef_internal_underlay.append(cef_internal)
+        self.cef_internal_underlay = cef_internal_underlay
+
+
+
 

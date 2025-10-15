@@ -41,13 +41,14 @@ class IPCef:
             vrf_mode = "vrf "+self.vrf+" "
         
         #show ip route command:
-        ipcefint_cmd = "show ip cef {} {} internal".format(self.ip,vrf_mode)
+        ipcefint_cmd = "show ip cef {} {} internal".format(vrf_mode,self.ip)
         ipcefint_op = get_single_output_genie(self.hostname,ipcefint_cmd,service)
-        
         #VRF utilization
         prefix = None
         if vrf_mode == "":
             vrf = 'default'
+        else:
+            vrf = self.vrf
         addipv4 = 'ipv4'
         cefpath = ipcefint_op['vrf'][vrf]['address_family'][addipv4]['prefix']
         for i in cefpath:
@@ -131,7 +132,7 @@ class IPCef:
             rib_flag = cefpath['rib']
             # CEF Type: Connected
             if "C" in rib_flag:
-                ipcef_cmd = "show ip cef {} {}".format(self.ip, vrf_mode)
+                ipcef_cmd = "show ip cef {} {}".format(vrf_mode,self.ip)
                 ipcef_op = get_single_output_genie(self.hostname, ipcef_cmd, service)
                 if ipcef_op is not None:
                     vanillacefpath = ipcef_op['vrf'][vrf]['address_family'][addipv4]['prefix']
@@ -222,9 +223,6 @@ class physical_recursion():
             else:
                 total_phys.append(nhphys)
             self.total_phys = total_phys
-            
 
-
-                
 
 
