@@ -180,3 +180,197 @@ def find_control_plane(cp,dnac,service,step, process,subprocess):
     control_plane.update({'radkithostname':hostname})
     return control_plane
 
+def getFabricWLC(fabric_id,catc,service,step):
+    # Identify a WLC as Part of a Fabric Site by UUID
+    process = 'catalystCenterAPI'
+    subprocess = '[fabricWLCValidation]'
+
+    api_url = "/dna/intent/api/v1/sda/fabricDevices?fabricId={}&deviceRoles=WIRELESS_CONTROLLER_NODE".format(fabric_id)
+    api_response = get_catc_api(catc, api_url, service)
+    api_status = api_response['response']
+    if api_status == "failed":
+        error = "Catalyst Center API - Unable to Collect"
+        message = "Could not find the Fabric WLC for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+
+    else:
+        try:
+            wlcnetworkdeviceid = api_response['response'][0]['networkDeviceId']
+        except KeyError:
+            error = "Catalyst Center API - Unable to Collect"
+            message = "Could not find the Fabric WLC for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
+            logging_error(step, process, subprocess, catc, error)
+            logging_info(step, process, subprocess, catc, message)
+            # raise BDBTaskError("Error: {} | {}".format(error, message))
+            sys.exit("Error: {} | {}".format(error, message))
+
+    # Obtaining the WLC name:
+    mgmtip = get_network_device_byuuid(wlcnetworkdeviceid,catc,service)
+    return mgmtip
+
+def getFabricBorders(fabric_id,catc,service,step):
+    process = 'catalystCenterAPI'
+    subprocess = '[fabricBorderValidation]'
+
+    api_url = "/dna/intent/api/v1/sda/fabricDevices?fabricId={}&deviceRoles=BORDER_NODE".format(fabric_id)
+    api_response = get_catc_api(catc, api_url, service)
+    api_status = api_response['response']
+    if api_status == "failed":
+        error = "Catalyst Center API - Unable to Collect"
+        message = "Could not find the Fabric Borders for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+    else:
+        data = api_response
+        layer3_borders = []
+        for item in (data.get("response", []) or []):
+            bds = item.get("borderDeviceSettings", {}) or {}
+            border_types = [t.upper() for t in (bds.get("borderTypes", []) or [])]
+
+            if "LAYER_3" in border_types:
+                l3 = bds.get("layer3Settings", {}) or {}
+                layer3_borders.append(
+                    {
+                        "networkDeviceId": item.get("networkDeviceId"),
+                        "localAutonomousSystemNumber": l3.get("localAutonomousSystemNumber"),
+                        "borderPriority": l3.get("borderPriority"),
+                        "importExternalRoutes" : l3.get("importExternalRoutes"),
+                        "isDefaultExit" : l3.get("isDefaultExit"),
+                    }
+                )
+        if not layer3_borders:
+            error = "External Connectivity - No Layer3 Borders Found"
+            message = (
+                f"No Layer 3 border nodes were found for fabricId {fabric_id}. "
+                f"Remediation: verify external connectivity is configured for the fabric site and that at least one "
+                f"border node is provisioned with border type LAYER_3 in Catalyst Center."
+            )
+            logging_error(step, process, subprocess, catc, error)
+            logging_info(step, process, subprocess, catc, message)
+            # raise BDBTaskError("Error: {} | {}".format(error, message))
+            sys.exit("Error: {} | {}".format(error, message))
+
+    # Obtaining the Borders mgmtip:
+    for b in layer3_borders:
+        device_id = b.get("networkDeviceId")
+        if not device_id:
+            continue
+        # Example lookup (replace with your actual source/API response)
+        # e.g. inv_item = get_device_details(device_id)
+        mgmtip,status,hostname = get_network_device_byuuid_detailed(device_id, catc, service)
+        b["status"] = status
+        b["hostname"] = hostname
+        b["managementIpAddress"] = mgmtip
+
+    return layer3_borders
+
+def getFabricCPs(fabric_id,catc,service,step):
+    process = 'catalystCenterAPI'
+    subprocess = '[fabricBorderValidation]'
+
+    api_url = "/dna/intent/api/v1/sda/fabricDevices?fabricId={}&deviceRoles=CONTROL_PLANE_NODE".format(fabric_id)
+    api_response = get_catc_api(catc, api_url, service)
+    api_status = api_response['response']
+    if api_status == "failed":
+        error = "Catalyst Center API - Unable to Collect"
+        message = "Could not find the Fabric Control Planes for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+    else:
+        data = api_response
+        # Assuming the dictionary is named 'fabric_devices_data'
+        network_device_ids = [device.get("networkDeviceId") for device in data.get("response", [])]
+        # network_device_ids will be: ['7c4e530a-f643-4619-a3e2-805f0adc0b4e', '9fa77355-245e-4880-b38d-1daafb549bc0']
+
+    # Assuming 'network_device_ids' is the list extracted in the previous step
+    cps = []
+
+    if network_device_ids:
+        for dev_id in network_device_ids:
+            if dev_id is not None:
+                # Replace 'get_mgmt_ip_from_id' with the name of your actual special function
+                mgmtip, status, hostname = get_network_device_byuuid_detailed(dev_id, catc, service)
+                if mgmtip:
+                    cp = {'mgmtip': mgmtip, 'status': status, 'hostname': hostname}
+                    cps.append(cp)
+    # management_ips now contains the list of IPs retrieved for each valid ID
+    return cps
+
+def getL3Handoffs(fabric_id,borderuuid, catc,service,step):
+    process = 'catalystCenterAPI'
+    subprocess = '[l3HandoffConfiguration]'
+
+    api_url = "/dna/intent/api/v1/sda/fabricDevices/layer3Handoffs/ipTransits?fabricId={}&networkDeviceId={}".format(fabric_id,borderuuid)
+    api_response = get_catc_api(catc, api_url, service)
+    api_status = api_response['response']
+    if api_status == "failed":
+        error = "Catalyst Center API - Unable to Collect"
+        message = "Could not find the L3 Handoffs for the Fabric Border in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+    else:
+        api_data = api_response
+        transit_links = []
+        for item in (api_data.get("response", []) or []):
+            transit_links.append(
+                {
+                    "networkDeviceId": item.get("networkDeviceId"),
+                    "interfaceName": item.get("interfaceName"),
+                    "virtualNetworkName": item.get("virtualNetworkName"),
+                    "vlanId": item.get("vlanId"),
+                    "localIpAddress": item.get("localIpAddress"),
+                    "remoteIpAddress": item.get("remoteIpAddress"),
+                    "localIpv6Address": item.get("localIpv6Address"),
+                    "remoteIpv6Address": item.get("remoteIpv6Address"),
+                    "transitNetworkId": item.get("transitNetworkId"),
+                }
+            )
+    return transit_links
+
+def getanycastgateway(fabricid,siteid,vlan,catc,service,step):
+    process = 'catalystCenterAPI'
+    subprocess = '[anycastGateway]'
+
+    api_url = "/dna/intent/api/v1/sda/anycastGateways?fabricId={}&vlanId={}".format(fabricid,vlan)
+    api_response = get_catc_api(catc, api_url, service)
+    api_status = api_response['response']
+    if api_status == "failed":
+        error = "Catalyst Center API - Unable to Collect"
+        message = "Could not find the AnycastGateway for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+
+    else:
+        payload = api_response  # dict shown above
+
+        data = payload.get("response", [])
+        result = data[0] if isinstance(data, list) and data else {}
+        ip_pool_name = (result.get("ipPoolName") if isinstance(result, dict) else None)
+
+    #Retrieve IP Pool information
+    api_url = "/dna/intent/api/v1/ipam/siteIpAddressPools?siteId={}".format(siteid)
+    api_response = get_catc_api(catc, api_url, service)
+    api_status = api_response['response']
+    if api_status == "failed":
+        error = "Catalyst Center API - Unable to Collect"
+        message = "Could not find the IP Pools for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        # raise BDBTaskError("Error: {} | {}".format(error, message))
+        sys.exit("Error: {} | {}".format(error, message))
+    else:
+        pools = (api_response.get("response", []) or [])
+        matched_pool = next((p for p in pools if (p.get("name") or "").strip() == ip_pool_name), None)
+        result["ipPoolDetails"] = matched_pool
+    return result

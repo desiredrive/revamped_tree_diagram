@@ -1,5 +1,6 @@
 import sys
 import re
+import ipaddress
 from collections import defaultdict
 from catalystcenterapi.catcapi import find_control_plane
 from device_profiler import Device
@@ -19,11 +20,15 @@ from switchingmodules.maclearning import mac_learning
 from routingmodules.lisp import l2lisp_info, LISPLocalDB, LISPEIDWatch, lisp_map_servers, LISPInstanceStatus, \
     LISPSession, L2LISPControlPlane
 from radkit_cli import logging_info,logging_error,logging_warning
-from pprint import pformat
-
 from traffic_flows.core import CoreDevice, cpu_utilization_warning, cpu_platform_utilization_warning
 from traffic_flows.operational_tests import Ping
+from types import SimpleNamespace
 
+def is_ipv4(s: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(s), ipaddress.IPv4Address)
+    except ValueError:
+        return False
 #LISP Session Troubleshooting Steps:
 #1 Identify the EID to register (MAC (UDP/TCP), IP (UDP/TCP), AR(TCP)
 #2 Identify if the method for LISP DB insertion (DynamicEID/SISF, Route-Import, Static, WLC notification).
@@ -53,7 +58,7 @@ from traffic_flows.operational_tests import Ping
 #26 Registration is in both CPs?
 #28 WLC RLOC definition and passiveopen
 
-class EIDIdentification():
+class EIDIdentification:
     def __init__(self, device,eid):
         self.device = device
         self.eid = eid
@@ -215,7 +220,7 @@ class EIDIdentification():
         self.mapservers = reg_status
         #return eid, eid_type, origin, origin_state, iid, db_method, db_status, reg_status
 
-class ETRConfiguration():
+class ETRConfiguration:
     def __init__(self,device):
         self.device = device
 
@@ -288,6 +293,7 @@ class ETRDevice:
         cp_configuration.site_uci(iid,service)
         cp_configuration.rloc_members(service)
         cp_configuration.domains(service)
+        cp_configuration.fewparameters(service)
         self.cp_configuration = cp_configuration
 
     def eid_configuration(self,eid_properties,servicetype,service):
@@ -1176,7 +1182,29 @@ def tcbstatistcisparser(step,tcbstatistics,cp_hostname):
             message = "Fast retransmission counters have been detected for {}:{} to {}:{} on device: {}, possible packet loss scenario".format(sourceip,sourceport,destip,destport,cp_hostname)
             logging_warning(step, process, subprocess, cp_hostname, error + " | " + message)
 
+def few_lisp_configuration(step, wmi, fewips, passiveopenflag, cpname):
+    wmi_ip = (wmi or "").strip()
+    ips = [str(ip).strip() for ip in (fewips or []) if str(ip).strip()]
+    process = "lispSession"
+    subprocess = "[main]"
+    hostname = cpname
+    if not wmi_ip or wmi_ip not in ips:
+        error = "Fabric Edge Wireless - LISP Locator-Set Validation Failed"
+        message = (
+            f"WMI IP {wmi_ip} is not present in the configured WLC locator-set IPs {ips}. "
+            f"Remediation: add the WMI IP to the border 'locator-set WLC' configuration."
+        )
+        exit_program(step, process, subprocess, hostname, error, message)
 
+    if passiveopenflag is not True:
+        error = "Fabric Edge Wireless - LISP Passive-Open Validation Failed"
+        message = (
+            "Map-server session passive-open is not configured for locator-set WLC. "
+            "Remediation: configure 'map-server session passive-open WLC' on the border."
+        )
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    return step
 ##### Main Troubleshooting Flow #####
 
 def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
@@ -1366,7 +1394,455 @@ def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
             logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
             step = step + 1
     return step
-    ## Extra: WLC
-    # 28 WLC RLOC definition and passiveopen
+
+def singleETRLISPSessionOnlyFEW(mgmtip,vni,vrf,catc_name,service,step,sourcextr, eid_map_servers):
+
+    if sourcextr is None:
+        #ETR
+        etrdefinition = ETRDevice(mgmtip,step)
+        etrdefinition.device_profiler(catc_name, service)
+        hostname = etrdefinition.profiled_device.hostname
+    else:
+        etrdefinition = ETRDevice(sourcextr.mgmtip,step)
+        etrdefinition.existing_profiled(sourcextr)
+        hostname = etrdefinition.profiled_device.hostname
+
+    process = "lispSession"
+    subprocess = "[main]"
+    msg1 = "LISP Sessions - Main"
+    message = "Starting LISP Session validations on device {}.".format(hostname)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step = step+1
+    # ETR Identification and Configuration (Steps 1-8)
+    subprocess = "[eidConfiguration]"
+    msg1 = "LISP Sessions - EID Configuration"
+    message = "Verifying LISP Map-Server configuration on device: {}.".format(hostname)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    eid_type = "MAC"
+    if eid_type == "MAC":
+        servicetype = "ethernet"
+
+    eid_properties = SimpleNamespace()
+    eid_properties.mapservers = eid_map_servers
+
+    etrdefinition.eid_configuration(eid_properties,servicetype,service)
+    step = step + 1
+
+    # LISP Session Local Status (Global)
+    subprocess = "[globalLISPSession]"
+    msg1 = "LISP Sessions - Global LISP Sessions"
+    message = "Verifying Local LISP session status for device:  {}.".format(hostname)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    etrdefinition.global_lisp_session(service)
+    etrloopback = etrdefinition.profiled_device.loopback
+
+    #Bad LISP Session states: Down, Init, NoRoute, at least 1 LISP session must be up to the map-servers and not itself.
+    etr_rloc = etrdefinition.profiled_device.loopback
+    lisp_sessions = etrdefinition.global_lisp_sessions.peers
+    single_up = False
+    for peer in lisp_sessions:
+        if peer != etr_rloc:
+            state = lisp_sessions[peer][0]['state']
+            if state == 'Up':
+                single_up = True
+    if single_up is False:
+        error = "LISP Sessions - All Down"
+        message = "All LISP sessions are down  on device {}.".format(hostname)
+        logging_warning(step, process, subprocess, hostname, error+" | "+message)
+    step = step + 1
+
+    #Verifying unique LISP sessions.
+    # LISP Session Specific Status (Only to map-servers)
+    step,map_server_ips = unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name, etrdefinition, vni)
+
+    ## Highlight on UPtime Status (flapping) criteria - Less than 5 minutes.
+    step = step + 1
+    for ip_address, sessions_list in lisp_sessions.items():
+        for session in sessions_list:
+            if session.get('state') == 'Up':
+                uptime_str = session.get('time')
+                if uptime_str:
+                    uptime_minutes = parse_uptime_to_minutes(uptime_str)
+                    if uptime_minutes < 5:
+                        error = "LISP Specific Sessions - Uptime"
+                        message = "LISP Session to {} uptime is less than 5 minutes on device {}, consider verifying the underlay network stability".format(
+                            ip_address, hostname)
+                        logging_warning(step, process, subprocess, hostname, error + " | " + message)
+                    else:
+                        error = "LISP Specific Sessions - Uptime"
+                        message = "LISP Session to {} has been stable for more than 5 minutes on device {}".format(
+                            ip_address, hostname)
+                        logging_info(step, process, subprocess, hostname, error + " | " + message)
+
+    #### Starting this, the status of LISP session establishment between XTR and Map-Servers have been validated.
+    #Steps covered are now:
+    subprocess = "[mapServerConfiguration]"
+    msg1 = "LISP Sessions - Map-Server Configuration"
+    message = "All LISP Sessions in correct state, verifying CP configuration and statistics for VNI {}".format(vni)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+    map_server_configuration = etrdefinition.eid_configuration.mapserverconfiguration
+    control_plane_information = []
+    for cp in map_server_ips:
+        control_plane = find_control_plane(cp, catc_name, service, step, process, subprocess)
+        cp_status = control_plane['reachability']
+        cp_mgmtip = control_plane['mgmtip']
+        cp_hostname = control_plane['hostname']
+
+        #Is the CP available?
+        if cp_status == 'Reachable':
+            control_plane = ETRDevice(cp_mgmtip,step)
+            control_plane.device_profiler(catc_name,service)
+            cp_loopback = control_plane.profiled_device.loopback
+
+            # 21 MS/MR Site_UCI configuration (definition as map-server, map-resolver, site_uci, rloc_members distribute, domain/MID consistency (pubsub)
+            # 22 MS/MR has EID space configured (L2,L3)
+            step = step + 1
+            control_plane.cp_configuration(vni,service)
+            #Validations
+            cp_configuration = control_plane.cp_configuration
+            cp_configuration_validation(step,cp_configuration, vni)
+
+            # 24 Authentication Counters for EID in both ETR and MS/MR (looking for logs as well?)
+            step = step + 1
+            authentication_key_validation(step,cp_configuration,cp_hostname,map_server_configuration,cp_loopback, hostname)
+
+            # 23 MS/MR limits and statistics
+            step = step + 1
+            control_plane.lisp_statistics(vni,"ethernet",service)
+            lisp_statistics = control_plane.lispstatistics
+            lispstatisticsparser(step,lisp_statistics,cp_hostname)
+
+            # 19 Identify the status of the TCP socket
+            step = step + 1
+            control_plane.tcp_tcb_statistics(cp_loopback,etrloopback,4342,service)
+            # 20 Identify the status of the TCB (mss, retransmissions, pmtud)
+            tcb_stats = control_plane.tcb_statistics
+            tcbstatistcisparser(step,tcb_stats,cp_hostname)
+
+            # 26 CPU Utilization
+            step = step + 1
+            control_plane.cpu_utilization(service)
+            highcpuprocesses = control_plane.cpu_statistics.high_cpu_processes
+            highplatcpuprocesses =control_plane.cpu_statistics.plat_high_cpu_processes
+            cpu_utilization_warning(step, highcpuprocesses, cp_hostname)
+            cpu_platform_utilization_warning(step, highplatcpuprocesses, cp_hostname)
+
+            #Append CP information
+            control_plane_information.append(control_plane)
+
+    ### Inter-Map-Server verifications (up to 4)
+    # Get all "reachable" CPs from Catalyst Center
+    subprocess = "[interCPSession]"
+    msg1 = "LISP Sessions - Session between CPs"
+    message = "Verifying LISP sessions between CPs reachable by Catalyst Center (Site-wide)."
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step = step + 1
+
+    reachable_cp_information = []
+    for cp in control_plane_information:
+        reachable_status = cp.profiled_device.reachabilitystatus
+        if reachable_status == 'Reachable':
+            reachable_cp_information.append(cp)
+
+    # 25 Session State between CPs
+    for cp in reachable_cp_information:
+        etr_rloc = cp.profiled_device.loopback
+        hostname = cp.profiled_device.hostname
+        map_server_ips = []
+        for map_server in eid_map_servers:
+            map_server_ip = map_server['map_server']
+            if map_server_ip != etr_rloc:
+                map_server_ips.append(map_server_ip)
+        # Remove the local ETR_RLOC form the map-server list, useful when validating CP-to-CP LISP Sessions.
+        while etr_rloc in map_server_ips:
+            map_server_ips.remove(etr_rloc)
+        map_server_strings = ", ".join(map_server_ips)
+
+        if len(map_server_ips) != 0:
+            subprocess = "[interCPSession]"
+            msg1 = "LISP Sessions - Session between CPs"
+            message = "Verifying LISP sessions from CP {} to CPs : {}".format(etr_rloc,map_server_strings)
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step = step + 1
+
+            step, map_server_ips = unique_lisp_session(hostname, step, eid_map_servers, etr_rloc, service, catc_name,cp, vni)
+
+        else:
+            subprocess = "[interCPSession]"
+            msg1 = "LISP Sessions - Session between CPs"
+            message = "Control Plane {} is the sole reachable CP in the fabric site; skipping inter-CP session validation.".format(hostname)
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step = step + 1
+    return step
+
+##### Fabric Enabled Wireless Flow #####
+
+def FEWEIDIdentification(wlcinfo, endpoint_attributes,step):
+    hostname = wlcinfo.hostname
+    mac = endpoint_attributes.mac
+    process = "fabricEnabledWireless"
+    subprocess = "[lispParameters]"
+    step += 1
+    msg1 = "WLC - Wireless Client"
+    message = (
+        f"Collecting information for endpoint {mac} on Fabric WLC {hostname}"
+    )
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+    # Collect EID, VNI, SGT and Assigned CP
+    endpointinfo = getattr(endpoint_attributes, "endpointinfo", None) or {}
+    fabric = (endpointinfo.get("fabric", {}) or {})
+
+    fabric_status = fabric.get("status")
+    rloc = fabric.get("rloc")
+    vnid = fabric.get("vnid")
+    sgt = fabric.get("sgt")
+    control_plane = fabric.get("control_plane_name")
+
+    message = (
+        f"Endpoint fabric attributes: status={fabric_status}, rloc={rloc}, vnid={vnid}, "
+        f"sgt={sgt}, control_plane={control_plane}."
+    )
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+    control_plane_name = control_plane                  # input
+    vnid_value = vnid                                   # input
+    obj = getattr(wlcinfo, "fabric_state", None) or {}  # your dictionary
+
+    # 1) Get all control-plane IPs for the given control-plane name
+    ip_map = (((obj or {}).get("control_plane", {}) or {}).get("ip_address", {}) or {})
+    control_plane_ips = []
+    for k, v in ip_map.items():
+        if isinstance(k, str) and is_ipv4(k) and isinstance(v, dict):
+            if (v.get("name") or "").strip() == (control_plane_name or "").strip():
+                control_plane_ips.append(k)
+    # de-dup + stable sort
+    control_plane_ips = sorted(set(control_plane_ips), key=lambda x: ipaddress.ip_address(x))
+
+    # 2) Get the VNID name for the given VNID value
+    l2_map = (((obj or {}).get("fabric_vnid_mapping", {}) or {}).get("l2_vnid", {}) or {})
+    vnid_name = (l2_map.get(vnid_value, {}) or {}).get("name")
+
+    msg1 = "Wireless Endpoint - LISP Control Plane"
+    message = (
+        f"EID {mac} is assigned to VNID {vnid_value} ({vnid_name}) and will be registered to control plane "
+        f"{control_plane_name} at {control_plane_ips}."
+    )
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+    return control_plane_ips, vnid_name, vnid, sgt, step
+
+def fabricEnabledWirelessSession(wlcinfo,fabric_id: None, step, catc_name, endpoint_attributes, service):
+
+    hostname = wlcinfo.hostname
+
+    process = "lispSession"
+    subprocess = "[main]"
+    msg1 = "LISP Sessions - Main"
+    message = "Starting LISP Session validations on device {}.".format(hostname)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step = step+1
+
+    # ETR Identification and Configuration (Steps 1-8)
+    # 1 Identify the EID (RADIO MAC or Client MAC, VNID, WMI IP, always Layer2) - WLCinfo & APInfo/EndpointFabricInfo
+    # 2 Source of registration is the WMI, multiple registrations can exist, up to 8
+    # 3 Identify the Control Plane to use (FEW Info)
+    # 8 Identify the Map-Resolvers for the Registration, verify proxy flag, node must be ETR
+
+    control_plane_ips, vnid_name, vnid, sgt, step = FEWEIDIdentification(wlcinfo,endpoint_attributes,step)
+
+    # 7 Identify the source RLOC for registration (valid RLOC)
+    wmi_interfaces = getattr(wlcinfo, "wmi_information", None) or {}
+    wmi_interfaces = wmi_interfaces.get("interfaces", []) or []
+    wmi_ip = wmi_interfaces[0].get("ipaddress") if len(wmi_interfaces) == 1 else None
+
+    # 9 Identify the status of the LISP session (global)
+    fabric_state = getattr(wlcinfo, "fabric_state", None) or {}
+    cp_map = (((fabric_state.get("control_plane", {}) or {}).get("ip_address", {})) or {})
+    control_planes = []
+    for ip, attrs in cp_map.items():
+        if ip == "wireless" or not isinstance(ip, str) or not isinstance(attrs, dict):
+            continue
+        try:
+            ipaddress.IPv4Address(ip)
+        except ipaddress.AddressValueError:
+            continue
+
+        control_planes.append({"ip": ip, "map-server": ip, "key": attrs.get("key"), "status": attrs.get("status")})
+
+    #In the case one of the CPs is down, raise a warning.
+    for cp in control_planes:
+        status = (cp.get("status") or "").strip().lower()
+        if status == "down":
+            msg1 = "Fabric Control Plane - Down"
+            message = (
+                f"Fabric control-plane node is down: ip={cp.get('ip')}, key={cp.get('key')}. "
+                f"Remediation: verify control-plane node reachability, the troubleshooting flow will continue getting information"
+            )
+            logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+    statuses = [(cp.get("status") or "").strip().lower() for cp in control_planes]
+    all_down = bool(statuses) and all(s == "down" for s in statuses)
+
+    #CP Validation
+    process = "lispSession"
+    subprocess = "[main]"
+    msg1 = "LISP Sessions - CP Side"
+    message = "Starting LISP Session validations on Control Planes".format(hostname)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step = step+1
+
+    subprocess = "[mapServerConfiguration]"
+    msg1 = "LISP Sessions - Map-Server Configuration"
+    message = "All LISP Sessions in correct state, verifying CP configuration and statistics for VNI {}".format(vnid)
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+    control_plane_information = []
+    for entry in control_planes:
+        cp = (entry.get("ip") or "").strip().lower()
+        control_plane = find_control_plane(cp, catc_name, service, step, process, subprocess)
+        cp_status = control_plane['reachability']
+        cp_mgmtip = control_plane['mgmtip']
+        cp_hostname = control_plane['hostname']
+
+        # Is the CP available?
+        if cp_status == 'Reachable':
+            control_plane = ETRDevice(cp_mgmtip, step)
+            control_plane.device_profiler(catc_name, service)
+            cp_loopback = control_plane.profiled_device.loopback
+
+            # 21 MS/MR Site_UCI configuration (definition as map-server, map-resolver, site_uci, rloc_members distribute, domain/MID consistency (pubsub)
+            # 22 MS/MR has EID space configured (L2,L3)
+
+            step = step + 1
+            control_plane.cp_configuration(vnid, service)
+
+            # Validations
+            cp_configuration = control_plane.cp_configuration
+            cp_configuration_validation(step, cp_configuration, vnid)
+
+            # Passive Open
+            few_ips = control_plane.cp_configuration.wlc_locator_ips
+            passiveopenflag = control_plane.cp_configuration.passive_open_configured
+            few_lisp_configuration(step, wmi_ip,few_ips,passiveopenflag,cp_hostname)
+
+            # Verifying unique LISP sessions.
+            control_plane.specific_lisp_session(wmi_ip,service)
+            specific_lisp_session = control_plane.specific_lisp_session
+
+            try:
+                session_state = specific_lisp_session.session_state
+                peer_addr = specific_lisp_session.peer_addr
+                peer_port = specific_lisp_session.peer_port
+                local_address = specific_lisp_session.local_address
+                local_port = specific_lisp_session.local_port
+                session_type = specific_lisp_session.session_type
+                session_state_time = specific_lisp_session.session_state_time
+
+                if session_state.lower() == "up":
+                    msg1 = "Fabric Edge Wireless - LISP Session Up"
+                    message = (
+                        f"LISP session is up to peer {peer_addr}:{peer_port} "
+                        f"from local {local_address}:{local_port} "
+                        f"(type={session_type}, up_time={session_state_time})."
+                    )
+                    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            except KeyError:
+                error = "Fabric Edge Wireless - LISP Session Down"
+                message = (
+                    f"LISP session is not up (state={session_state}, peer={peer_addr}:{peer_port}, "
+                    f"local={local_address}:{local_port}, "
+                    f"state_time={session_state_time}). "
+                    "Remediation: verify peer reachability and routing, confirm UDP/4342 is allowed, and review LISP logs/events "
+                    "on the border and WLC for session negotiation failures."
+                )
+                exit_program(step, process, subprocess, hostname, error, message)
+
+            # 24 Authentication Counters for EID in both ETR and MS/MR (looking for logs as well?)
+            authkey = (entry.get("key") or "").strip().lower()
+            mapserver_ip = (entry.get("ip") or "").strip().lower()
+            map_server_configuration = {
+                'map_server_ip' : mapserver_ip,
+                'authentication_key' : [0,authkey],
+            }
+            map_server_configuration = [map_server_configuration]
+            step = step + 1
+            authentication_key_validation(step, cp_configuration, cp_hostname, map_server_configuration, cp_loopback,
+                                          hostname)
+
+            # 23 MS/MR limits and statistics
+            step = step + 1
+            control_plane.lisp_statistics(vnid, "ethernet", service)
+            lisp_statistics = control_plane.lispstatistics
+            lispstatisticsparser(step, lisp_statistics, cp_hostname)
+
+            # 19 Identify the status of the TCP socket
+            step = step + 1
+            control_plane.tcp_tcb_statistics(cp_loopback, wmi_ip, 4342, service)
+            # 20 Identify the status of the TCB (mss, retransmissions, pmtud)
+            tcb_stats = control_plane.tcb_statistics
+            tcbstatistcisparser(step, tcb_stats, cp_hostname)
+
+            # 26 CPU Utilization
+            step = step + 1
+            control_plane.cpu_utilization(service)
+            highcpuprocesses = control_plane.cpu_statistics.high_cpu_processes
+            highplatcpuprocesses = control_plane.cpu_statistics.plat_high_cpu_processes
+            cpu_utilization_warning(step, highcpuprocesses, cp_hostname)
+            cpu_platform_utilization_warning(step, highplatcpuprocesses, cp_hostname)
+
+
+
+            # Append CP information
+            control_plane_information.append(control_plane)
+
+    ### Inter-Map-Server verifications (up to 4)
+    # Get all "reachable" CPs from Catalyst Center
+    subprocess = "[interCPSession]"
+    msg1 = "LISP Sessions - Session between CPs"
+    message = "Verifying LISP sessions between CPs reachable by Catalyst Center (Site-wide)."
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step = step + 1
+
+    reachable_cp_information = []
+    for cp in control_plane_information:
+        reachable_status = cp.profiled_device.reachabilitystatus
+        if reachable_status == 'Reachable':
+            reachable_cp_information.append(cp)
+
+    # 25 Session State between CPs
+    for cp in reachable_cp_information:
+        etr_rloc = cp.profiled_device.loopback
+        hostname = cp.profiled_device.hostname
+        map_server_ips = []
+        for map_server in control_planes:
+            map_server_ip = (map_server.get("ip") or "").strip().lower()
+            if map_server_ip != etr_rloc:
+                map_server_ips.append(map_server_ip)
+        # Remove the local ETR_RLOC form the map-server list, useful when validating CP-to-CP LISP Sessions.
+        while etr_rloc in map_server_ips:
+            map_server_ips.remove(etr_rloc)
+        map_server_strings = ", ".join(map_server_ips)
+
+        if len(map_server_ips) != 0:
+            subprocess = "[interCPSession]"
+            msg1 = "LISP Sessions - Session between CPs"
+            message = "Verifying LISP sessions from CP {} to CPs : {}".format(etr_rloc, map_server_strings)
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step = step + 1
+
+            step, map_server_ips = unique_lisp_session(hostname, step, control_planes, etr_rloc, service, catc_name,
+                                                       cp, vnid)
+
+        else:
+            subprocess = "[interCPSession]"
+            msg1 = "LISP Sessions - Session between CPs"
+            message = "Control Plane {} is the sole reachable CP in the fabric site; skipping inter-CP session validation.".format(
+                hostname)
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step = step + 1
+    return step, control_planes, control_plane_information
+
+
 
 

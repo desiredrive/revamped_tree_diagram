@@ -106,6 +106,98 @@ class IPRoute:
                 else:
                     self.nexthop = "Null0"
 
+    def iproute_prefix_soft(self, service, step):
+        """
+        Best-effort: never raises/exit; on any failure it sets attributes to None.
+        Populates (when available):
+          self.prefix, self.mask, self.metric, self.distance, self.protocol, self.nexthop
+        """
+        process = "ipRouting"
+
+        # Defaults (null-fill)
+        self.prefix = None
+        self.mask = None
+        self.metric = None
+        self.distance = None
+        self.protocol = None
+        self.nexthop = None
+
+        vrf = (self.vrf or "").strip()
+        vrf_mode = "" if vrf in {"", "default", "none", "None"} else f"vrf {vrf} "
+
+        def _extract_route_fields(iproute_output):
+            if not isinstance(iproute_output, dict):
+                return None
+
+            entry = iproute_output.get("entry")
+            if not isinstance(entry, dict) or not entry:
+                return None
+
+            # Genie format: entry -> { "<prefix>": { ... route data ... } }
+            route_key = next(iter(entry.keys()), None)
+            route_path = entry.get(route_key) if route_key else None
+            if not isinstance(route_path, dict):
+                return None
+
+            prefix = route_path.get("ip")
+            mask = route_path.get("mask")
+            metric = route_path.get("metric")
+            distance = route_path.get("distance")
+            protocol = (route_path.get("known_via") or "").strip() or None
+
+            paths = route_path.get("paths") or {}
+            nexthop = None
+
+            # Pick last path entry (consistent with your original code)
+            if isinstance(paths, dict) and paths:
+                path_key = next(reversed(paths))  # last key
+                path = paths.get(path_key, {}) or {}
+
+                interface = path.get("interface")
+                if protocol == "connected":
+                    nexthop = interface or None
+                else:
+                    if interface == "Null0":
+                        nexthop = "Null0"
+                    else:
+                        nhs = []
+                        for _, p in paths.items():
+                            nh = (p or {}).get("nexthop")
+                            if nh:
+                                nhs.append(nh)
+                        nexthop = nhs or interface or None
+
+            return {
+                "prefix": prefix,
+                "mask": mask,
+                "metric": metric,
+                "distance": distance,
+                "protocol": protocol,
+                "nexthop": nexthop,
+            }
+
+        # 1) Try exact route
+        iproute_cmd = f"show ip route {vrf_mode}{self.route}"
+        iproute_output = get_single_output_genie(self.hostname, iproute_cmd, service)
+        fields = _extract_route_fields(iproute_output)
+
+        # 2) Fallback to default route
+        if not fields:
+            iproute_cmd = f"show ip route {vrf_mode}0.0.0.0 0.0.0.0"
+            iproute_output = get_single_output_genie(self.hostname, iproute_cmd, service)
+            fields = _extract_route_fields(iproute_output)
+
+        # 3) Populate if found (otherwise remain None)
+        if fields:
+            self.prefix = fields["prefix"]
+            self.mask = fields["mask"]
+            self.metric = fields["metric"]
+            self.distance = fields["distance"]
+            self.protocol = fields["protocol"]
+            self.nexthop = fields["nexthop"]
+
+        return step
+
 class IGPInfo():
     def __init__(self,device):
         self.device = device

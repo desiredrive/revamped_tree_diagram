@@ -1,14 +1,52 @@
 import re
 import sys
-
+import ipaddress
 from asn1crypto.pkcs12 import AttributeType
-
+from typing import List, Tuple
 from routingmodules.cef import IPCef, physical_recursion
 from securitymodules.type7decryptor import decrypt_password
 from switchingmodules.interfaces import Interfaces
 from switchingmodules.spanning_tree import SpanningTree
 from switchingmodules.vlan import VlanInformation
 from radkit_cli import logging_info, logging_error, logging_warning, get_any_single_output,get_single_output_genie
+from typing import Any, Dict, Optional, List, Union
+IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+def _is_ipv4(s: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(s), ipaddress.IPv4Address)
+    except ValueError:
+        return False
+
+def extract_ip_and_sgt_fixed_positions(metadata_hex: str) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Fixed-position extraction (based on your observed metadata layout):
+      - IP  = bytes 9-12  (1-based)  -> indices 8..11
+      - SGT = bytes 17-18 (1-based)  -> indices 16..17  (e.g., 00 0A => 10)
+
+    Returns (ip, sgt). If not enough bytes, returns (None, None/sgt None).
+    """
+    tokens = re.findall(r"\b[0-9A-Fa-f]{2}\b", metadata_hex or "")
+    if len(tokens) < 12:
+        return None, None
+
+    # IP from bytes 9-12
+    ip_bytes = tokens[8:12]
+    try:
+        ip_str = ".".join(str(int(x, 16)) for x in ip_bytes)
+        ip_val = str(ipaddress.IPv4Address(ip_str))
+    except Exception:
+        ip_val = None
+
+    # SGT from bytes 65535 in size
+    sgt_val = None
+    if len(tokens) >= 18:
+        try:
+            sgt_val = int("".join(tokens[20:22]), 16)
+        except Exception:
+            sgt_val = None
+
+    return ip_val, sgt_val
 
 def parse_lisp_session(output):
     result = {}
@@ -681,6 +719,510 @@ def map_cache_manual_parse(output):
 
     return result
 
+def parse_wlc_locator_and_passive_open(output: str) -> Tuple[List[str], bool]:
+    """
+    Returns:
+      1) wlc_locator_ips: all IPv4 addresses under 'locator-set WLC' (may be empty)
+      2) passive_open_configured: True if 'map-server session passive-open WLC' is present
+    """
+    wlc_locator_ips: List[str] = []
+    passive_open_configured = False
+    in_wlc_locator_set = False
+
+    for line in (output or "").splitlines():
+        line = line.rstrip()
+
+        if re.match(r"^\s*locator-set\s+WLC\s*$", line):
+            in_wlc_locator_set = True
+            continue
+
+        if in_wlc_locator_set:
+            if re.match(r"^\s*exit-locator-set\s*$", line):
+                in_wlc_locator_set = False
+                continue
+
+            candidate = line.strip()
+            try:
+                if isinstance(ipaddress.ip_address(candidate), ipaddress.IPv4Address):
+                    wlc_locator_ips.append(candidate)
+            except ValueError:
+                pass
+
+        if re.match(r"^\s*map-server\s+session\s+passive-open\s+WLC\s*$", line):
+            passive_open_configured = True
+
+    # de-dup, stable order
+    seen = set()
+    wlc_locator_ips = [ip for ip in wlc_locator_ips if not (ip in seen or seen.add(ip))]
+
+    return wlc_locator_ips, passive_open_configured
+
+def parse_show_lisp_iid_ethernet_database_wlc(output: str) -> Dict[str, Any]:
+    """
+    Parses:
+      show lisp instance-id <iid> ethernet database wlc <mac>
+
+    Adds VLAN parsing from header:
+      "... EID-table Vlan 1021 (IID 8192)"  -> vlan_id=1021
+    """
+    res: Dict[str, Any] = {"found": False, "entry": {}}
+    if not output or not isinstance(output, str):
+        return {"found": False, "entry": {}, "error": "empty_or_invalid_output"}
+
+    # If no "Hardware Address", treat as not found (but still try to parse header)
+    if "Hardware Address" not in output:
+        m = re.search(r"EID-table\s+Vlan\s+(\d+)\s+\(IID\s+(\d+)\)", output, re.IGNORECASE)
+        if m:
+            res["entry"]["vlan_id"] = int(m.group(1))
+            res["entry"]["iid"] = int(m.group(2))
+            res["entry"]["eid_table"] = f"Vlan {m.group(1)}"
+        return res
+
+    res["found"] = True
+
+    # Header: VLAN and IID
+    m = re.search(r"EID-table\s+Vlan\s+(\d+)\s+\(IID\s+(\d+)\)", output, re.IGNORECASE)
+    if m:
+        res["entry"]["vlan_id"] = int(m.group(1))
+        res["entry"]["iid"] = int(m.group(2))
+        res["entry"]["eid_table"] = f"Vlan {m.group(1)}"
+
+    patterns = {
+        "hardware_address": r"^Hardware Address:\s*(.+)$",
+        "type": r"^Type:\s*(.+)$",
+        "sources": r"^Sources:\s*(.+)$",
+        "tunnel_update": r"^Tunnel Update:\s*(.+)$",
+        "source_ms": r"^Source MS:\s*(.+)$",
+        "rloc": r"^RLOC:\s*(.+)$",
+        "up_time": r"^Up time:\s*(.+)$",
+        "metadata_length": r"^Metadata length:\s*(.+)$",
+        "metadata_hex_first": r"^Metadata \(hex\):\s*(.+)$",
+    }
+
+    metadata_hex_parts = []
+
+    for ln in output.splitlines():
+        ln = ln.rstrip()
+
+        for key, pat in patterns.items():
+            m = re.match(pat, ln)
+            if not m:
+                continue
+
+            val = m.group(1).strip()
+
+            if key in {"sources", "metadata_length"}:
+                mm = re.search(r"\d+", val)
+                res["entry"][key] = int(mm.group(0)) if mm else val
+            elif key in {"source_ms", "rloc"}:
+                res["entry"][key] = val if _is_ipv4(val) else val
+            elif key == "metadata_hex_first":
+                metadata_hex_parts.append(val)
+            else:
+                res["entry"][key] = val
+            break
+
+        # continuation lines for metadata hex
+        if re.match(r"^\s+[0-9A-Fa-f]{2}\s", ln):
+            metadata_hex_parts.append(ln.strip())
+
+    if metadata_hex_parts:
+        res["entry"]["metadata_hex"] = " ".join(metadata_hex_parts).replace("  ", " ").strip()
+
+    return res
+
+def parse_show_l2lisp_statistics(output: str) -> Dict[str, Any]:
+    """
+    Parses:
+      show l2lisp statistics
+
+    Returns:
+      {
+        "control_messages": {
+          "Add AP": {"received": 45, "succeeded": 45},
+          "Add client": {"received": 573, "succeeded": 14},
+          ...
+        },
+        "errors": {
+          "Add AP: empty metadata": 0,
+          ...
+          "Update client rbm failed": 20
+        },
+        "reconciliation": {
+          "marked_dirty": 0,
+          "cleaned": 0,
+          "deleted": 0,
+          "dirty_client_count_in_hash": 0
+        },
+        "toggles": {
+          "Use AP info in WLC metadata": 1
+        },
+        "totals": {
+          "total_client_count_in_hash": 1,
+          "incomplete_client_count_in_hash": 0
+        }
+      }
+    """
+    res: Dict[str, Any] = {
+        "control_messages": {},
+        "errors": {},
+        "reconciliation": {},
+        "toggles": {},
+        "totals": {},
+    }
+    if not output or not isinstance(output, str):
+        return {"error": "empty_or_invalid_output", **res}
+
+    section = None
+
+    for raw in output.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+
+        if line.startswith("Control messages"):
+            section = "control_messages"
+            continue
+        if line.startswith("Errors"):
+            section = "errors"
+            continue
+        if line.startswith("Reconciliation statistics"):
+            section = "reconciliation"
+            continue
+        if line.strip() == "Toggles":
+            section = "toggles"
+            continue
+
+        # Totals lines exist outside sections too; parse them regardless
+        m = re.match(r"^\s*Total client count in hash\s*=\s*(\d+)\s*$", line, re.IGNORECASE)
+        if m:
+            res["totals"]["total_client_count_in_hash"] = int(m.group(1))
+            continue
+
+        m = re.match(r"^\s*Incomplete client count in hash\s*=\s*(\d+)\s*$", line, re.IGNORECASE)
+        if m:
+            res["totals"]["incomplete_client_count_in_hash"] = int(m.group(1))
+            continue
+
+        # Reconciliation extra line
+        m = re.match(r"^\s*Dirty client count in hash\s*=\s*(\d+)\s*$", line, re.IGNORECASE)
+        if m:
+            res["reconciliation"]["dirty_client_count_in_hash"] = int(m.group(1))
+            continue
+
+        # Skip separators / headers
+        if re.match(r"^[=\-]{3,}\s*$", line.strip()):
+            continue
+        if "Received" in line and "Succeeded" in line:
+            continue
+        if "Marked dirty" in line and "Cleaned" in line and "Deleted" in line:
+            continue
+        if line.strip().startswith("----------"):
+            continue
+
+        # Control messages rows: "<name>  <received>  <succeeded>"
+        if section == "control_messages":
+            m = re.match(r"^\s*(.+?)\s+(\d+)\s+(\d+)\s*$", line)
+            if m:
+                name = m.group(1).strip()
+                res["control_messages"][name] = {"received": int(m.group(2)), "succeeded": int(m.group(3))}
+            continue
+
+        # Errors rows: "<error name> = <count>"
+        if section == "errors":
+            m = re.match(r"^\s*(.+?)\s*=\s*(\d+)\s*$", line)
+            if m:
+                res["errors"][m.group(1).strip()] = int(m.group(2))
+            continue
+
+        # Reconciliation table row: "<marked> <cleaned> <deleted>"
+        if section == "reconciliation":
+            m = re.match(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s*$", line)
+            if m:
+                res["reconciliation"]["marked_dirty"] = int(m.group(1))
+                res["reconciliation"]["cleaned"] = int(m.group(2))
+                res["reconciliation"]["deleted"] = int(m.group(3))
+            continue
+
+        # Toggles: "<name>: <value>"
+        if section == "toggles":
+            m = re.match(r"^\s*(.+?)\s*:\s*(\d+)\s*$", line)
+            if m:
+                res["toggles"][m.group(1).strip()] = int(m.group(2))
+            continue
+
+    # Cleanup empty keys (optional)
+    return {k: v for k, v in res.items() if v}
+
+def parse_lisp_local_eids_and_overlaps(output: str) -> Dict[str, Any]:
+    prefixes: List[str] = []
+    nets: List[IPNetwork] = []
+
+    for line in (output or "").splitlines():
+        line = line.strip()
+        if not line or line.lower() == "prefix" or "#" in line:
+            continue
+
+        try:
+            net = ipaddress.ip_network(line, strict=False)
+        except ValueError:
+            continue
+
+        prefixes.append(str(net))
+        nets.append(net)
+
+    overlaps: List[Dict[str, str]] = []
+    for i in range(len(nets)):
+        for j in range(i + 1, len(nets)):
+            a, b = nets[i], nets[j]
+            if a.overlaps(b) and a != b:
+                overlaps.append({"a": str(a), "b": str(b)})
+
+    return {
+        "prefixes": prefixes,
+        "overlapping_prefixes": overlaps,
+    }
+
+def parse_show_lisp_route_import_database(output: str) -> Dict[str, Any]:
+    """
+    Parses:
+      show lisp instance-id <iid> ipv4 route-import database <prefix>
+
+    Returns:
+      {
+        "iid": 4099,
+        "vrf": "Campus",
+        "prefix": "192.168.31.0/24",
+        "config": 1,
+        "entries": 5,
+        "limit": 5000,
+        "uptime": "1w2d",
+        "source": "bgp 65001",
+        "rloc_set": "rloc_9fa77",
+        "cache_db": "installed",
+        "state": None|"<state>"
+      }
+    """
+    res: Dict[str, Any] = {
+        "iid": None,
+        "vrf": None,
+        "prefix": None,
+        "config": None,
+        "entries": None,
+        "limit": None,
+        "uptime": None,
+        "source": None,
+        "rloc_set": None,
+        "cache_db": None,
+        "state": None,
+    }
+    if not output or not isinstance(output, str):
+        return {"error": "empty_or_invalid_output", **res}
+
+    # Header: "... (IID 4099)" and "vrf Campus"
+    m = re.search(r"EID-table\s+vrf\s+(\S+)\s+\(IID\s+(\d+)\)", output, re.IGNORECASE)
+    if m:
+        res["vrf"] = m.group(1)
+        res["iid"] = int(m.group(2))
+
+    # Config line: "Config: 1, Entries: 5 (limit 5000)"
+    m = re.search(r"Config:\s*(\d+),\s*Entries:\s*(\d+)\s*\(limit\s*(\d+)\)", output, re.IGNORECASE)
+    if m:
+        res["config"] = int(m.group(1))
+        res["entries"] = int(m.group(2))
+        res["limit"] = int(m.group(3))
+
+    # Data row (best-effort spacing)
+    # Prefix  Uptime  Source  RLOC-set  Cache/DB  State(optional)
+    for line in output.splitlines():
+        line = line.rstrip()
+        m = re.match(
+            r"^\s*(\d{1,3}(?:\.\d{1,3}){3}/\d+)\s+(\S+)\s+(.+?)\s+(\S+)\s+(\S+)\s*(\S+)?\s*$",
+            line,
+        )
+        if m:
+            res["prefix"] = m.group(1)
+            res["uptime"] = m.group(2)
+            res["source"] = m.group(3).strip()
+            res["rloc_set"] = m.group(4)
+            res["cache_db"] = m.group(5)
+            res["state"] = m.group(6) if m.group(6) else None
+            break
+
+    return res
+
+def parse_show_lisp_forwarding_eid_remote(output: str) -> Dict[str, Any]:
+    """
+    Parses:
+      show lisp instance-id <iid> ipv4 forwarding eid remote <ip>
+
+    Guarantees all keys exist; anything not found stays None (or [] where appropriate).
+    """
+    res: Dict[str, Any] = {
+        "found": False,
+        "iid": None,
+        "vrf": None,
+        "query": None,
+        "prefix": None,
+        "fwd_action": None,
+        "locator_status_bits": None,
+        "encap_iid": None,
+        "packets": None,
+        "bytes": None,
+        "ifnums": [],             # list of {interface, ifnum, rloc}
+        "adjacency_chain": [],    # list of interfaces seen in chain
+        "error": None,
+    }
+
+    if not output or not isinstance(output, str):
+        res["error"] = "empty_or_invalid_output"
+        return res
+
+    # Optional command echo
+    m = re.search(
+        r"show lisp instance-id\s+(\d+)\s+ipv4 forwarding eid remote\s+(\S+)",
+        output,
+        re.IGNORECASE,
+    )
+    if m:
+        res["iid"] = int(m.group(1))
+        res["query"] = m.group(2)
+
+    # Not found case
+    m = re.search(r"%\s+No remote EID prefix in\s+IPv4:([^\s]+)\s+matching\s+(\S+)", output)
+    if m:
+        res["found"] = False
+        res["vrf"] = m.group(1)
+        res["query"] = res["query"] or m.group(2)
+        res["error"] = m.group(0).lstrip("% ").strip()
+        return res
+
+    # Parse body
+    for line in output.splitlines():
+        line = line.rstrip()
+
+        # Prefix row
+        m = re.match(
+            r"^\s*(\d{1,3}(?:\.\d{1,3}){3}/\d+)\s+(\S+)\s+(0x[0-9A-Fa-f]+)\s+(\S+)\s*$",
+            line,
+        )
+        if m:
+            res["found"] = True
+            res["prefix"] = m.group(1)
+            res["fwd_action"] = m.group(2)
+            res["locator_status_bits"] = m.group(3)
+            res["encap_iid"] = m.group(4)
+            continue
+
+        # packets/bytes
+        m = re.match(r"^\s*packets/bytes\s+(\d+)\s*/\s*(\d+)\s*$", line, re.IGNORECASE)
+        if m:
+            res["packets"] = int(m.group(1))
+            res["bytes"] = int(m.group(2))
+            continue
+
+        # ifnums entries
+        m = re.match(r"^\s*([A-Za-z0-9.]+)\((\d+)\)(?::\s*(\d{1,3}(?:\.\d{1,3}){3}))?\s*$", line)
+        if m:
+            res["ifnums"].append(
+                {
+                    "interface": m.group(1),
+                    "ifnum": int(m.group(2)),
+                    "rloc": m.group(3) if m.group(3) else None,
+                }
+            )
+            continue
+
+        # adjacency chain: "out of <interface>" or "glean for <interface>"
+        m = re.search(r"\bout of\s+([A-Za-z]+[A-Za-z0-9/._-]+)\b", line)
+        if m:
+            res["adjacency_chain"].append(m.group(1))
+        m = re.search(r"\bglean for\s+([A-Za-z0-9.]+)\b", line, re.IGNORECASE)
+        if m:
+            res["adjacency_chain"].append(m.group(1))
+
+    # If we never found a prefix row but also didn't hit the explicit error string, treat as not found
+    if not res["prefix"] and not res["error"]:
+        res["found"] = False
+        res["error"] = "no_matching_prefix_row_found"
+
+    # de-dup adjacency chain preserving order
+    seen = set()
+    res["adjacency_chain"] = [x for x in res["adjacency_chain"] if not (x in seen or seen.add(x))]
+
+    return res
+
+def parse_lisp_site_config(output):
+    """
+    Parses 'show run | se site' output for LISP site configurations.
+    Returns a dictionary containing site details, EID records, and allowed locators.
+    """
+    site_data = {
+        "site_name": None,
+        "description": None,
+        "auth_key_type": None,
+        "auth_key": None,
+        "eid_records": {},
+        "allow_locator_default_etr": {}
+    }
+
+    lines = output.strip().splitlines()
+
+    for line in lines:
+        line = line.strip()
+
+        # Parse Site Name
+        site_match = re.match(r"^site\s+(\S+)", line)
+        if site_match:
+            site_data["site_name"] = site_match.group(1)
+            continue
+
+        # Parse Description
+        desc_match = re.match(r"^description\s+(.+)", line)
+        if desc_match:
+            site_data["description"] = desc_match.group(1)
+            continue
+
+        # Parse Auth Key
+        auth_match = re.match(r"^authentication-key\s+(\d+)\s+(\S+)", line)
+        if auth_match:
+            site_data["auth_key_type"] = auth_match.group(1)
+            site_data["auth_key"] = auth_match.group(2)
+            continue
+
+        # Parse EID Records (IP Prefixes)
+        eid_ip_match = re.match(r"^eid-record\s+instance-id\s+(\d+)\s+(\S+)\s+accept-more-specifics", line)
+        if eid_ip_match:
+            iid = int(eid_ip_match.group(1))
+            prefix = eid_ip_match.group(2)
+            if iid not in site_data["eid_records"]:
+                site_data["eid_records"][iid] = []
+            site_data["eid_records"][iid].append(prefix)
+            continue
+
+        # Parse EID Records (any-mac)
+        eid_mac_match = re.match(r"^eid-record\s+instance-id\s+(\d+)\s+any-mac", line)
+        if eid_mac_match:
+            iid = int(eid_mac_match.group(1))
+            if iid not in site_data["eid_records"]:
+                site_data["eid_records"][iid] = []
+            site_data["eid_records"][iid].append("any-mac")
+            continue
+
+        # Parse Allow Locator Default ETR
+        allow_loc_match = re.match(r"^allow-locator-default-etr\s+instance-id\s+(\d+)\s+(\S+)", line)
+        if allow_loc_match:
+            iid = int(allow_loc_match.group(1))
+            af = allow_loc_match.group(2) # ipv4 or ipv6
+            if iid not in site_data["allow_locator_default_etr"]:
+                site_data["allow_locator_default_etr"][iid] = []
+            site_data["allow_locator_default_etr"][iid].append(af)
+            continue
+
+    return site_data
+
+# Example Usage:
+# result = parse_lisp_site_config(your_cli_output_string)
 
 class lisp_route_import:
 
@@ -708,6 +1250,14 @@ class lisp_route_import:
             if "EID table not" in line:
                 configflag.append(False)
                 limits.append(False)
+
+    def route_import_database_specific(self,prefix,service):
+        hostname = self.hostname
+        iid = self.iid
+        routeimportcmd = f"show lisp instance-id {iid} ipv4 route-import database {prefix}"
+        routeimportop = get_any_single_output(hostname,routeimportcmd,service)
+        routeimportop = parse_show_lisp_route_import_database(routeimportop)
+        self.routeimportprefix = routeimportop
 
 class controlplane_eid:
 
@@ -764,11 +1314,14 @@ class controlplane_eid:
         cp_server_output = get_any_single_output(self.queriedcp,cmd,service)
         self.arbinding = "NA"
 
-        if cp_server_output == None:
+        auth_failures = 0
+        allowed_locators_mismatch = 0
+        if cp_server_output is None:
             logging_info("X", process, subprocess, hostname,
                          "MAC Registration not found in CP {}".format(self.queriedcp))
             #print("MAC Registration not found in CP {}".format(self.queriedcp))
         try:
+
             for line in cp_server_output.splitlines():
                 if "ETR" in line:
                     etrs = re.compile( "(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})" ).search(line).group().strip()
@@ -783,15 +1336,35 @@ class controlplane_eid:
                         self.isfewap = "True"
                     if "Clear" in line:
                         self.isfewap = "False"
+
+                m = re.search(r"Authentication failures:\s*(\d+)", line, re.IGNORECASE)
+                if m:
+                    self.auth_failures = int(m.group(1))
+                m = re.search(r"Allowed locators mismatch:\s*(\d+)", line, re.IGNORECASE)
+                if m:
+                    self.allowed_locators_mismatch = int(m.group(1))
+
+
         except:
             pass
+        if auth_failures !=0:
+            message = (
+                f"Authentication failures detected for EID {self.eid} in VNID {self.iid} on control plane {hostname}. "
+                f"These counters may be historic; if they continue to increment, remediate by correcting the LISP authentication key "
+                f"between the ETR and the map-server."
+            )
+            logging_warning("X", process, subprocess, hostname, "LISP Authentication" + " | " + message)
         etrs_list = [i for i in etr_list if i not in wlcs]
+        etr_wllist = [i for i in etr_list if i in wlcs]
         etrs_list = set(etrs_list)
         if len(etrs_list) > 1:
             logging_error("X", process, subprocess, hostname,
                           "Multiple RLOCs detected for this L2 Registration, triggering troubleshooting flow\n {}".format(etrs_list))
             sys.exit("Multiple RLOCs detected for this L2 Registration, triggering troubleshooting flow\n {}".format(etrs_list))
         self.etrs = etrs_list
+        self.wlcetr = etr_wllist
+        self.auth_failures = auth_failures
+        self.allowed_locators_mismatch = allowed_locators_mismatch
 
 class l2lisp_info:
 
@@ -813,6 +1386,21 @@ class l2lisp_info:
         if self.l2lispiid == 0 :
             self.l2lispiid = None
 
+    def vlan_from_iid(self,device,iid,service):
+        self.iid = iid
+        self.hostname = device
+
+        process = "LISP"
+        subprocess = "[L2LISP]"
+        # print ("Obtaining LISP-related information for L2 IID\n")
+        lispvlancmd = "show lisp instance-id {} ethernet | i EID table".format(self.iid)
+        lispvlancmd = get_any_single_output(device, lispvlancmd, service)
+        vlan = None
+        for line in (lispvlancmd or "").splitlines():
+            m = re.search(r"\bEID table:\s*Vlan\s+(\d+)\b", line, re.IGNORECASE)
+            if m:
+                vlan = int(m.group(1))
+        self.vlanfromiid = vlan
 
     def l2_lisp_parameters(self, xtr, ep, service):
         self.mgmtip = xtr.mgmtip
@@ -1264,13 +1852,30 @@ class LISPLocalDB:
             self.locators = locators
             self.mapservers = mapservers
 
-        except AttributeError:
+        except (TypeError, AttributeError, KeyError):
             self.address_family = None
             self.eid_table = None
             self.eid = None
             self.eid_origin = None
             self.locators = None
             self.mapservers = None
+
+    def lispdbwlcentry(self,service):
+        lispdbeidfew = f"show lisp instance-id {self.iid} ethernet database wlc {self.eid}"
+        lispdbeidfew_op = get_any_single_output(self.device, lispdbeidfew, service)
+        lispdbeidfew_op = parse_show_lisp_iid_ethernet_database_wlc(lispdbeidfew_op)
+        entry = (lispdbeidfew_op.get("entry", {}) or {})
+
+        self.vlan = entry.get("vlan_id")
+        self.hardware_address = entry.get("hardware_address")
+        self.etype = entry.get("type")
+        self.tunnel_update = entry.get("tunnel_update")
+        self.source_ms = entry.get("source_ms")
+        self.rloc = entry.get("rloc")
+        self.metadata_hex = entry.get("metadata_hex")
+        ap_ip_metadata, sgt_metadata = extract_ip_and_sgt_fixed_positions(self.metadata_hex)
+        self.ap_ip_metadata = ap_ip_metadata
+        self.sgt_metadata = sgt_metadata
 
 class L2LISPControlPlane:
     def __init__(self, device):
@@ -1331,6 +1936,85 @@ class L2LISPControlPlane:
             self.iid_site = vnisite_flag
 
             #Authentication Key Parse
+
+    def rloc_members(self,service):
+        hostname = self.device
+        rlocmembercmd = "show run | i map-server rloc members"
+        rlocmemberop = get_any_single_output(hostname,rlocmembercmd,service)
+        self.rloc_members_distribute = False
+        if rlocmemberop is not None:
+            for line in rlocmemberop.splitlines():
+                if "distribute" in line:
+                    self.rloc_members_distribute = True
+
+    def domains(self,service):
+        hostname = self.device
+        lispcmd = "show lisp"
+        lispop = get_single_output_genie(hostname,lispcmd,service)
+        self.domainid = 0
+        self.multihomingid = 0
+        if lispop is not None:
+            try:
+                path = lispop['lisp_id'][0]
+            except KeyError:
+                path = lispop['lisp_id']['default']
+            # Try domainid
+            try:
+                domainid = int(path['domain_id'])
+            except KeyError:
+                domainid = 0
+            # Try MultiHoming ID
+            try:
+                multihoming_id = int(path['multihoming_id'])
+            except KeyError:
+                multihoming_id = 0
+            self.domainid = domainid
+            self.multihomingid = multihoming_id
+    def fewparameters(self,service):
+        device = self.device
+        lsetcmd = "show run | se locator-set WLC| WLC"
+        lsetop = get_any_single_output(device, lsetcmd, service)
+        if lsetop is not None:
+            wlc_locator_ips ,passive_open_configured = parse_wlc_locator_and_passive_open(lsetop)
+            try:
+                self.wlc_locator_ips = wlc_locator_ips
+                self.passive_open_configured = passive_open_configured
+            except KeyError:
+                self.wlc_locator_ips = []
+                self.passive_open_configured = False
+
+class LISPControlPlane:
+    def __init__(self, device):
+        self.device = device
+    def lisp_service_ipv4(self,service):
+        hostname = self.device
+        lispservethcmd = "show lisp service ipv4"
+        lispserverhop = get_single_output_genie(hostname,lispservethcmd,service)
+        self.lispservice = lispserverhop
+        #Retrieve the state of map_server and map_resolver
+
+    def site_uci(self,service):
+        hostname = self.device
+        siteuciruncmd = "show run | se site_uci"
+        siteucirunop = get_any_single_output(hostname,siteuciruncmd,service)
+        siteucirunop = parse_lisp_site_config(siteucirunop)
+        self.site_uci = siteucirunop
+        ''' Sample Output for site_uci:
+            {
+        'site_name': 'site_uci',
+        'description': 'map-server configured from Catalyst Center',
+        'eid_records': {
+            4097: ['0.0.0.0/0', '172.19.5.0/24', '172.19.6.0/24', '::/0'],
+            4099: ['0.0.0.0/0', '10.199.221.0/24', '172.19.0.0/24', ...],
+            8192: ['any-mac'],
+            ...
+        },
+        'allow_locator_default_etr': {
+            4097: ['ipv4', 'ipv6'],
+            4099: ['ipv4', 'ipv6'],
+            ...
+        }
+    }'''
 
     def rloc_members(self,service):
         hostname = self.device
@@ -1426,6 +2110,11 @@ class LISPInstanceStatus:
             self.database = path['database']
             self.locatorstatus = path['locator_status_algorithms']
             self.mapresolvers = []
+            try:
+                usepetrs = path['itr']['use_proxy_etr_rloc']
+            except KeyError:
+                usepetrs = []
+            self.usepetrs = usepetrs
             mresolvers = path['itr_map_resolvers']
             for i in mresolvers:
                 if "found" not in i:
@@ -1626,6 +2315,24 @@ class LISPSession:
                     self.rcvd_malformed = None
                     self.sent_defferred = None
 
+    def lisp_prefix_list(self,service):
+        hostname = self.device
+        lispcmd = "show lisp prefix-list"
+        lispop =  get_single_output_genie(hostname,lispcmd,service)
+        self.lisp_prefixlist = lispop
+
+    def lisp_subscribers(self,iid,service):
+        hostname = self.device
+        lispcmd = f"show lisp instance-id {iid} ipv4 subscriber"
+        lispop = get_single_output_genie(hostname, lispcmd, service)
+        self.lispsubscribers = lispop
+
+    def lisp_publishers(self,iid,service):
+        hostname = self.device
+        lispcmd = f"show lisp instance-id {iid} ipv4 publisher"
+        lispop = get_single_output_genie(hostname, lispcmd, service)
+        self.lisppublishers = lispop
+
 class LISPMapCache:
     def __init__(self,iid,device):
         self.device = device
@@ -1677,6 +2384,66 @@ class LISPMapCache:
             pass
         self.rlocs = rlocs
 
+class L2LISPStatistics:
+    def __init__(self,device):
+        self.hostname = device
+    def l2lispstatistics(self,service):
+        hostname = self.hostname
+
+        l2lispstcmd = "show l2lisp statistics"
+        l2lispop = get_any_single_output(hostname,l2lispstcmd,service)
+        l2lispop = parse_show_l2lisp_statistics(l2lispop)
+        self.l2lispstats = l2lispop
+
+class LISPForwarding:
+    def __init__(self,device,iid):
+        self.hostname = device
+        self.instanceid = iid
+    def fwdingeidlocal(self,service):
+        hostname = self.hostname
+        iid = self.instanceid
+        lispfwdcmd = f"show lisp instance-id {iid} ipv4 forwarding eid local"
+        lispfwdcop = get_any_single_output(hostname,lispfwdcmd,service)
+        lispfwdcop = parse_lisp_local_eids_and_overlaps(lispfwdcop)
+        self.fwdeidlocal = lispfwdcop
+    def fwdingeidremote(self,dstip,service):
+        hostname = self.hostname
+        iid = self.instanceid
+        lispfwdcmd = f"show lisp instance-id {iid} ipv4 forwarding eid remote {dstip}"
+        lispfwdcop = get_any_single_output(hostname,lispfwdcmd,service)
+        lispfwdcop = parse_show_lisp_forwarding_eid_remote(lispfwdcop)
+        self.fwdeidremote = lispfwdcop
+
+class LISPRemoteDefault:
+    def __init__(self,device):
+        self.hostname = device
+    def lispremotedefault(self,service):
+        hostname = self.hostname
+
+        lispdremtcmd = "show lisp remote-locator-set default-etrs"
+        lispdremtop = get_single_output_genie(hostname,lispdremtcmd,service)
+        data = lispdremtop or {}
+        lisp_id = (data.get("lisp_id", {}) or {})
+        first_lisp = next(iter(lisp_id.values()), {}) or {}
+        rl_names = (first_lisp.get("remote_locator_name", {}) or {})
+
+        ipv4_info = rl_names.get("default-etr-locator-set-ipv4", {}) or {}
+        ipv6_info = rl_names.get("default-etr-locator-set-ipv6", {}) or {}
+
+        self.remotelocatoripv4 = ipv4_info
+        self.remotelocatoripv6 = ipv6_info
+
+class LISPPublication:
+    def __init__(self,device,iid):
+        self.hostname = device
+        self.iid = iid
+    def v4publication(self,prefix,service):
+        hostname = self.hostname
+        iid = self.iid
+
+        lisppubcmd = f"show lisp instance-id {iid} ipv4 publication {prefix}"
+        lisppubop = get_single_output_genie(hostname,lisppubcmd,service)
+        print (lisppubop)
 # Operational #
 
 class L3Device:
@@ -1743,7 +2510,7 @@ class L3Device:
         self.cef_internal_entries = cef_internal_entries
         self.physical_next_hops = physical_next_hops
 
-class CEFForwardingState():
+class CEFForwardingState:
     def __init__(self, vrf, device):
             self.device = device
             self.vrf = vrf
@@ -1769,6 +2536,19 @@ class CEFForwardingState():
             cef_internal.get_cef_internal(service)
             cef_internal_underlay.append(cef_internal)
         self.cef_internal_underlay = cef_internal_underlay
+
+    def underlay_phy(self, service):
+        hostname = self.device
+        cef_internal_underlay = self.cef_internal_underlay
+        physical_interfaces = []
+        for cef_internal_entry in cef_internal_underlay:
+            phy = physical_recursion(cef_internal_entry,hostname)
+            phy.get_physical_interfaces(service, "X")
+            total_ports = phy.total_phys
+            for port in total_ports:
+                physical_interfaces.append(port)
+        flat_list = [item for sublist in physical_interfaces for item in sublist]
+        self.physical_interfaces = flat_list
 
 
 

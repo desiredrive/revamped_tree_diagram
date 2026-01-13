@@ -1,15 +1,22 @@
 from pprint import pformat
 
+from asn1crypto.core import Boolean
+
 from device_profiler import Device
 from ipverifications import subnetvalidation
+from routingmodules.cef import phy_cef_collection
 from routingmodules.lisp import L3Device, CEFForwardingState
 from switchingmodules.dhcp import DHCPDevice
+from switchingmodules.interfaces import Interfaces
 from switchingmodules.maclearning import mac_learning
 from radkit_cli import logging_info, logging_error, logging_warning, get_catc_api
 import sys
 
 from switchingmodules.sisf import SISF
+from traffic_flows.iptransit import border_ip_transit
 from traffic_flows.lispsessiontroubleshooting import singleETRProfiling
+from traffic_flows.operational_tests import Ping
+from traffic_flows.wirelessflows import wirelessclientonboarding
 
 """
 DHCP Troubleshooting steps:
@@ -43,6 +50,7 @@ class EdgeNodeClassifier:
         devprof = Device(self.mgmtip,catc,step)
         devprof.profile_device(service)
         self.profiled_device = devprof
+        self.loopback = devprof.loopback
 
     def maclearning(self,mac, vlan, service):
         hostname = self.profiled_device.hostname
@@ -99,12 +107,12 @@ class EdgeNodeClassifier:
         cefinternallist = CEFForwardingState(vrf,hostname)
         cefinternallist.cef_resolution(prefixes,service,step)
         self.cefinternallist_info = cefinternallist
-        final_rlocs = forwarding_parameters_recursion(cefinternallist,self.profiled_device.dnac,step)
+        final_rlocs = forwarding_parameters_recursion(cefinternallist,self.profiled_device.dnac,step,hostname)
         cefinternallist.cef_underlay(final_rlocs,service)
-        self.cef
-
-
-
+        cefinternallist.underlay_phy(service)
+        underlay_ports(cefinternallist.physical_interfaces,hostname,step)
+        self.final_rlocs = final_rlocs
+        self.underlay_ports = cefinternallist.physical_interfaces
 
 def exit_program(step, process, subprocess, hostname, error, message):
     logging_error(step, process, subprocess, hostname, error)
@@ -293,15 +301,18 @@ def dhcp_parameters_validation(dhcpparameters_info,interface,vlan,step):
         )
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     #DHCP Snooping Statistics:
-    dhcpsnoopingstats = dhcpparameters_info.packets_dropped_because
-    if dhcpsnoopingstats is not None:
+    dhcpsnoopingstats = getattr(dhcpparameters_info, "packets_dropped_because", None)
+    if dhcpsnoopingstats:
         for reason, count in dhcpsnoopingstats.items():
-            if count != 0:
-                error = "DHCP - DHCP Snooping"
+            if count > 0:
+                msg1 = "DHCP - DHCP Snooping Statistics"
                 message = (
-                    f"DHCP Troubleshooting: Warning: DHCP Snooping counters detected for reason {reason}, count: {count}"
+                    f"Non-zero DHCP snooping counter detected for reason '{reason}' (count: {count}). "
+                    f"Note: these counters are historic and do not necessarily translate to an ongoing problem. "
+                    f"Closely monitor the counters with 'show ip dhcp snooping statistic details' to determine if "
+                    f"these values are actively incrementing during the current troubleshooting window."
                 )
-                logging_warning(step, process, subprocess, hostname, error + " | " + message)
+                logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
 
     #DHCP Snooping Bindings [Pending]
 
@@ -670,14 +681,14 @@ def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcppar
                 )
                 logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
 
-def forwarding_parameters_recursion(cefinternallist_info,catc_name,step):
+def forwarding_parameters_recursion(cefinternallist_info,catc_name,step, hostname):
     process = "overlayValidations"
     subprocess = "[edgeNodeForwarding]"
     cef_prefixes = cefinternallist_info
     final_rlocs = []
     for cef_internal_entries in cef_prefixes.cef_internal_entries:
-        nexthop_ips = set(hop["nexthop"] for hop in cef_internal_entries["nexthops"])
-        expected_rlocs = set(rloc["rloc"] for rloc in cef_internal_entries["expected_rloc"])
+        nexthop_ips = set(hop["nexthop"] for hop in cef_internal_entries.nexthops)
+        expected_rlocs = set(rloc["rloc"] for rloc in cef_internal_entries.expected_rloc)
         if nexthop_ips != expected_rlocs:
             error = "CEF - Forwarding"
             message = (
@@ -689,7 +700,7 @@ def forwarding_parameters_recursion(cefinternallist_info,catc_name,step):
             msg1 = "CEF - Forwarding"
             message = (
                 f"Forwarding Troubleshooting: Nexthops {sorted(nexthop_ips)} and expected RLOCs {sorted(expected_rlocs)} match on device '{hostname}'. "
-                "Forwarding configuration appears correct."
+                "Forwarding details appears correct."
             )
             logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
         final_rlocs.append(nexthop_ips)
@@ -699,7 +710,83 @@ def forwarding_parameters_recursion(cefinternallist_info,catc_name,step):
         final_rlocs_list = unique_list
         return final_rlocs_list
 
-def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, service):
+def underlay_ports(ports,hostname,step):
+    subprocess = "[edgeNodeForwarding]"
+    process = "dhcpTroubleshooting"
+    msg1 = "Fabric Edge - DHCP Forwarding Path"
+    message = (
+        f"The following physical ports were identified for the LISP/VXLAN forwarding path to the DHCP server: {ports}."
+    )
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+def rloc_reachability(ports, hostname, service, rlocs, step):
+    subprocess = "[underlayReachability]"
+    process = "dhcpTroubleshooting"
+    # Underlay Interface Parsing
+    # [Object: Interface Information and Counters - interfaceobjects]
+    interfaceobjects = []
+    mtus = []
+    for i in ports:
+        nhinterfaceinfo = Interfaces(i, hostname)
+        nhinterfaceinfo.show_interface(service)
+        interfaceobjects.append(nhinterfaceinfo)
+    for i in interfaceobjects:
+        phy_cef_collection(i, step)
+        # print (pformat(vars(i), indent=4, width =1, sort_dicts=False))
+        mtus.append(i.mtu)
+        # print ("\n")
+
+    # Minimum MTU calculation
+    subprocess = "[mtu]"
+    mtus.sort()
+    minimum = mtus[0]
+    logging_info(step, process, subprocess, hostname,
+                 "The lowest MTU between underlay interfaces for device: {} is {}".format(hostname, minimum))
+    # print ("The lowest MTU between underlay interfaces for device: {} is {}".format(srcxtr.hostname, minimum))
+
+    for rloc in rlocs:
+        # RLOC to RLOC Ping Validation
+        # 1) Without MTU
+        # print ("RLOC to RLOC results with low MTU")
+        normal_ping = Ping(rloc, hostname)
+        normal_ping.ping_with_source(None, "Lo0", None, False, service)
+        logging_info(step, process, subprocess, hostname,
+                     "RLOC to RLOC results with low MTU: {} % Success".format(normal_ping.result))
+        # print (pformat(vars(normal_ping), indent=4, width =1, sort_dicts=False))
+        # 2) With MTU
+        # print ("RLOC to RLOC results with {} MTU".format(minimum))
+        mtu_ping = Ping(rloc, hostname)
+        mtu_ping.ping_with_source(None, "Lo0", minimum, True, service)
+        # print (pformat(vars(mtu_ping), indent=4, width =1, sort_dicts=False))
+        logging_info(step, process, subprocess, hostname,
+                     "RLOC to RLOC results with {} MTU: {} % Success".format(minimum, normal_ping.result))
+
+        if int(normal_ping.result) <= 70:
+            logging_warning(step, process, subprocess, hostname,
+                            "WARNING! : Packet Loss from {} to {} is below threshold of 70%, current value is {} % with low MTU".format(
+                                 hostname, rloc, normal_ping.result))
+            # print ("WARNING! : Packet Loss from {} to {} is below threshold of 70%, current value is {} % with low MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result))
+        else:
+            logging_info(step, process, subprocess, hostname,
+                         "ICMP Connectivity from {} to {} is good at {} % success rate with low MTU".format(hostname,
+                                                                                                            rloc,
+                                                                                                            normal_ping.result))
+            # print ("ICMP Connectivity from {} to {} is good at {} % success rate with low MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result))
+
+        if int(mtu_ping.result) <= 70:
+            logging_warning(step, process, subprocess, hostname,
+                            "WARNING! : Packet Loss from {} to {} is below threshold of 70%, current value is {} % with {} MTU".format(
+                                hostname, rloc, normal_ping.result, minimum))
+            # print ("WARNING! : Packet Loss from {} to {} is below threshold of 70%, current value is {} % with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
+        else:
+            logging_info(step, process, subprocess, hostname,
+                         "ICMP Connectivity from {} to {} is good at {} % success rate with {} MTU".format(hostname,
+                                                                                                           rloc,
+                                                                                                           normal_ping.result,
+                                                                                                           minimum))
+            # print ("ICMP Connectivity from {} to {} is good at {} % success rate with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
+
+def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, service):
 
         process = "dhcpTroubleshooting"
         subprocess = "[main]"
@@ -718,6 +805,12 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, service):
         edge_node_device.device_profiler(catc_name, service,step)
         hostname = edge_node_device.profiled_device.hostname
         #print(pformat(vars(edge_node_device.profiled_device), indent=4, width=1, sort_dicts=False))
+
+        if is_few is True:
+            fabric_site_id = edge_node_device.profiled_device.fabric_id
+            step, new_sourcextr = wirelessclientonboarding(step, fabric_site_id, catc_name, mac,service)
+            edge_node_device.profiled_device = new_sourcextr
+            hostname = edge_node_device.profiled_device.hostname
 
         subprocess = "[macLearning]"
         msg1 = "DHCP - Layer 2"
@@ -813,7 +906,7 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, service):
         lisp_info = edge_node_device.lispparameters_info
         sisf_info = edge_node_device.sisfparameters_info
         lisp_parameters_validation_edge(lisp_info,pub_sub_flag,step,dhcp_info,sisf_info)
-
+        iid = lisp_info.iid
         #Recursion to CEF (LISP)
         subprocess = "[edgeNodeForwarding]"
         msg1 = "DHCP - CEF, Route Recursion and RLOC Reachability"
@@ -825,6 +918,7 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, service):
         #Sanitize map-caches to remove repeated ones, also purge RLOCs not in "up" state
         forwarding_prefixes = []
         for map_cache in map_caches:
+
             helper_address = map_cache.requested_eid
             rlocs = map_cache.rlocs
             new_rlocs = [rloc for rloc in rlocs if rloc.get('state') == 'up']
@@ -835,14 +929,31 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, service):
             if len(new_rlocs) != 0:
                 forwarding_prefixes.append(prefixes)
 
-        edge_node_device.forwarding_parameters(forwarding_prefixes,service,step)
-
         #Recursion to CEF Underlay
         subprocess = "[edgeNodeForwarding]"
         msg1 = "DHCP - Underlay Route Recursion and RLOC Reachability"
         message = f"DHCP Troubleshooting: Recursing CEF Route on the Underlay"
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
+
+        edge_node_device.forwarding_parameters(forwarding_prefixes,service,step)
+        rlocs = edge_node_device.final_rlocs
+        ports = edge_node_device.underlay_ports
+        #Connectivity Tests
+        subprocess = "[underlayReachability]"
+        msg1 = "DHCP - Underlay Reachability"
+        message = f"DHCP Troubleshooting: Verifying reachability between Edge and destination RLOC"
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+        rloc_reachability(ports,hostname,service,rlocs,step)
+        srcip = edge_node_device.loopback
+        dstip = forwarding_prefixes[0]['prefix']
+        iid = 4099
+        #Border Troubleshooting
+        border_objects, step = border_ip_transit(step,catc_name,fabric_id,vrf,vlan,srcip,dstip,service,True,iid)
+
+
 
 
 
