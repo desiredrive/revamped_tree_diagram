@@ -3,7 +3,6 @@ from device_profiler import Device
 from radkit_cli import logging_info, logging_error, get_catc_api, get_hostname_from_mgmtip
 import re
 
-
 def is_version_valid(version_string, minimum_version="2.3.7"):
     version_part = version_string.split('-')[0]
     version_numbers = list(map(int, version_part.split('.')))
@@ -78,6 +77,7 @@ def get_network_device_byuuid(uuid,catc,service):
         return None
     else:
         return mgmtip
+
 def get_network_device_byuuid_detailed(uuid,catc,service):
     # Get Network_Device Management IP by UUID
     api_url = "/dna/intent/api/v1/network-device/{}".format(uuid)
@@ -90,6 +90,7 @@ def get_network_device_byuuid_detailed(uuid,catc,service):
         return None
     else:
         return mgmtip, status, hostname
+
 def profile_devices_with_ip(step,ip,catc,service):
     #Warning, Do not use with anycast GW IPs! It can take long processing times; restricting the entry for maximum 4 entries
     deviceswithip = get_device_from_ip(ip, catc, service)

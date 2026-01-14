@@ -18,12 +18,14 @@ class CDPinfo:
                 platform = cdpintf_op['index'][i]['platform']
                 localinterface = cdpintf_op['index'][i]['local_interface']
                 remoteinterface = cdpintf_op['index'][i]['port_id']
+                capabilities = cdpintf_op['index'][i]['capabilities']
                 cdpneighborinfo = {
                     'device_id': device_id,
                     'management_addresses': management_addresses,
                     'platform': platform,
                     'localinterface': localinterface,
-                    'remoteinterface': remoteinterface
+                    'remoteinterface': remoteinterface,
+                    'capabilities' : capabilities
                 }
                 cdpneighbors.append(cdpneighborinfo)
             self.cdpneighbors = cdpneighbors

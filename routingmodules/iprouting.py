@@ -66,7 +66,7 @@ class IPRoute:
         else:
          #If specific route does not exist: aka, validate if default route exists:
             prefix = "0.0.0.0 0.0.0.0"
-            iproute_cmd = "show ip route {} {}".format(prefix, vrf_mode, self.vrf)
+            iproute_cmd = "show ip route {} {}".format(vrf_mode,prefix)
             iproute_output = get_single_output_genie(self.hostname,iproute_cmd,service)
             if iproute_output is None:
                 subprocess = "[rib]"

@@ -268,7 +268,7 @@ class physical_recursion():
                     # raise BDBTaskError("Error: {} | {}".format(error, message))
                     sys.exit("Error: {} | {}".format(error, message))
 
-                if type(mac_ports)  == list:
+                if type(mac_ports) is list:
                     for i in mac_ports.port:
                         if "Po" in i:
                             phys = etherchannel.etherchannel_parse(i, self.hostname)

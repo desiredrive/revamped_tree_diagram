@@ -290,6 +290,12 @@ class BGP:
         bgpsumop = get_single_output_genie(hostname,bgpsumcmd,service)
         self.bgsum = bgpsumop
 
+    def bgp_sum(self,service):
+        hostname = self.hostname
+        bgpsumcmd = f"show ip bgp summary"
+        bgpsumop = get_single_output_genie(hostname,bgpsumcmd,service)
+        self.bgsum = bgpsumop
+
     def bgp_rib_vrf(self,route,service):
         hostname = self.hostname
         vrf = self.vrf
@@ -337,6 +343,22 @@ class BGPNeighbor:
         weight = int(m.group(1)) if m else 0
         bgpneiop["default_weight"] = weight
         self.bgpneighbor = bgpneiop
+
+    def bgp_neighbor(self, service):
+        hostname = self.hostname
+        neighborip = self.neighborip
+        bgpneicmd = f"show ip bgp neighbor {neighborip}"
+        bgpneiop = get_single_output_genie(hostname,bgpneicmd,service)
+        bgpneicmd = f"show ip bgp neighbor {neighborip} | i Default weight|Route map for incoming|VPNv4"
+        bgpweightop = get_any_single_output(hostname,bgpneicmd,service)
+        m = re.search(r"\bDefault weight\s+(\d+)\b", bgpweightop or "", re.IGNORECASE)
+        weight = int(m.group(1)) if m else 0
+        bgpneiop["default_weight"] = weight
+        is_vpnv4_enabled = bool(
+            re.search(r"Address family VPNv4 Unicast:\s+advertised and received", bgpweightop, re.IGNORECASE))
+
+        self.bgpneighbor = bgpneiop
+        self.is_vpnv4_enabled = is_vpnv4_enabled
 
     def bgp_neighbor_route_maps(self,service):
         hostname = self.hostname

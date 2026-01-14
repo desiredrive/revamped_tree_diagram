@@ -2,7 +2,7 @@ import sys
 import re
 import ipaddress
 from collections import defaultdict
-from catalystcenterapi.catcapi import find_control_plane
+from catalystcenterapi.catcapi import find_control_plane, getFabricCPs
 from device_profiler import Device
 from ipverifications import (
    mac_address_validator,
@@ -18,7 +18,7 @@ from securitymodules.type7decryptor import decrypt_password
 from switchingmodules.interfaces import Interfaces
 from switchingmodules.maclearning import mac_learning
 from routingmodules.lisp import l2lisp_info, LISPLocalDB, LISPEIDWatch, lisp_map_servers, LISPInstanceStatus, \
-    LISPSession, L2LISPControlPlane
+    LISPSession, L2LISPControlPlane, L3Device
 from radkit_cli import logging_info,logging_error,logging_warning
 from traffic_flows.core import CoreDevice, cpu_utilization_warning, cpu_platform_utilization_warning
 from traffic_flows.operational_tests import Ping
@@ -63,7 +63,7 @@ class EIDIdentification:
         self.device = device
         self.eid = eid
 
-    def eid_identification(self,vlan,vrf,service,step):
+    def eid_identification(self,vlan,vrf,service,step,fabric_id,catc):
         #If the EID is a MAC address, it must come from L2SISF.
         #If the EID is an IPv4 address but the AR flag is set, treat it as AR binding
         #If the EID is an IPv4 address, it must be a /32 to NOT be Dynamic EID
@@ -147,68 +147,143 @@ class EIDIdentification:
                     is_mac_dyn = True
             is_mac_static = False
             if is_mac_dyn is False:
-                print ("MAC Address {} not found in Dynamic EID for IID {} searching for Static Binding".format(eid,iid))
+                msg1 = "LISP - EID Lookup"
+                message = f"MAC address {eid} not found in Dynamic EID table for IID {iid}; proceeding to search for Static Binding."
+                logging_info(step, process, subprocess, device, msg1 + " | " + message)
                 #3. Search for static DB if any
                 lispdb.L2LISPStaticDB(service)
                 for mac in lispdb.static_mappings:
                     if eid == mac:
-                        print("MAC Address {} not found in Dynamic EID for IID {} but it is configured as Static Binding, this is not standard SD-Access Configuration".format(eid,iid))
+                        msg1 = "LISP - Static Binding Detected"
+                        message = (
+                            f"MAC address {eid} not found in Dynamic EID for IID {iid} but is configured as a Static Binding. "
+                            f"Finding: This is a non-standard SD-Access configuration. Remediation: Verify if the static binding is "
+                            f"intentional or if the endpoint should be learned dynamically via the fabric."
+                        )
+                        logging_info(step, process, subprocess, device, msg1 + " | " + message)
                         is_mac_static = True
-
 
             # 4. If not in any of these methods:
             if is_mac_dyn is False and is_mac_static is False:
-                print ("WARNING!: MAC Address {} not found in Dynamic EID for IID {} neither as Static Binding, verifying LISP limits".format(eid,iid))
+                msg1 = "LISP - EID Lookup Failure"
+                message = (
+                    f"Finding: MAC address {eid} not found in Dynamic EID or Static Binding for IID {iid}. "
+                    f"Action: Verifying LISP database limits to identify potential capacity or registration issues."
+                )
+                logging_warning(step, process, subprocess, device, msg1 + " | " + message)
+                step += 1
+
                 lispdb.LISPDBLimits(qtype, service)
                 if lispdb.total_database is None:
-                    sys.exit("Unable to retrieve LISPDB statistics from IID {}, parser exception".format(iid))
+                    error = "LISP - Parser Exception"
+                    message = (
+                        f"Finding: Unable to retrieve LISP database statistics for IID {iid} due to a parser exception. "
+                        f"Remediation: Verify device connectivity via RADKit and ensure the CLI output format matches the expected Genie parser version."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
                 else:
+                    # Check specific table limits
                     if is_mac_static is True and lispdb.static_database_pr > 97:
-                        sys.exit("WARNING!: MAC Address {} is Static Binding for IID {}, total utilization of Static Bindings exceed 97%".format(
-                                eid, iid))
-                    elif is_mac_static is False and lispdb.dynamic_database_pr  > 97:
-                        sys.exit("WARNING!: MAC Address {} is DynEID for IID {}, total utilization of Database Bindings exceed 97%".format(
-                                eid, iid))
+                        error = "LISP - Static Table Exhaustion"
+                        message = (
+                            f"Finding: MAC address {eid} is a static binding, but static database utilization for IID {iid} exceeds 97%. "
+                            f"Remediation: Prune obsolete static bindings or increase the database limit configuration."
+                        )
+                        exit_program(step, process, subprocess, device, error, message)
+
+                    elif is_mac_static is False and lispdb.dynamic_database_pr > 97:
+                        error = "LISP - Dynamic Table Exhaustion"
+                        message = (
+                            f"Finding: MAC address {eid} is a dynamic entry, but dynamic database utilization for IID {iid} exceeds 97%. "
+                            f"Remediation: Review endpoint aging timers or increase the dynamic database limit."
+                        )
+                        exit_program(step, process, subprocess, device, error, message)
+
                     else:
-                        print("MAC Address {} not found in Dynamic EID for IID {} neither as Static Binding, verifying Global LISP Limits".format(eid,iid))
+                        msg1 = "LISP - Global Limit Check"
+                        message = f"Finding: MAC {eid} not found in local tables for IID {iid}. Action: Verifying Global LISP Database limits."
+                        logging_info(step, process, subprocess, device, msg1 + " | " + message)
+                        step += 1
+
                         if lispdb.global_database_usage_pr > 97:
-                            sys.exit("WARNING!: MAC Address {} is DynEID for IID {}, total utilization of Total Database Bindings exceed 97%".format( eid, iid))
+                            error = "LISP - Global Database Exhaustion"
+                            message = (
+                                f"Finding: Total LISP database utilization exceeds 97%. "
+                                f"Remediation: Audit total EID registrations across all VNIs and increase global LISP limits if hardware resources permit."
+                            )
+                            exit_program(step, process, subprocess, device, error, message)
                         else:
-                            print ("MAC Address {} is DynEID for IID {}, total utilization of Total Database Bindings below 97%, verifying EID Watch state".format( eid, iid))
-                            eidwatch = LISPEIDWatch(device,iid)
-                            eidwatch.eidwatch_status(qtype,'SISF client',service)
+                            msg1 = "LISP - EID Watch Check"
+                            message = f"Finding: LISP database utilization is below 97%. Action: Verifying SISF-LISP EID Watch state."
+                            logging_info(step, process, subprocess, device, msg1 + " | " + message)
+                            step += 1
+
+                            eidwatch = LISPEIDWatch(device, iid)
+                            eidwatch.eidwatch_status(qtype, 'SISF client', service)
+
                             if eidwatch.processid is None:
-                                sys.exit( "EID Watch process for LISP IID {} not found, unable to retrieve any more details".format(iid))
+                                error = "LISP - EID Watch Process Missing"
+                                message = (
+                                    f"Finding: EID Watch process for LISP IID {iid} was not found. "
+                                    f"Remediation: Verify if SISF is enabled on the interface and check for platform software defects related to the LISP process."
+                                )
+                                exit_program(step, process, subprocess, device, error, message)
                             else:
                                 if eidwatch.connection_status != 'ENABLED':
-                                    sys.exit("EID Watch process for LISP IID {} found with process {}, connection to LISP process is {} SISF-LISP process is impacted".format(iid,eidwatch.processid,eidwatch.connection_status))
+                                    error = "LISP - SISF-LISP Disconnected"
+                                    message = (
+                                        f"Finding: EID Watch process {eidwatch.processid} for IID {iid} is in state '{eidwatch.connection_status}'. "
+                                        f"Remediation: The SISF-to-LISP communication channel is impacted. Restart the LISP process or check for internal software errors."
+                                    )
+                                    exit_program(step, process, subprocess, device, error, message)
                                 else:
-                                    sys.exit("EID Watch process for LISP IID {} found with process {}, connection to LISP process is {} unable to determine root cause".format(iid,eidwatch.processid,eidwatch.connection_status))
-            #L2DB State
+                                    error = "LISP - Registration Root Cause Unknown"
+                                    message = (
+                                        f"Finding: EID Watch process {eidwatch.processid} is ENABLED, but MAC {eid} is not being registered. "
+                                        f"Remediation: Perform a 'debug lisp cp all' and 'debug device-tracking' to identify why the SISF trigger is not reaching the LISP database."
+                                    )
+                                    exit_program(step, process, subprocess, device, error, message)
+            # L2DB State
             lispdb.LISPDBEntry(qtype, service)
 
             if lispdb.address_family is None:
-                print("MAC Address {} not found in LISP Database for IID {} ".format(eid,iid))
-                if  lispdb.static_database_pr > 97:
-                    sys.exit("WARNING!: MAC Address {} not found LISP Database {}, total utilization of Static Bindings exceed 97%".format(
-                            eid, iid))
+                msg1 = "LISP - Database Missing Entry"
+                message = f"Finding: MAC address {eid} is not present in the LISP Database for IID {iid}."
+                logging_warning(step, process, subprocess, device, msg1 + " | " + message)
+                step += 1
+
+                if lispdb.static_database_pr > 97:
+                    error = "LISP - Static Resource Exhaustion"
+                    message = f"Finding: Static binding limit exceeded (>97%). Remediation: Prune obsolete static entries."
+                    exit_program(step, process, subprocess, device, error, message)
                 elif lispdb.dynamic_database_pr > 97:
-                    sys.exit("WARNING!: MAC Address {} not found LISP Database {}, total utilization of Database Bindings exceed 97%".format(
-                            eid, iid))
+                    error = "LISP - Dynamic Resource Exhaustion"
+                    message = f"Finding: Dynamic binding limit exceeded (>97%). Remediation: Increase dynamic database limits."
+                    exit_program(step, process, subprocess, device, error, message)
                 else:
-                    print("MAC Address {} not found LISP Database for IID {} neither as Static Binding, verifying Global LISP Limits".format(
-                            eid, iid))
                     if lispdb.global_database_usage_pr > 97:
-                        sys.exit("WARNING!: MAC Address {} not found LISP Database for IID {}, total utilization of Total Database Bindings exceed 97%".format(
-                                eid, iid))
+                        error = "LISP - Total Resource Exhaustion"
+                        message = f"Finding: Global LISP database limit exceeded (>97%). Remediation: Audit total fabric scale."
+                        exit_program(step, process, subprocess, device, error, message)
             else:
                 db_method = lispdb.eid_origin
                 if len(lispdb.locators) == 0:
-                    sys.exit("MAC Address {} is LISP Database for IID {} but no RLOC is configured, verify if the Loopback0 interface is defined as RLOC".format(eid, iid))
+                    error = "LISP - Missing RLOC Definition"
+                    message = (
+                        f"Finding: MAC {eid} exists in the LISP Database for IID {iid}, but no RLOC is associated. "
+                        f"Remediation: Ensure the Loopback0 interface is correctly defined as an RLOC in the locator-set."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
                 else:
                     db_status = True
+
                 if len(lispdb.mapservers) == 0:
-                    sys.exit("MAC Address {} is LISP Database for IID {} but no Map_Server is configured, verify if Map_Servers are defined in the L2LISP IID".format(eid, iid))
+                    error = "LISP - Missing Map-Server Config"
+                    message = (
+                        f"Finding: MAC {eid} exists in the LISP Database, but no Map-Servers are configured for IID {iid}. "
+                        f"Remediation: Verify that Map-Servers are defined under the L2LISP instance configuration."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
                 else:
                     reg_status = lispdb.mapservers
 
@@ -218,7 +293,42 @@ class EIDIdentification:
         self.db_method = db_method
         self.db_status = db_status
         self.mapservers = reg_status
+
         #return eid, eid_type, origin, origin_state, iid, db_method, db_status, reg_status
+
+
+
+
+        # L3 Identification, not limited to EID for registration, as PubSub requires LISP session between Borders and CPs
+        if eid_type == "IPv4Subnet":
+            #Get the Fabric Control Planes (Reachable Only)
+            control_planes = in_site_control_Planes(fabric_id,catc,service,step)
+            local_cps_site = []
+            for control_plane in control_planes:
+                profiled_device = getattr(control_plane, "profiled_device", None)
+                loopback = getattr(profiled_device, "loopback", None)
+                if loopback is not None:
+                    local_cps_site.append(loopback)
+            lispvrf = L3Device(vrf,device)
+            lispvrf.lispiid(service)
+            iid = getattr(lispvrf, "iid", None)
+            lisp = LISPLocalDB(eid, iid, device)
+            lisp.LISPDBEntry("ipv4", service)
+            self.iid = iid
+            self.eid_type = eid_type
+            self.origin_state = None
+            self.origin = getattr(lisp, "eid_origin", None)
+            self.db_method = getattr(lisp, "eid_origin", None)
+            # 2. Determine db_status based on the presence of 'locators'
+            locators = getattr(lisp, "locators", None)
+            self.db_status = True if locators is not None else False
+            # 3. Get the map_servers object
+            getattr(lisp, "mapservers", None)
+            sanitized_map_servers = [
+                item for item in getattr(lisp, "mapservers", None)
+                if item.get('map_server') in local_cps_site
+            ]
+            self.mapservers = sanitized_map_servers
 
 class ETRConfiguration:
     def __init__(self,device):
@@ -276,14 +386,20 @@ class ETRDevice:
         devprof = Device(self.mgmtip,catc,self.step)
         devprof.profile_device(service)
         self.profiled_device = devprof
+        self.catc = catc
+        self.fabric_id = devprof.fabric_id
 
     def existing_profiled(self, profiled_device):
         self.profiled_device = profiled_device
+        self.fabric_id = profiled_device.fabric_id
+        self.catc = profiled_device.dnac
 
     def eid_identification(self,eid,vlan,vrf,step,service):
         hostname = self.profiled_device.hostname
+        fabric_id = self.fabric_id
+        catc = self.catc
         eid_properties = EIDIdentification(hostname, eid)
-        eid_properties.eid_identification(vlan,vrf,service,step)
+        eid_properties.eid_identification(vlan,vrf,service,step,fabric_id, catc)
         self.eid_properties = eid_properties
 
     def cp_configuration(self,iid,service):
@@ -345,10 +461,41 @@ class ETRDevice:
         cpu.cpu_utilization_platform(service)
         self.cpu_statistics = cpu
 
+class ControlPlaneDevice:
+    def __init__(self, mgmtip):
+        self.mgmtip = mgmtip
+
+    def device_profiler(self, catc,service,step):
+        devprof = Device(self.mgmtip,catc,step)
+        devprof.profile_device(service)
+        self.profiled_device = devprof
+        hostname = devprof.hostname
+        self.hostname = hostname
+        self.ispubsub = devprof.ispubsub
+
 def exit_program(step, process, subprocess, hostname, error, message):
     logging_error(step, process, subprocess, hostname, error)
     logging_info(step, process, subprocess, hostname, message)
     sys.exit("Error: {} | {}".format(error, message))
+
+def in_site_control_Planes(fabric_id, catc,service,step):
+    #Identify Fabric ControlPlanes
+    cps = getFabricCPs(fabric_id,catc,service,step)
+    process = "eidIdentification"
+    subprocess = ['controlPlaneProfiling']
+    #For each Reachable fabric CP, profile it.
+    control_plane_objects = []
+    for cp in cps:
+        mgmt_ip = cp.get('mgmtip', 'Unknown')
+        if cp.get('status', '').lower() != 'reachable':
+            logging_warning(step, process, subprocess, catc, f"Skipping CP {mgmt_ip} - Status is Unreachable")
+            continue
+        else:
+            control_plane = ControlPlaneDevice(mgmt_ip)
+            control_plane.device_profiler(catc,service,step)
+            control_plane_objects.append(control_plane)
+
+    return control_plane_objects
 
 def parse_uptime_to_minutes(uptime_str):
     """
@@ -468,7 +615,6 @@ def unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name
     #Remove the local ETR_RLOC form the map-server list, useful when validating CP-to-CP LISP Sessions.
     while etr_rloc in map_server_ips:
         map_server_ips.remove(etr_rloc)
-
     for ip in map_server_ips:
         a = LISPSession(hostname)
         a.specificlispsession(ip, service)
@@ -523,7 +669,7 @@ def unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name
                                                specific_lisp_session)
             step = down_init_cp[0]
 
-        return step, map_server_ips,
+    return step, map_server_ips
 
 def cp_routing(step,specific_lisp_session, mapserverip,hostname,service):
     # Route Check:
@@ -991,7 +1137,7 @@ def down_init_procedure_to_etr(step,cp_hostname,etrloopback,service,cpdefinition
 
     return step
 
-def cp_configuration_validation(step,cp_configuration,vni):
+def cp_configuration_validation(step,cp_configuration,vni, isl3: bool):
     cp_hostname = cp_configuration.device
     process = "lispConfiguration"
     subprocess = "[cpConfigurationValidation]"
@@ -1021,7 +1167,7 @@ def cp_configuration_validation(step,cp_configuration,vni):
         message = "LISP Control Plane {} does not have an authentication key configured under site_uci, correct this configuration under router-lisp".format(
             cp_hostname)
         exit_program(step, process, subprocess, cp_hostname, error, message)
-    if cp_configuration.iid_site is not True:
+    if cp_configuration.iid_site is not True and isl3 is False:
         error = "LISP Control Plane - Control Plane Configuration"
         message = "LISP Control Plane {} does not have LISP IID {} configured under site_uci, correct this configuration under router-lisp".format(
             cp_hostname,vni)
@@ -1242,6 +1388,10 @@ def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
     eid_type = etrdefinition.eid_properties.eid_type
     if eid_type == "MAC":
         servicetype = "ethernet"
+        isl3 = False
+    if eid_type == "IPv4Subnet":
+        servicetype = "ipv4"
+        isl3 = True
     etrdefinition.eid_configuration(etrdefinition.eid_properties,servicetype,service)
     step = step + 1
 
@@ -1271,10 +1421,13 @@ def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
     # LISP Session Specific Status (Only to map-servers)
     vni = etrdefinition.eid_properties.iid
     eid_map_servers = etrdefinition.eid_properties.mapservers
-
     step,map_server_ips = unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name, etrdefinition, vni)
 
-    ## Highlight on UPtime Status (flapping) criteria - Less than 5 minutes.
+    if len(map_server_ips) is None:
+        msg = "LISP Specific Sessions - Local CP"
+        message = f"Device {hostname} is the sole Control Plane for the fabric site; skipping self-referential validations for this node."
+        logging_info(step, process, subprocess, hostname, msg + " | " + message)
+
     step = step + 1
     for ip_address, sessions_list in lisp_sessions.items():
         for session in sessions_list:
@@ -1320,7 +1473,7 @@ def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
             control_plane.cp_configuration(vni,service)
             #Validations
             cp_configuration = control_plane.cp_configuration
-            cp_configuration_validation(step,cp_configuration, vni)
+            cp_configuration_validation(step,cp_configuration, vni,isl3)
 
             # 24 Authentication Counters for EID in both ETR and MS/MR (looking for logs as well?)
             step = step + 1
@@ -1421,7 +1574,6 @@ def singleETRLISPSessionOnlyFEW(mgmtip,vni,vrf,catc_name,service,step,sourcextr,
     eid_type = "MAC"
     if eid_type == "MAC":
         servicetype = "ethernet"
-
     eid_properties = SimpleNamespace()
     eid_properties.mapservers = eid_map_servers
 
@@ -1501,7 +1653,7 @@ def singleETRLISPSessionOnlyFEW(mgmtip,vni,vrf,catc_name,service,step,sourcextr,
             control_plane.cp_configuration(vni,service)
             #Validations
             cp_configuration = control_plane.cp_configuration
-            cp_configuration_validation(step,cp_configuration, vni)
+            cp_configuration_validation(step,cp_configuration, vni, False)
 
             # 24 Authentication Counters for EID in both ETR and MS/MR (looking for logs as well?)
             step = step + 1
@@ -1719,7 +1871,7 @@ def fabricEnabledWirelessSession(wlcinfo,fabric_id: None, step, catc_name, endpo
 
             # Validations
             cp_configuration = control_plane.cp_configuration
-            cp_configuration_validation(step, cp_configuration, vnid)
+            cp_configuration_validation(step, cp_configuration, vnid,False)
 
             # Passive Open
             few_ips = control_plane.cp_configuration.wlc_locator_ips

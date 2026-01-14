@@ -1,18 +1,23 @@
 from pprint import pformat
 
 from asn1crypto.core import Boolean
+from re import search
 
+from pysnmp.entity.rfc3413.config import getTargetNames
 from device_profiler import Device
 from ipverifications import subnetvalidation
-from routingmodules.cef import phy_cef_collection
+from routingmodules.cef import phy_cef_collection, IPCef
 from routingmodules.lisp import L3Device, CEFForwardingState
+from securitymodules.accesslists import acl_evaluation, AccessList
+from securitymodules.authenticationsession import authen_session_for_interface
+from switchingmodules.cdp import CDPinfo
 from switchingmodules.dhcp import DHCPDevice
 from switchingmodules.interfaces import Interfaces
 from switchingmodules.maclearning import mac_learning
 from radkit_cli import logging_info, logging_error, logging_warning, get_catc_api
 import sys
-
 from switchingmodules.sisf import SISF
+from switchingmodules.vacl import get_vacl_drop_acls
 from traffic_flows.iptransit import border_ip_transit
 from traffic_flows.lispsessiontroubleshooting import singleETRProfiling
 from traffic_flows.operational_tests import Ping
@@ -54,9 +59,31 @@ class EdgeNodeClassifier:
 
     def maclearning(self,mac, vlan, service):
         hostname = self.profiled_device.hostname
+        self.mac = mac
+        self.vlan = vlan
         mac_learning_info = mac_learning(hostname)
         mac_learning_info.mac_learning_mac(mac,vlan,service)
         self.mac_learning_info = mac_learning_info
+
+    def cdpinfo(self,service):
+        maclearninginfo = self.mac_learning_info
+        hostname = self.profiled_device.hostname
+        self.port = maclearninginfo.port
+        cdpneighbor = CDPinfo(hostname)
+        cdpneighbor.cdpneighborinterface(self.port,service)
+        neighbors_list = (
+                             cdpneighbor.get('cdpneighbors', [])
+                             if isinstance(cdpneighbor, dict)
+                             else getattr(cdpneighbor, 'cdpneighbors', [])
+                         ) or []
+        self.cdpneighborhost = neighbors_list
+
+    def authenticationsession(self,service):
+        maclearninginfo = self.mac_learning_info
+        hostname = self.profiled_device.hostname
+        port = maclearninginfo.port
+        authensessiondetails = authen_session_for_interface(hostname,port,service)
+        self.authensessiondetails = authensessiondetails
 
     def dhcpparameters(self,vlan,service):
         hostname = self.profiled_device.hostname
@@ -70,6 +97,20 @@ class EdgeNodeClassifier:
         dhcpparameters.svi_configuration(vlan,service)
         dhcpparameters.svi_running_config(vlan,service)
         self.dhcpparameters_info = dhcpparameters
+
+    def dhcpsnoopingclientstats(self,service,step):
+        hostname = self.profiled_device.hostname
+        mac = self.mac
+        anycastgw = self.dhcpparameters_info.prefix
+        helpers =  self.dhcpparameters_info.helper_address
+        dhcpsnoopingclientstatistics = DHCPDevice(hostname)
+        dhcpsnoopingclientstatistics.dhcpsnoopclientstat(mac,anycastgw,helpers,service,step)
+
+    def raclvaclpacl(self,service,step):
+        hostname = self.profiled_device.hostname
+        acls, vacls = local_policies(self.dhcpparameters_info,hostname,self.vlan,self.port,service,step)
+        self.edgeacls = acls
+        self.edgevacls = vacls
 
     def sisf_parameters(self,service):
         hostname = self.profiled_device.hostname
@@ -441,6 +482,414 @@ def dhcp_parameters_validation(dhcpparameters_info,interface,vlan,step):
                 )
                 exit_program(step, process, subprocess, hostname, error, message)
 
+def acl_hit_procedure(edge_node_device,acl,service,step):
+    hostname = edge_node_device.profiled_device.hostname
+    process = "fabricEdge"
+    subprocess = "aclSecurityValidation"
+
+    # Define the two directions of the DHCP flow
+    flows = [
+        {
+            "description": "DHCP Discover (Client to Server)",
+            "params": {
+                "sourceip": "0.0.0.0",
+                "destinationip": "255.255.255.255",
+                "protocol": "udp",
+                "srcport": 68,
+                "dstport": 67
+            }
+        },
+        {
+            "description": "DHCP Offer (Server to Client)",
+            "params": {
+                "sourceip": "0.0.0.0",  # Note: In a real flow, this would be the Server IP
+                "destinationip": "255.255.255.255",
+                "protocol": "udp",
+                "srcport": 67,
+                "dstport": 68
+            }
+        }
+    ]
+
+    for flow in flows:
+        flow_desc = flow["description"]
+        # Perform the ACL evaluation
+        hit = acl_evaluation(service, hostname, acl, False, flow["params"])
+        action = hit[1].lower() if len(hit) > 1 else "unknown"
+
+        if action == 'deny':
+            error = "ACL Validation - Traffic Denied"
+            message = (
+                f"Security Policy Violation: ACL '{acl}' on {hostname} is explicitly denying {flow_desc}. "
+                f"Traffic flow: {flow['params']}. Remediation: Update the dACL/ACL on the AAA server or "
+                f"device configuration to permit DHCP traffic."
+            )
+            exit_program(step, process, subprocess, hostname, error, message)
+
+        elif action == 'permit':
+            msg1 = "ACL Validation - Traffic Permitted"
+            message = f"Security Policy Pass: ACL '{acl}' on {hostname} permits {flow_desc}."
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+    return step
+
+def racl_hit_procedure(edge_node_device,acl,service,step):
+    hostname = edge_node_device.profiled_device.hostname
+    process = "fabricEdge"
+    subprocess = "aclSecurityValidation"
+
+    # Define the two directions of the DHCP flow
+    flows = [
+        {
+            "description": "DHCP Discover (Client to Server)",
+            "params": {
+                "sourceip": "0.0.0.0",
+                "destinationip": "255.255.255.255",
+                "protocol": "udp",
+                "srcport": 68,
+                "dstport": 67
+            }
+        },
+        {
+            "description": "DHCP Offer (Server to Client)",
+            "params": {
+                "sourceip": "0.0.0.0",  # Note: In a real flow, this would be the Server IP
+                "destinationip": "255.255.255.255",
+                "protocol": "udp",
+                "srcport": 67,
+                "dstport": 68
+            }
+        }
+    ]
+
+    for flow in flows:
+        flow_desc = flow["description"]
+        # Perform the ACL evaluation
+        hit = acl_evaluation(service, hostname, acl, False, flow["params"])
+        action = hit[1].lower() if len(hit) > 1 else "unknown"
+
+        if action == 'deny':
+            error = "ACL Validation - Traffic Denied"
+            message = (
+                f"Security Policy Violation: RACL/PACL '{acl}' on {hostname} on SVI or Port is explicitly denying {flow_desc}. "
+                f"Traffic flow: {flow['params']}. Remediation: Update the ACL on the "
+                f"device configuration to permit DHCP traffic."
+            )
+            exit_program(step, process, subprocess, hostname, error, message)
+
+        elif action == 'permit':
+            msg1 = "ACL Validation - Traffic Permitted"
+            message = f"Security Policy Pass: RACL/PACL '{acl}' on {hostname} permits {flow_desc}."
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+    return step
+
+def vacl_hit_procedure(edge_node_device,acl,service,step):
+    hostname = edge_node_device.profiled_device.hostname
+    process = "fabricEdge"
+    subprocess = "aclSecurityValidation"
+
+    # Define the two directions of the DHCP flow
+    flows = [
+        {
+            "description": "DHCP Discover (Client to Server)",
+            "params": {
+                "sourceip": "0.0.0.0",
+                "destinationip": "255.255.255.255",
+                "protocol": "udp",
+                "srcport": 68,
+                "dstport": 67
+            }
+        },
+        {
+            "description": "DHCP Offer (Server to Client)",
+            "params": {
+                "sourceip": "0.0.0.0",  # Note: In a real flow, this would be the Server IP
+                "destinationip": "255.255.255.255",
+                "protocol": "udp",
+                "srcport": 67,
+                "dstport": 68
+            }
+        }
+    ]
+
+    for flow in flows:
+        flow_desc = flow["description"]
+        # Perform the ACL evaluation
+        hit = acl_evaluation(service, hostname, acl, False, flow["params"])
+        action = hit[1].lower() if len(hit) > 1 else "unknown"
+
+        if action == 'permit':
+            error = "ACL Validation - Traffic Denied"
+            message = (
+                f"Security Policy Violation: VACL '{acl}' on {hostname} is explicitly denying {flow_desc}. "
+                f"Traffic flow: {flow['params']}. Remediation: Update the VACL on the "
+                f"device configuration to permit DHCP traffic."
+            )
+            exit_program(step, process, subprocess, hostname, error, message)
+
+        elif action == 'deny':
+            msg1 = "ACL Validation - Traffic Permitted"
+            message = f"Security Policy Pass: VACL '{acl}' on {hostname} permits {flow_desc}."
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+    return step
+
+def validate_authentication_sessions(edge_node_device,step,service):
+    process = "fabricEdge"
+    subprocess = "authenticationValidation"
+    hostname = getattr(edge_node_device, "hostname", "Unknown") if edge_node_device else "Unknown"
+    maclearninginfo = edge_node_device.mac_learning_info
+    interface_name = maclearninginfo.port
+    target_mac = maclearninginfo.mac
+
+    auth_details = getattr(edge_node_device, "authensessiondetails", None) if edge_node_device else None
+    if auth_details is None:
+        msg1 = "Auth Session - No Configuration"
+        message = f"There is no authentication session state available for interface {interface_name}, which means there is no authentication configured for the host."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        return step + 1
+
+    # --- PART 1: Interface Type (Ac / AccessTunnel) ---
+    if interface_name.startswith(("Ac", "AccessTunnel")):
+        acro_sessions = getattr(auth_details, "acrosessions", {})
+        client_acro = next((s for s in acro_sessions if s.get("mac_address") == target_mac), None)
+
+        if client_acro:
+            if client_acro.get("authorized") is False:
+                error = "Auth Session - Bridge Mode VM Unauth"
+                message = f"Endpoint {target_mac} is a Bridge Mode VM endpoint and has not been authenticated by MAB."
+                exit_program(step, process, subprocess, hostname, error, message)
+            else:
+                msg1 = "Auth Session - ACRO Pass"
+                message = f"Endpoint {target_mac} is a validated Bridge Mode VM endpoint (Authorized)."
+                logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
+        return step
+
+    # --- PART 2: Normal Interface (Template & Session Logic) ---
+    interface_dict = getattr(auth_details, "templateinterface", {}).get("interface", {})
+    # 2. Try a direct match first (just in case)
+    template_info = interface_dict.get(interface_name, {})
+    # 3. If no direct match, find the key that contains the same interface numbers
+    if not template_info:
+        # Extract numbers like '1/0/5' from 'Te1/0/5'
+        match_numbers = search(r'\d+(/\d+)+', interface_name)
+        if match_numbers:
+            target_num = match_numbers.group()  # This is '1/0/5'
+            for full_name, data in interface_dict.items():
+                # Check if '1/0/5' is in 'TenGigabitEthernet1/0/5'
+                if target_num in full_name:
+                    template_info = data
+                    break
+    template_name = template_info.get("method", {}).get("static", {}).get("template_name")
+
+    if not template_name:
+        msg1 = "Auth Session - No Template"
+        message = f"No authentication template is bound to interface {interface_name}."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        return step + 1
+
+    # 1. Safely get the 'templateconfig' dictionary from the object
+    config_dict = getattr(auth_details, "templateconfig", {})
+    # 2. Get the specific configuration list for the template name
+    # We use (config_dict or {}) in case the attribute exists on the object but is set to None
+    config_list = (config_dict or {}).get(template_name, [])
+
+    # Determine Closed vs Open and Order of Operation
+    is_closed = any("access-session closed" in cmd for cmd in config_list)
+
+    order = "Unknown"
+    for cmd in config_list:
+        if "service-policy" in cmd:
+            if "1X_MAB" in cmd:
+                order = "dot1x then MAB"
+            elif "MAB_1X" in cmd:
+                order = "MAB then dot1x"
+
+    msg1 = "Auth Session - Template Info"
+    message = f"Interface {interface_name} using '{template_name}' ({'Closed' if is_closed else 'Open'} mode). Order: {order}."
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step += 1
+
+    # Calculate dot1x timeout if Closed and 1X_MAB
+    if is_closed and "dot1x then MAB" in order:
+        # 1. Safely get the 'dot1xinterfaceparameters' attribute from the object
+        # 2. Use 'or {}' in case the attribute exists but is set to None
+        # 3. Use .get() to find the 'parameters' key
+        dot1x_params = (getattr(auth_details, "dot1xinterfaceparameter", {}) or {}).get("parameters", {})
+        supp_timeout = dot1x_params.get("SuppTimeout", 0)
+        max_req = dot1x_params.get("MaxReq", 0)
+        total_timeout = supp_timeout * max_req
+        msg1 = "Auth Session - Timeout Calculation"
+        message = f"Calculated dot1x timeout (SuppTimeout x MaxReq): {total_timeout} seconds."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+    # --- PART 3: Live Session Data (authsessionintf) ---
+    # 1. Safely get the 'authsessionintf' attribute from the object
+    auth_session_data = getattr(auth_details, "authsessionintf", {})
+
+
+    # 2. Drill down into the nested dictionaries
+    # 1. Safely get the data (handles if 'authsessionintf' is a method or a dict)
+    raw_attr = getattr(auth_details, "authsessionintf", {})
+    auth_session_data = raw_attr() if callable(raw_attr) else raw_attr
+    # 2. Get the interfaces dictionary
+    interfaces_dict = auth_session_data.get("interfaces", {})
+    # 3. Normalize the interface name (extract numbers like '1/0/5')
+    # This turns 'Te1/0/5' or 'TenGigabitEthernet1/0/5' into '1/0/5'
+    match_numbers = search(r'\d+(/\d+)+', interface_name)
+    target_id = match_numbers.group() if match_numbers else interface_name
+    # 4. Find the matching interface key in the dictionary
+    session_intf = {}
+    # Try direct match first
+    if interface_name in interfaces_dict:
+        session_intf = interfaces_dict[interface_name]
+    else:
+        # Loop through keys to find the one containing the numbers (e.g., '1/0/5')
+        for full_name, data in interfaces_dict.items():
+            if target_id in full_name:
+                session_intf = data
+                break
+    # 5. Safely get the client session using the target MAC
+    client_session = session_intf.get("mac_address", {}).get(target_mac, {})
+
+    if not client_session:
+        msg1 = "Auth Session - No Active Session"
+        message = f"No active authentication session found for MAC {target_mac} on interface {interface_name}."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        return step + 1
+
+    # IP Address Check
+    if not client_session.get("ipv4_address") or client_session.get("ipv4_address") == "Unknown":
+        msg1 = "Auth Session - IP Missing"
+        message = f"Endpoint {target_mac} does not have an IP address yet or it is not registered in Device Tracking."
+        logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+    # Authorization Check (Error if Closed)
+    status = client_session.get("status", "")
+    if is_closed and "Authorized" not in status:
+        error = "Auth Session - Not Authorized"
+        message = f"Endpoint {target_mac} is not Authorized. Closed authentication prevents traffic until authorized."
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    # Domain Check
+    domain = client_session.get("domain", "").upper()
+    if domain == "DATA":
+        msg1 = "Auth Session - Domain"
+        message = f"Endpoint assigned to DATA domain (standard access VLAN)."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    elif domain == "VOICE":
+        msg1 = "Auth Session - Domain"
+        message = f"Endpoint assigned to VOICE domain (voice VLAN)."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step += 1
+
+    # Check for MAB configuration
+    if not any(cmd.strip() == "mab" for cmd in config_list):
+        msg1 = "Auth Session - MAB Warning"
+        message = "MAB authentication is disabled in the template; endpoints will only authenticate using dot1x."
+        logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+    cdpneighborlist = getattr(edge_node_device, "cdpneighborhost", []) or []
+
+    if len(cdpneighborlist) > 1:
+        msg1 = "Auth Session - CDP Discovery"
+        message = "Multiple CDP neighbors exist on this interface; cannot determine the primary device. Skipping phone-specific identification."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+    elif len(cdpneighborlist) == 1:
+        neighbor = cdpneighborlist[0]
+        capabilities = neighbor.get('capabilities', '')
+        # Check if the neighbor is a phone based on CDP capabilities
+        is_phone = "Phone" in str(capabilities)
+        if is_phone:
+            # Check if the authentication template contains the pre-auth voice vlan 2046
+            # 'config_list' is the list of commands from the templateconfig attribute
+            has_voice_vlan = any("switchport voice vlan 2046" in cmd for cmd in config_list)
+            if has_voice_vlan:
+                msg1 = "Auth Session - Voice VLAN Warning"
+                message = (
+                    f"Neighbor {neighbor.get('device_id')} identified as an IP Phone. "
+                    "Some phone models might negatively react to the presence of a pre-auth voice vlan (2046) in the template."
+                )
+                logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
+
+    # Check for PAE Authenticator (Required)
+    if not any("dot1x pae authenticator" in cmd for cmd in config_list):
+        error = "Auth Session - PAE Missing"
+        message = "The 'dot1x pae authenticator' setting is missing from the template; this is required for the authentication session to start."
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    # Host Mode Check
+    host_mode = client_session.get("oper_host_mode", "")
+    mode_msgs = {
+        "multi-auth": "Multiple endpoints are allowed to be authenticated on this interface.",
+        "multi-domain": "A single data and a single voice endpoint are allowed on this interface.",
+        "single-host": "Only a single endpoint is allowed on this interface."
+    }
+    msg1 = "Auth Session - Host Mode"
+    message = mode_msgs.get(host_mode, f"Host mode: {host_mode}")
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step += 1
+
+    # Wake On Lan (Control Direction)
+    control_dir = client_session.get("oper_control_dir", "")
+    if control_dir == "both":
+        msg1 = "Auth Session - WOL"
+        message = "Wake On Lan is disabled (control-direction both)."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    elif control_dir == "in":
+        msg1 = "Auth Session - WOL"
+        message = "Wake On Lan is enabled (control-direction in); egress traffic is permitted without authentication."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step += 1
+
+    # VLAN, SGT, and dACL Assignment
+    vlan_id = client_session.get("local_policies", {}).get("vlan_group", {}).get("vlan")
+    if vlan_id:
+        msg1 = "Auth Session - VLAN Assignment"
+        message = f"Endpoint assigned to VLAN {vlan_id} by the AAA server."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+    server_pol = client_session.get("server_policies", {})
+    for p_id, p_val in server_pol.items():
+        policy_label = p_val.get("name", "").replace(" ", "")
+
+        # Check for SGT
+        if "SGT" in policy_label:
+            msg1 = "Auth Session - SGT Assignment"
+            message = f"Endpoint assigned SGT {p_val.get('policies')} by the AAA server."
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+        # Check for dACL (ACS ACL)
+        if "ACSACL" in policy_label:
+            dacl_name = p_val.get("policies")
+            msg1 = "Auth Session - dACL Detected"
+            message = f"A Downloadable ACL (dACL) '{dacl_name}' was found assigned to endpoint {target_mac}. Beginning ACL validation tests for DHCP."
+            logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+            step = acl_hit_procedure(edge_node_device,dacl_name,service,step)
+
+    # Method Status Summary
+    methods = client_session.get("method_status", {})
+    success_method = next((m_name for m_name, m_val in methods.items() if "Success" in m_val.get("state", "")), "None")
+    msg1 = "Auth Session - Summary"
+    message = f"Authentication successful via method: {success_method}."
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    step += 1
+
+    return step
+
 def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcpparameters_info,sisf_info):
     process = "lispValidations"
     subprocess = "[lispInstanceID]"
@@ -786,6 +1235,72 @@ def rloc_reachability(ports, hostname, service, rlocs, step):
                                                                                                            minimum))
             # print ("ICMP Connectivity from {} to {} is good at {} % success rate with {} MTU \n".format(srcxtr.hostname, rloccef.ip, normal_ping.result, minimum))
 
+def validate_border_acls(border_objects, service,step):
+    process = "externalConnectivity"
+    subprocess = "aclValidation"
+
+    for border in border_objects:
+        hostname = getattr(border, "hostname", "Unknown")
+        # Safely retrieve the list; default to an empty list if missing or None
+        acl_names = getattr(border, "egress_acls", []) or []
+        if not acl_names:
+            msg = f"No egress ACLs identified on border {hostname}."
+            logging_info(step, process, subprocess, hostname, msg)
+            step += 1
+            continue
+
+        # Proceed with ACL validation logic for this border
+        for acl in acl_names:
+            acl_hit_procedure(border,acl,service,step)
+        # ...
+
+    return step
+
+def local_policies(dhcpparameters_info, hostname, vlan_id, port, service, step):
+    process = "dhcpPolicies"
+    subprocess = "[localPolicies]"
+
+    # 1. Extract configured RACLs (inbound and outbound) from dhcpparameters_info
+    inbound = getattr(dhcpparameters_info, "inboundacl", None)
+    outbound = getattr(dhcpparameters_info, "outboundacl", None)
+    found_racls = [acl for acl in [inbound, outbound] if acl]
+
+    # 2. Extract PACLs if the port is Physical or a Port-Channel
+    port_str = str(port)
+    if not port_str.startswith(("AccessTunnel", "Ac", "LISP")):
+        # Instantiate AccessList and retrieve ACLs for the physical/port-channel interface
+        portacls = AccessList(hostname)
+        portacls.aclbyinterface(port_str, service)
+        # Safely retrieve the list of ACL names
+        port_acls_list = getattr(portacls, "aclnames", []) or []
+        # Add found PACLs to the RACL list
+        if port_acls_list:
+            found_racls.extend(port_acls_list)
+
+    # Create a unique list of RACLs + PACLs
+    unique_racls = list(dict.fromkeys(found_racls))
+
+    # 3. Get VACLs using the existing function
+    vacl_raw = get_vacl_drop_acls(hostname, vlan_id, service)
+
+    # 4. Handle the Implicit Deny marker as a fatal error
+    if "VACL_IMPLICIT_DENY_ACTIVE" in vacl_raw:
+        error = "VACL Validation - Implicit Deny Active"
+        message = (
+            f"The VLAN Access Map applied to VLAN {vlan_id} does not contain a final "
+            f"'action forward' sequence. This results in an implicit deny for all unmatched traffic, "
+            f"which will block DHCP. Remediation: Add a final sequence to the VLAN access-map "
+            f"with 'action forward' to permit remaining traffic."
+        )
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    # 5. Filter out the marker and reverse the VACL list for evaluation
+    unique_vacls = [acl for acl in vacl_raw if acl != "VACL_IMPLICIT_DENY_ACTIVE"]
+    unique_vacls.reverse()
+
+    # Return both lists separately
+    return unique_racls, unique_vacls
+
 def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, service):
 
         process = "dhcpTroubleshooting"
@@ -824,10 +1339,22 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         elif edge_node_device.profiled_device.isfabric is True and edge_node_device.profiled_device.l2handoff is True:
             edge_node_device.maclearning(mac, vlan, service)
 
-        #MAC Address validation criteria: dhcp_mac_address_validation(mac_learning_info)
+
         mac_info = edge_node_device.mac_learning_info
         mac_learning_info = dhcp_mac_address_validation(mac_info,step)
         #print(pformat(vars(mac_learning_info), indent=4, width=1, sort_dicts=False))
+
+        # Authentication Session Validation
+        subprocess = "[authenticationSession]"
+        msg1 = "DHCP - Authentication"
+        message = f"DHCP Troubleshooting: Verifying authentication parameters for MAC address {mac} on VLAN {vlan}."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+        edge_node_device.cdpinfo(service)
+        edge_node_device.authenticationsession(service)
+        step = validate_authentication_sessions(edge_node_device,step,service)
+
 
         #Pool Identification (AnycastGW or L2 Only)
         subprocess = "[poolIdentification]"
@@ -880,18 +1407,28 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         sourceintf = mac_learning_info.port
         dhcp_parameters_validation(dhcp_info,sourceintf,vlan,step)
 
-        #LISP SESSION Validation
-        '''
-        #Layer 3 Verifications:
-        subprocess = "[lispSession]"
-        msg1 = "DHCP - LISP Session Validations"
-        message = f"DHCP Troubleshooting: Checking the status of the LISP session."
+        #DHCP Configuration
+        subprocess = "[dhcpParameters]"
+        msg1 = "DHCP - DHCPSnooping Statistics"
+        message = "Evaluating DHCP transaction logs to determine the specific DORA stage reached by the endpoint."
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
 
-        step = edge_node_device.lispsession(service,step)
-        print (step)
-        '''
+        edge_node_device.dhcpsnoopingclientstats(service,step)
+
+        #Local Policies (ACL, VACL, PACL)
+        #DHCP Configuration
+        subprocess = "[localPoliicies]"
+        msg1 = "DHCP - Local Policies"
+        message = "Evaluating RACL, VACL and PACLs present in the path to the DHCP Client."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+        edge_node_device.raclvaclpacl(service,step)
+        acls = getattr(edge_node_device, 'edgeacls', []) or []
+        vacls = getattr(edge_node_device, 'edgevacls', []) or []
+        for acl in acls:
+            acl_hit_procedure(edge_node_device,acl,service,step)
 
         #LISP Control and Data Plane validation to DHCP Server
         subprocess = "[layer3Parameters]"
@@ -946,12 +1483,28 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
 
+        subprocess = "[borderValidation]"
+        msg1 = "DHCP - Border Validations"
+        message = f"DHCP Troubleshooting: Running Border Validation modules for DHCP operation"
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
         rloc_reachability(ports,hostname,service,rlocs,step)
         srcip = edge_node_device.loopback
         dstip = forwarding_prefixes[0]['prefix']
-        iid = 4099
+
         #Border Troubleshooting
         border_objects, step = border_ip_transit(step,catc_name,fabric_id,vrf,vlan,srcip,dstip,service,True,iid)
+
+        subprocess = "[borderValidation]"
+        msg1 = "DHCP - Border ACL Validations"
+        message = f"DHCP Troubleshooting: Running Border ACL Validations for DHCP Traffic"
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+        validate_border_acls(border_objects, service, step)
+
+
 
 
 

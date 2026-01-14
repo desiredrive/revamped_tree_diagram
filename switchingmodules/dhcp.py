@@ -1,5 +1,7 @@
-from radkit_cli import get_any_single_output, get_single_output_genie
+from radkit_cli import get_any_single_output, get_single_output_genie, logging_info, logging_warning
 import re
+from datetime import datetime, timedelta
+from typing import List, Dict, Any
 
 #Parsers in this file:
 #Enablement of service dhcp*
@@ -88,6 +90,148 @@ def dhcpsnoopingparser(show_output):
     }
 
     return dhcp_snoop_summary
+
+def generate_ios_pipe(clock_dict):
+    # 1. Reconstruct the date string from the dictionary
+    # Format: 2026 Jan 14 00:55:21.907
+    date_str = f"{clock_dict['year']} {clock_dict['month']} {clock_dict['day']} {clock_dict['time']}"
+
+    # 2. Convert to a datetime object
+    # %b parses the short month name (Jan, Feb, etc.)
+    now = datetime.strptime(date_str, "%Y %b %d %H:%M:%S.%f")
+
+    # 3. Calculate one hour ago
+    one_hour_ago = now - timedelta(minutes=30)
+
+    # 4. Format both into the log's timestamp style: YYYY/MM/DD HH:
+    current_hour_pattern = now.strftime("%Y/%m/%d %H:")
+    previous_hour_pattern = one_hour_ago.strftime("%Y/%m/%d %H:")
+
+    # 5. Create the IOS regex pipe string
+    ios_pipe = f"| include ({current_hour_pattern}|{previous_hour_pattern})"
+
+    return ios_pipe
+
+def analyze_dhcp_snooping_trace(log_output: str, anycast_gw: str, helpers: List[str], step: int):
+    process = "dhcpTroubleshooting"
+    subprocess = "snoopingTraceAnalysis"
+    hostname = "edge-1-jalejand-cisco-com"
+
+    # 1. Initial check for completely empty output
+    if not log_output.strip():
+        message = "No DHCP events were captured in the past 30 minutes. The endpoint may already have an IP address."
+        logging_info(step, process, subprocess, hostname, message)
+        return step + 1, "NO_DATA", "No logs"
+
+    lines = log_output.strip().splitlines()
+    vlan_set = set()
+    packets_found = False  # Track if we actually found any DHCP packets
+
+    dora_tracker = {
+        "DISCOVER": {"seen": False, "relayed": False, "internal_ok": False},
+        "OFFER": {"seen": False, "intercepted": False, "punt_ok": False},
+        "REQUEST": {"seen": False, "relayed": False, "internal_ok": False},
+        "ACK": {"seen": False, "intercepted": False, "punt_ok": False}
+    }
+
+    internal_stages = {
+        "PUNT:RECEIVED": False, "PUNT:TO_DHCPSN": False, "BRIDGE:RECEIVED": False,
+        "BRIDGE:TO_DHCPD": False, "BRIDGE:TO_INJECT": False, "INJECT:RECEIVED": False,
+        "INJECT:TO_L2FWD": False
+    }
+
+    for line in lines:
+        parts = line.split()
+        # 2. Filter out command echo and headers (Must start with Date and have numeric VLAN)
+        if len(parts) < 7 or not (re.match(r"\d{4}/\d{2}/\d{2}", parts[0]) and parts[4].isdigit()):
+            continue
+
+        packets_found = True  # We found at least one valid log entry
+        vlan = parts[4]
+        msg_type = parts[5]
+        action = parts[6]
+        dest_ip = parts[3]
+
+        if "INFORM" in msg_type or "NACK" in msg_type:
+            continue
+
+        if vlan != "0":
+            vlan_set.add(vlan)
+
+        # Outbound Handshake
+        if "DHCPDISCOVER" in msg_type or "DHCPREQUEST" in msg_type:
+            stage_key = "DISCOVER" if "DISCOVER" in msg_type else "REQUEST"
+            dora_tracker[stage_key]["seen"] = True
+            if action == "PUNT:RECEIVED": internal_stages["PUNT:RECEIVED"] = True
+            if action == "PUNT:TO_DHCPSN": internal_stages["PUNT:TO_DHCPSN"] = True
+            if action == "BRIDGE:RECEIVED": internal_stages["BRIDGE:RECEIVED"] = True
+            if action == "BRIDGE:TO_DHCPD": internal_stages["BRIDGE:TO_DHCPD"] = True
+            if action == "BRIDGE:TO_INJECT":
+                internal_stages["BRIDGE:TO_INJECT"] = True
+                dora_tracker[stage_key]["internal_ok"] = True
+            if action == "INJECT:RECEIVED" and dest_ip in helpers:
+                internal_stages["INJECT:RECEIVED"] = True
+            if action == "INJECT:TO_L2FWD" and dest_ip in helpers:
+                internal_stages["INJECT:TO_L2FWD"] = True
+                dora_tracker[stage_key]["relayed"] = True
+
+        # Inbound Handshake
+        elif "DHCPOFFER" in msg_type or "DHCPACK" in msg_type:
+            stage_key = "OFFER" if "OFFER" in msg_type else "ACK"
+            dora_tracker[stage_key]["seen"] = True
+            if action == "PUNT:RECEIVED" and dest_ip == anycast_gw:
+                dora_tracker[stage_key]["punt_ok"] = True
+            if action == "INTERCEPT:TO_DHCPSN":
+                dora_tracker[stage_key]["intercepted"] = True
+
+    # 3. If no DHCP packets were found in the output, exit before printing warnings
+    if not packets_found:
+        message = "No DHCP handshake packets were found in the trace. The endpoint may have already completed the DORA process."
+        logging_info(step, process, subprocess, hostname, message)
+        return step + 1, "NO_DATA", "No packets found"
+
+    # --- Analysis & Warnings (Only runs if packets_found is True) ---
+
+    if len(vlan_set) > 1:
+        logging_warning(step, process, subprocess, hostname, f"VLAN Bouncing detected: {vlan_set}.")
+        step += 1
+
+    for stage, seen in internal_stages.items():
+        if not seen:
+            logging_warning(step, process, subprocess, hostname, f"Missing internal processing stage: {stage}.")
+            step += 1
+
+    # Determine DORA Final Status
+    final_status = ""
+    summary_msg = ""
+
+    if dora_tracker["ACK"]["intercepted"]:
+        final_status = "FINALIZED"
+        summary_msg = "The DORA process completed successfully."
+    elif dora_tracker["ACK"]["seen"]:
+        final_status = "STUCK at ACK"
+        summary_msg = "The DHCPACK was received but not delivered to the client."
+    elif dora_tracker["REQUEST"]["relayed"]:
+        final_status = "STUCK at REQUEST"
+        summary_msg = "The DHCPREQUEST was relayed, but no ACK was received."
+    elif dora_tracker["OFFER"]["intercepted"]:
+        final_status = "STUCK at REQUEST"
+        summary_msg = "The DHCPOFFER was delivered, but no REQUEST followed."
+    elif dora_tracker["OFFER"]["seen"]:
+        final_status = "STUCK at OFFER"
+        summary_msg = "The DHCPOFFER was received but not delivered to the client."
+    elif dora_tracker["DISCOVER"]["relayed"]:
+        final_status = "STUCK at DISCOVER"
+        summary_msg = "The DHCPDISCOVER was relayed, but no OFFER was received."
+    else:
+        final_status = "STUCK at DISCOVER"
+        summary_msg = "DHCPDISCOVER was detected but failed to reach the relay stage."
+
+    msg1 = f"DORA Process Summary: {final_status}"
+    logging_info(step, process, subprocess, hostname, f"{msg1} | {summary_msg}")
+    step += 1
+
+    return step, final_status, summary_msg
 
 class DHCPDevice:
     def __init__(self,device):
@@ -306,4 +450,15 @@ class DHCPDevice:
             self.vrf
             self.helper_addresses
             self.lisp_mobility_entries
+
+    def dhcpsnoopclientstat(self,mac,anycastgw,helpers,service,step):
+        hostname = self.device
+        showclockcmd = "show clock"
+        showclockop = get_single_output_genie(hostname,showclockcmd,service)
+        #For the past hour, parse the events of dhcpsnoopclient:
+        pipe_string = generate_ios_pipe(showclockop)
+        dhcpsnoocmd = f"show platform dhcpsnooping client stat {mac} {pipe_string}"
+        dhcpsnoopop = get_any_single_output(hostname,dhcpsnoocmd,service)
+        analyze_dhcp_snooping_trace(dhcpsnoopop,anycastgw,helpers,step)
+
 

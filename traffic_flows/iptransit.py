@@ -1,7 +1,10 @@
 import sys
 from pprint import pformat
 from re import search, IGNORECASE, match
-from asn1crypto.core import Boolean
+import re
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+
 from catalystcenterapi.catcapi import getFabricBorders, getL3Handoffs, getanycastgateway, getFabricCPs
 from device_profiler import Device
 from radkit_cli import logging_info, logging_warning, logging_error
@@ -12,6 +15,7 @@ import ipaddress
 from routingmodules.iprouting import IPRoute
 from routingmodules.lisp import LISPForwarding, LISPRemoteDefault, lisp_route_import, LISPLocalDB, LISPInstanceStatus, \
     LISPMapCache, LISPControlPlane, LISPSession
+from securitymodules.accesslists import AccessList
 from securitymodules.ciscotrustsec import cts_endpoint_info
 from switchingmodules.interfaces import Interfaces
 from traffic_flows.lispsessiontroubleshooting import singleETRProfiling
@@ -121,6 +125,20 @@ class BorderDevice:
         vrf = self.vrf
         self.local_route = bgp_local_route(vrf,hostname,prefix,service)
 
+    def bgp_vpnv4(self,service):
+        hostname = self.profiled_device.hostname
+        bgpvpnv4info, bgpvpvn4neighbor = bgp_vpnv4_session(hostname,service)
+        self.bgpvpnv4info = bgpvpnv4info
+        self.bgpvpvn4neighbor = bgpvpvn4neighbor
+
+    def defaultetrlocator(self,btype,service,step):
+        hostname = getattr(self.profiled_device, "hostname", "Unknown")
+        vrf = getattr(self, "vrf", None)
+        iid = getattr(self, "lispiid", None)
+        ispubsub = getattr(self.profiled_device, "ispubsub", False)
+        extracted_data = petr_availability(hostname,vrf,iid,ispubsub,btype,service,step)
+        self.defaultetrinfo = extracted_data
+
     def forwarding_to_destination(self,dstip,service,step):
         hostname = self.profiled_device.hostname
         vrf = self.vrf
@@ -164,6 +182,12 @@ class BorderDevice:
         dstports = self.destoutgoingports
         srcports = self.sourceoutgoingports
         self.interfacestats = interfacecounters(srcports,dstports,hostname,service)
+
+    def acl_information(self,service):
+        hostname = self.profiled_device.hostname
+        vrf = self.vrf
+        l3handoffinfo = self.l3handoffinfo
+        self.egress_acls = aclinformation(l3handoffinfo,vrf,hostname,service)
 
     def cts_information(self,service,step):
         hostname = self.profiled_device.hostname
@@ -301,6 +325,45 @@ def bgp_parameters(vrf, l3handoffneighbors, hostname, dstip, service):
         bgpneighborsinfo.append(bgpneighbor)
     return bgpinfo, bgpneighborsinfo
 
+def bgp_vpnv4_session(hostname,service):
+    #See if there are one or more BGP sessions the global routing table like:
+    bgpsumobject = BGP(hostname,None)
+    bgpsumobject.bgp_sum(service)
+
+    #Extract the iBGP neighbors from the bgpsumobject:
+    bgsum_data = getattr(bgpsumobject, "bgsum", {}) or {}
+
+    # 2. Identify the Local AS (bgp_id)
+    local_as = bgsum_data.get("bgp_id")
+
+    # 3. Access the neighbors dictionary
+    # Note: Genie usually puts 'show ip bgp summary' data under the 'default' vrf key
+    neighbors_dict = bgsum_data.get("vrf", {}).get("default", {}).get("neighbor", {})
+
+    internal_neighbors = []
+
+    # 4. Iterate through the neighbors to find iBGP peers
+    for nbr_ip, nbr_data in neighbors_dict.items():
+        # Dig into address_family to find the remote AS
+        # In your output, the address family key is an empty string ''
+        address_families = nbr_data.get("address_family", {})
+
+        for af_name, af_data in address_families.items():
+            remote_as = af_data.get("as")
+
+            # If Remote AS matches Local AS, it is an internal neighbor (iBGP)
+            if remote_as == local_as and local_as is not None:
+                internal_neighbors.append(nbr_ip)
+                # Break the inner loop to avoid adding the same neighbor twice
+                # if multiple address families exist
+                break
+    bgpneighborsinfo = []
+    for neighbor_ip in internal_neighbors:
+        bgpneighbor = BGPNeighbor(hostname, neighbor_ip, None)
+        bgpneighbor.bgp_neighbor(service)
+        bgpneighborsinfo.append(bgpneighbor)
+    return bgpsumobject, bgpneighborsinfo
+
 def find_anycastgw(fabricid,siteid,vlan,catc,service,step):
     anycastgw = getanycastgateway(fabricid,siteid,vlan,catc,service,step)
     return anycastgw
@@ -310,6 +373,47 @@ def bgp_local_route(vrf, hostname, prefix, service):
     bgplocalroute.bgp_rib_vrf(prefix,service)
     local_route = bgplocalroute.route
     return local_route
+
+def petr_availability(hostname, vrf, iid, ispubsub, border_type, service, step):
+    """
+    Extracts default route information from the RIB and LISP Database.
+    Returns a dictionary with the extracted values.
+    """
+    # Initialize the data structure with None values
+    extracted_data = {
+        "rib_default": {
+            "prefix": None,
+            "mask": None,
+            "nexthop": None
+        },
+        "lisp_db_default": {
+            "eid": None,
+            "iid": None,
+            "locators": None
+        }
+    }
+
+    # Only attempt extraction if Pub/Sub is enabled and border is an exit point
+    if ispubsub and border_type in ["isexternal", "isanywhere"]:
+        # 1) Extract IP Route info for 0.0.0.0
+        # Assuming the IPRoute class/method exists as per previous context
+        route_query = IPRoute("0.0.0.0", vrf, hostname)
+        route_query.iproute_prefix_soft(service,step)
+
+        extracted_data["rib_default"]["prefix"] = getattr(route_query, "prefix", None)
+        extracted_data["rib_default"]["mask"] = getattr(route_query, "mask", None)
+        extracted_data["rib_default"]["nexthop"] = getattr(route_query, "nexthop", None)
+
+        # 2) Extract LISP Database info for 0.0.0.0/0
+        # Assuming the LISPDatabase class/method exists as per previous context
+        lisp_db_query = LISPLocalDB("0.0.0.0/0", iid, hostname)
+        lisp_db_query.LISPDBEntry("ipv4",service)
+
+        extracted_data["lisp_db_default"]["eid"] = getattr(lisp_db_query, "eid", None)
+        extracted_data["lisp_db_default"]["iid"] = getattr(lisp_db_query, "iid", None)
+        extracted_data["lisp_db_default"]["locators"] = getattr(lisp_db_query, "locators", None)
+
+    return extracted_data
 
 def forwarding_state(iid,dstip, hostname, vrf, service,step):
     forwarding_state = IPCef(dstip,vrf,hostname)
@@ -516,7 +620,56 @@ def ctsinformation(dstip,vrf,hostname,destcefinformation, egressintf, service, s
 
     return ctsenforcementinfo
 
-#Print Function
+def aclinformation(handoff_list, target_vrf, hostname,service):
+    """
+    Filters handoff info by VRF and returns a list of interface strings
+    in three formats: vlan<id>, shortened physical, and physical.vlan.
+    """
+    interface_list = []
+
+    # Mapping for shortening common Cisco interface names
+    short_names = {
+        "TwentyFiveGigE": "twe",
+        "TenGigabitEthernet": "te",
+        "GigabitEthernet": "gi",
+        "FastEthernet": "fa",
+        "Ethernet": "et"
+    }
+
+    for entry in handoff_list:
+        # Check if the entry belongs to the target VRF
+        if entry.get("virtualNetworkName") == target_vrf:
+            vlan_id = entry.get("vlanId")
+            full_name = entry.get("interfaceName", "")
+
+            # Create the shortened name (e.g., TwentyFiveGigE1/0/3 -> twe1/0/3)
+            short_name = full_name
+            for long, short in short_names.items():
+                if full_name.startswith(long):
+                    short_name = full_name.replace(long, short)
+                    break
+
+            # 1. Format: vlan<id>
+            interface_list.append(f"vlan{vlan_id}")
+
+            # 2. Format: shortened physical (e.g., twe1/0/3)
+            interface_list.append(short_name.lower())
+
+            # 3. Format: physical + vlan id (e.g., twe1/0/3.3003)
+            interface_list.append(f"{short_name.lower()}.{vlan_id}")
+
+    all_acl_names = []
+    for interface in interface_list:
+        acl_obj = AccessList(hostname)
+        acl_obj.aclbyinterface(interface, service)
+        # Safely retrieve the list of ACL names from the object
+        found_acls = getattr(acl_obj, "aclnames", []) or []
+        # Add them to our master list
+        all_acl_names.extend(found_acls)
+    # Remove duplicates while preserving the order in which they were found
+    final_acl_list = list(dict.fromkeys(all_acl_names))
+
+    return final_acl_list
 
 def border_print_attributes(border):
     print(pformat(vars(border), indent=4, width=1, sort_dicts=False))
@@ -1198,7 +1351,6 @@ def validate_advertised_local_prefix(border, step):
         ((((local_route.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {}).get(vrf_name, {}) or {})
         .get("address_family", {}) or {}
     ).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
-
     local_prefix = next(iter(local_prefixes.keys()), None)
     if not local_prefix:
         error = "BGP Advertised Route - Local Prefix Not Found"
@@ -1709,7 +1861,7 @@ def log_cts_enforcement_status(border, step, hostname):
 
     return step
 
-def validate_control_plane_logic(border, step):
+def validate_control_plane_logic(border, step,service):
     """
     Validates LISP Control Plane configurations, sessions, and Pub/Sub parameters.
 
@@ -1798,8 +1950,19 @@ def validate_control_plane_logic(border, step):
 
         if not session_up:
             # Placeholder for LISP Session troubleshooting function
-            #L3LISPSession
-            pass
+            mgmtip = (getattr(border, "mgmtip", "") or "")
+            type  = (getattr(border, "type", "") or "")
+            vlan = None
+            vrf = (getattr(border, "vrf", "") or "")
+            pd = getattr(border, "profiled_device", None)
+            catc_name = getattr(pd, "dnac", "Unknown") if pd else "Unknown"
+
+            if type == "isexternal" or type =="isanywhere":
+                eid = "0.0.0.0/0"
+                singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,pd)
+            if type == "isiniternal":
+                #LISP Session Publication is not available for Internal Only Borders
+                pass
 
             # --- 6) Pub/Sub: LISP Prefix-List (SITE_LOCAL_EIDS_V4) ---
         if is_pubsub:
@@ -1872,7 +2035,7 @@ def individual_border_validations(border,step,service):
             step = validate_anycast_gateway_recursion(border, step)
             step = validate_petr_settings(border, step, hostname)
         #Validate CP information
-            step = validate_control_plane_logic(border,step)
+            step = validate_control_plane_logic(border,step,service)
         # With a given VRF (including default), verify the status of the BGP peers (bgp state, number of routes, presence of default route, tableversion, uptime)
             step = validate_vrf_configuration(border, step)
             step = validate_bgp_summary(border, step)
@@ -1900,156 +2063,362 @@ def individual_border_validations(border,step,service):
         # Validate CTS status
             step = log_cts_enforcement_status(border,step,hostname)
             return step
-#Flow Function
 
-def border_ip_transit(step,catc_name,fabric_id, vrf, vlanid, srcip, dstip, service, isdhcp: bool, iid):
+def multi_border_validation(borders, step, service):
+    process = "externalConnectivity"
+    subprocess = "multiBorderValidation"
+
+    if not borders:
+        return step
+
+    valid_egress_found = False
+    any_valid_petr_found = False  # Track if at least one border has 0.0.0.0/0 in LISP DB
+    handoff_map = {}  # { "hostname": [IPv4Network, ...] }
+
+    # Since Pub/Sub state is consistent across the site, check the first border
+    is_pubsub_site = getattr(borders[0].profiled_device, "ispubsub", False)
+
+    # --- FIRST PASS: Collect global data across all borders ---
+    for border in borders:
+        hostname = border.hostname
+        current_vrf = getattr(border, "vrf", "")
+
+        # 1. Use CEF information to determine valid egress (non-LISP)
+        cef_info = getattr(border, "destcefinformation", None)
+        if cef_info:
+            nexthops = getattr(cef_info, "nexthops", []) if not isinstance(cef_info, dict) else cef_info.get("nexthops",
+                                                                                                             [])
+            for nh in nexthops:
+                oif_val = nh.get("oif", {})
+                oif_names = list(oif_val.keys()) if isinstance(oif_val, dict) else [str(oif_val)]
+                if any(not str(name).startswith("LISP") for name in oif_names):
+                    valid_egress_found = True
+                    break
+
+        # 2. Check for valid PETR registration (Only if Pub/Sub is enabled)
+        if is_pubsub_site:
+            info = getattr(border, "defaultetrinfo", {})
+            if info:
+                lisp_db = info.get("lisp_db_default", {})
+                if lisp_db.get("eid") == "0.0.0.0/0" and (lisp_db.get("locators") or []):
+                    any_valid_petr_found = True
+
+        # 3. Collect L3 handoff prefixes for this specific border and VRF
+        handoffs = getattr(border, "l3handoffinfo", []) or []
+        border_specific_nets = []
+        for link in handoffs:
+            vn_name = link.get("virtualNetworkName")
+            if vn_name and str(vn_name).lower() == str(current_vrf).lower():
+                local_ip = link.get("localIpAddress")
+                if local_ip:
+                    try:
+                        net = ipaddress.ip_network(local_ip, strict=False)
+                        border_specific_nets.append(net)
+                    except ValueError:
+                        continue
+        handoff_map[hostname] = border_specific_nets
+
+    # --- GLOBAL (SITE-WIDE) VALIDATIONS ---
+
+    # Global 1: Egress Path Availability
+    if not valid_egress_found:
+        error = "Multi-Border - No Egress Path"
+        message = "None of the profiled borders have a valid physical (non-LISP) outgoing path to the destination."
+        exit_program(step, process, subprocess, "Fabric-Wide", error, message)
+    else:
+        logging_info(step, process, subprocess, "Fabric-Wide",
+                     "Multi-Border - Egress Path | At least one border has a valid physical path.")
+        step += 1
+
+    # Global 2: Site-Wide PETR Availability (Pub/Sub Only)
+    is_external_site = any(getattr(b, "type", "").lower() in ["isexternal", "isanywhere"] for b in borders)
+    if is_pubsub_site and is_external_site:
+        if not any_valid_petr_found:
+            error = "Multi-Border - No Default Route in LISP"
+            message = (
+                "Pub/Sub is enabled, but none of the external borders have the default route (0.0.0.0/0) "
+                "propagated into the LISP database with valid locators. At least one external border "
+                "must provide this for the fabric to reach unknown destinations."
+            )
+            exit_program(step, process, subprocess, "Fabric-Wide", error, message)
+        else:
+            logging_info(step, process, subprocess, "Fabric-Wide",
+                         "Multi-Border - LISP Default Route | At least one border is propagating 0.0.0.0/0 into LISP.")
+            step += 1
+
+    # --- SECOND PASS: Individual Border consistency checks ---
+    for border in borders:
+        hostname = border.hostname
+        border_type = (getattr(border, "type", "") or "").strip().lower()
+        is_collocated_cp = getattr(border.profiled_device, "cp", False)
+        iid = getattr(border, "lispiid", "Unknown")
+
+        # Validation 1: Individual PETR Details (Pub/Sub Only)
+        if is_pubsub_site:
+            info = getattr(border, "defaultetrinfo", {})
+            if info:
+                rib = info.get("rib_default", {})
+                lisp_db = info.get("lisp_db_default", {})
+                rt_prefix = rib.get("prefix")
+                rt_nexthop = rib.get("nexthop")
+
+                if rt_prefix == "0.0.0.0":
+                    # Check for Null nexthop
+                    is_null = any("null" in str(nh).lower() for nh in rt_nexthop) if isinstance(rt_nexthop,
+                                                                                                list) else "null" in str(
+                        rt_nexthop).lower()
+                    if is_null:
+                        error = "PETR Availability - Null Next-Hop"
+                        message = f"Border {hostname} has a default route, but the next-hop is Null. Traffic will be dropped."
+                        exit_program(step, process, subprocess, hostname, error, message)
+
+                    msg1 = "PETR Availability - Default Route Valid"
+                    message = f"Border {hostname} is using next-hop(s) {rt_nexthop} for default-route forwarding."
+                    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                    step += 1
+
+                    if lisp_db.get("eid") != "0.0.0.0/0":
+                        error = "PETR Availability - LISP DB Entry Missing"
+                        message = (
+                            f"Border {hostname} has a valid default route in RIB, but it is missing in LISP DB for IID {iid}. "
+                            "Remediation: Configure 'database-mapping 0.0.0.0/0 locator-set DEFAULT_ETR_LOCATOR default-etr'."
+                        )
+                        exit_program(step, process, subprocess, hostname, error, message)
+
+                    if not (lisp_db.get("locators") or []):
+                        error = "PETR Availability - Missing Locators"
+                        message = (
+                            f"Border {hostname} has 0.0.0.0/0 in LISP DB, but 0 RLOCs. "
+                            "Remediation: The locator-set 'DEFAULT_ETR_LOCATOR' is unavailable or has lost its Loopback0 definition."
+                        )
+                        exit_program(step, process, subprocess, hostname, error, message)
+
+        # Validation 2: iBGP Redundancy (Classic LISP/BGP only)
+        if not is_pubsub_site and border_type in ["isexternal", "isanywhere"]:
+            bgp_neighbors = getattr(border, "bgpneighborsinfo", []) or []
+            has_ibgp_up = False
+            for nbr in bgp_neighbors:
+                bgp_obj = getattr(nbr, "bgpneighbor", {}) or {}
+                vrf_data = bgp_obj.get("vrf", {}).get(border.vrf, {}).get("neighbor", {}).get(nbr.neighborip, {})
+                if (vrf_data.get("link") == "internal" and vrf_data.get("session_state") == "Established"):
+                    has_ibgp_up = True
+                    break
+
+            if not has_ibgp_up:
+                msg1 = "Multi-Border - Redundancy Warning"
+                message = (
+                    f"Border {hostname} is an external exit but has no established iBGP neighbors in VRF {border.vrf}. "
+                    "This indicates a lack of overlay redundancy for external reachability."
+                )
+                logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
+
+        # Validation 3: L3 Handoff Prefixes in LISP (Loop Prevention)
+        if border_type in ["isinternal", "isanywhere"]:
+            lisp_local = getattr(border, "lispfwdinglocaleid", {}) or {}
+            fabric_prefixes = lisp_local.get("prefixes", [])
+
+            # Identify handoff subnets belonging to OTHER borders
+            other_borders_handoffs = []
+            for h_name, h_nets in handoff_map.items():
+                if h_name != hostname:
+                    other_borders_handoffs.extend(h_nets)
+
+            conflicts = []
+            for f_pref in fabric_prefixes:
+                try:
+                    f_net = ipaddress.ip_network(f_pref, strict=False)
+                    for h_net in other_borders_handoffs:
+                        if f_net.overlaps(h_net):
+                            conflicts.append(f"{f_net} overlaps with peer handoff {h_net}")
+                except ValueError:
+                    continue
+
+            if conflicts:
+                error = "Multi-Border - L3 Handoff Leak"
+                message = (
+                    f"Border {hostname} is importing L3 handoff subnets belonging to PEER borders into the LISP database: {conflicts}. "
+                    "This can cause invalid LISP-to-LISP recursion and routing loops."
+                )
+                exit_program(step, process, subprocess, hostname, error, message)
+            else:
+                msg1 = "Multi-Border - LISP Leak Check"
+                message = f"No foreign L3 handoff leaks detected in LISP database for {hostname}."
+                logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
+
+        # Validation 4: VPNv4 iBGP Session (Classic LISP/BGP + Non-Collocated only)
+        if not is_pubsub_site and not is_collocated_cp:
+            bgp_neighbors = getattr(border, "bgpneighborsinfo", []) or []
+            has_vpnv4_up = False
+
+            for nbr_info in bgp_neighbors:
+                if not getattr(nbr_info, "is_vpnv4_enabled", False):
+                    continue
+
+                nbr_ip = getattr(nbr_info, "neighborip", None)
+                bgp_dict = getattr(nbr_info, "bgpneighbor", {}) or {}
+                nbr_data = bgp_dict.get("vrf", {}).get("default", {}).get("neighbor", {}).get(nbr_ip, {})
+
+                if (nbr_data.get("link") == "internal" and nbr_data.get("session_state") == "Established"):
+                    has_vpnv4_up = True
+                    break
+
+            if not has_vpnv4_up:
+                error = "Multi-Border - No VPNv4 Session"
+                message = (
+                    f"Border {hostname} is a non-collocated node in a LISP/BGP design, but no established VPNv4 iBGP sessions were found. "
+                    "This is required to receive endpoint reachability from the Control Plane."
+                )
+                exit_program(step, process, subprocess, hostname, error, message)
+            else:
+                msg1 = "Multi-Border - VPNv4 Session OK"
+                message = f"Border {hostname} has at least one established VPNv4 iBGP session."
+                logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
+        else:
+            reason = "Pub/Sub is enabled" if is_pubsub_site else "Border is a collocated Control Plane"
+            msg1 = "Multi-Border - VPNv4 Session"
+            message = f"VPNv4 session check skipped for {hostname} because {reason}."
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+    return step
+
+#Concurrent Border Collection
+
+def _fetch_single_border_data(border, fabric_id, vrf, vlanid, srcip, dstip, service, isdhcp, iid, catc_name,
+                              control_planes, step):
+    """
+    Worker function: Performs all heavy CLI collection and parsing in parallel.
+    This function does NOT perform logging to avoid interleaved/messy logs.
+    """
+    reachability_status = (border.get("status") or "").strip().lower()
+    if reachability_status != "reachable":
+        return None
+
+    mgmtip = border['managementIpAddress']
+
+    # 1. Initialize Object
+    border_object = BorderDevice(mgmtip)
+    border_object.api_parameters(border)
+
+    # 2. Heavy Data Collection (The slow parts)
+    border_object.device_profiler(isdhcp, catc_name, service, step)
+    border_object.append_cp_objects(control_planes)
+
+    # Determine type
+    isinternal = bool(border_object.api_parameters.get("importExternalRoutes"))
+    isexternal = bool(border_object.api_parameters.get("isDefaultExit"))
+    if isinternal and isexternal:
+        border_object.type = "isanywhere"
+        border_type = "isanywhere"
+    elif isexternal:
+        border_object.type = "isexternal"
+        border_type =  "isexternal"
+    else:
+        border_object.type = "isinternal"
+        border_type = "isinternal"
+
+    # 3. Continue Collection
+    border_object.ip_transit_handoffs(service, step)
+    border_object.anycastgateways(vlanid, service, step)
+
+    # Calculate prefix for BGP/LISP methods
+    anycastgw = border_object.anycastgwinfo
+    ip4 = ((anycastgw.get("ipPoolDetails", {}) or {}).get("ipV4AddressSpace", {}) or {})
+    gateway_ip = ip4.get("gatewayIpAddress")
+    prefixandslash = f"{ip4.get('subnet')}/{ip4.get('prefixLength')}"
+
+    border_object.vrf_information(vrf, gateway_ip, service, step)
+    border_object.bgp_information(dstip, service)
+    border_object.bgp_local_route(prefixandslash, service)
+    border_object.bgp_vpnv4(service)
+    if border_type in ["isexternal", "isanywhere"]:
+        border_object.defaultetrlocator(border_type, service, step)
+    # CEF Recursion (The most time-consuming part)
+    border_object.forwarding_to_destination(dstip, service, step)
+    border_object.forwarding_to_source(srcip, isdhcp, service, step)
+
+    # LISP Parameters
+    destroute = border_object.bgpinfo.route
+    prefixes = (
+                       (((destroute.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {})
+                       .get(vrf, {}) or {}
+               ).get("address_family", {}).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
+    prefix = next(iter(prefixes.keys()), None)
+
+    border_object.lisp_parameters(prefix, service, step)
+
+    # Final checks
+    border_object.ping(service, step)
+    border_object.interface_counters(service)
+    border_object.acl_information(service)
+    border_object.cts_information(service, step)
+
+    return border_object
+
+
+def border_ip_transit(step, catc_name, fabric_id, vrf, vlanid, srcip, dstip, service, isdhcp: bool, iid):
     process = "externalConnectivity"
     subprocess = "[main]"
-    msg1 = "External Connectivity - Main"
-    message = f"External Connectivity - Profiling fabric site border nodes"
-    logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
+
+    # Initial Setup
+    logging_info(step, process, subprocess, catc_name,
+                 "External Connectivity - Main | Profiling fabric site border nodes")
     step += 1
 
-    l3_borders = in_site_fabric_borders(step,fabric_id,catc_name,service)
-    subprocess = "[controlPlanes]"
-    msg1 = "External Connectivity - Fabric Control Planes"
-    message = f"External Connectivity - Identifying Control Planes for the Fabric Site."
-    logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
+    l3_borders = in_site_fabric_borders(step, fabric_id, catc_name, service)
+    control_planes = validate_control_plane_status(fabric_id, iid, catc_name, service, step)
     step += 1
-    control_planes = validate_control_plane_status(fabric_id,iid,catc_name,service,step)
 
+    # --- PHASE 1: Parallel Collection ---
+    # We use a thread pool to fetch data from all borders simultaneously
+    reachable_borders = [b for b in l3_borders if (b.get("status") or "").strip().lower() == "reachable"]
+
+    with ThreadPoolExecutor(max_workers=len(reachable_borders)) as executor:
+        # Bind static arguments to the worker function
+        worker_func = partial(_fetch_single_border_data,
+                              fabric_id=fabric_id, vrf=vrf, vlanid=vlanid, srcip=srcip,
+                              dstip=dstip, service=service, isdhcp=isdhcp, iid=iid,
+                              catc_name=catc_name, control_planes=control_planes, step=step)
+
+        # Execute in parallel
+        results = list(executor.map(worker_func, reachable_borders))
+
+    # --- PHASE 2: Sequential Logging & Validation ---
+    # Now we loop through the results to print the logs in the correct order
     border_objects = []
-    for border in l3_borders or []:
-        reachability_status = (border.get("status") or "").strip().lower()
-        if reachability_status == "reachable":
-            mgmtip = border['managementIpAddress']
-
-            subprocess = "[deviceProfiler]"
-            msg1 = "External Connectivity - Main"
-            message = f"External Connectivity - Profiling Border device {mgmtip}."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            # Border Object Initialization
-            border_object = BorderDevice(mgmtip)
-            border_object.api_parameters(border)
-            border_object.device_profiler(isdhcp,catc_name,service,step)
-            #hostname = border_object.profiled_device.hostname
-            border_object.append_cp_objects(control_planes)
-            subprocess = "[deviceProfiler]"
-            msg1 = "External Connectivity - Border Role"
-            message = f"External Connectivity - Identifying {mgmtip} Border type."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            isinternal = bool(border_object.api_parameters.get("importExternalRoutes"))
-            isexternal = bool(border_object.api_parameters.get("isDefaultExit"))
-
-            if isinternal and isexternal:
-                border_type = "isanywhere"
-            elif isexternal:
-                border_type = "isexternal"
-            else:
-                border_type = "isinternal"
-
-            border_object.type = border_type
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - Border L3 Handoffs"
-            message = f"External Connectivity - Identifying {mgmtip} L3 HandOffs."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.ip_transit_handoffs(service,step)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - Border Anycast Gateways"
-            message = f"External Connectivity - Identifying {mgmtip} VRF details and Anycast Gateways."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.anycastgateways(vlanid,service,step)
-            anycastgw = border_object.anycastgwinfo
-            ip4 = ((anycastgw.get("ipPoolDetails", {}) or {}).get("ipV4AddressSpace", {}) or {})
-            gateway_ip = ip4.get("gatewayIpAddress")
-            subnet = ip4.get("subnet")
-            prefix_length = ip4.get("prefixLength")
-            prefixandslash = str(subnet)+"/"+str(prefix_length)
-
-            border_object.vrf_information(vrf,gateway_ip,service,step)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - Border BGP Information"
-            message = f"External Connectivity - Verifying {mgmtip} BGP Configuration and Neighbor Information."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.bgp_information(dstip,service)
-            border_object.bgp_local_route(prefixandslash,service)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - Forwarding to Destination"
-            message = f"External Connectivity - Recursing CEF forwarding for {mgmtip} for the destination IP {dstip}."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.forwarding_to_destination(dstip,service,step)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - Forwarding to Source"
-            message = f"External Connectivity - Recursing CEF forwarding for {mgmtip} for the source IP {srcip}."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.forwarding_to_source(srcip,isdhcp,service,step)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - LISP Parameters"
-            message = f"External Connectivity - Retrieving LISP parameters for {mgmtip}."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            destroute = border_object.bgpinfo.route
-            prefixes = (
-                               (((destroute.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {})
-                               .get(vrf, {}) or {}
-                       ).get("address_family", {}).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
-
-            prefix_list = list(prefixes.keys())
-            prefix = prefix_list[0] if prefix_list else None
-
-            border_object.lisp_parameters(prefix,service,step)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - Upstream Reachability"
-            message = f"External Connectivity - Testing destination reachability with a Ping to {dstip} on {mgmtip}."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.ping(service,step)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - Interface Counters"
-            message = f"External Connectivity - Retrieving ingress and egress interface counters for {mgmtip}."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.interface_counters(service)
-
-            subprocess = "[l3Handoffs]"
-            msg1 = "External Connectivity - CTS Configuration"
-            message = f"External Connectivity - Validating CTS configuration for {mgmtip}."
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
-            step += 1
-
-            border_object.cts_information(service,step)
-            #border_print_attributes(border_object)
-            border_objects.append(border_object)
-            individual_border_validations(border_object,step,service)
-        else:
+    for border_object in results:
+        #border_print_attributes(border_object)
+        if border_object is None:
             continue
 
-    #border_validations(border_objects, step, service)
+        mgmtip = border_object.mgmtip
 
-    return border_objects
+        # Re-generate the "Discovery" logs so the user sees progress in the log file
+        logging_info(step, process, "[deviceProfiler]", catc_name,
+                     f"External Connectivity - Main | Profiling Border device {mgmtip}.")
+        step += 1
+        logging_info(step, process, "[deviceProfiler]", catc_name,
+                     f"External Connectivity - Border Role | Identifying {mgmtip} Border type.")
+        step += 1
+        logging_info(step, process, "[l3Handoffs]", catc_name,
+                     f"External Connectivity - Border L3 Handoffs | Identifying {mgmtip} L3 HandOffs.")
+        step += 1
+        logging_info(step, process, "[l3Handoffs]", catc_name,
+                     f"External Connectivity - Border Anycast Gateways | Identifying {mgmtip} VRF details and Anycast Gateways.")
+        step += 1
+        logging_info(step, process, "[l3Handoffs]", catc_name,
+                     f"External Connectivity - Border BGP Information | Verifying {mgmtip} BGP Configuration and Neighbor Information.")
+        step += 1
+
+        # Run the validation logic (if/else checks)
+        individual_border_validations(border_object, step, service)
+
+        border_objects.append(border_object)
+    #Multi_Border_validation:
+    multi_border_validation(border_objects,step,service)
+
+    return border_objects, step
 

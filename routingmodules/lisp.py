@@ -9,7 +9,7 @@ from switchingmodules.interfaces import Interfaces
 from switchingmodules.spanning_tree import SpanningTree
 from switchingmodules.vlan import VlanInformation
 from radkit_cli import logging_info, logging_error, logging_warning, get_any_single_output,get_single_output_genie
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional, List, Union, Tuple
 IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
 def _is_ipv4(s: str) -> bool:
@@ -1277,7 +1277,7 @@ class controlplane_eid:
             #Address resolution is always registered using TCP
             self.protocol = "TCP"            
             #Parsing:
-            if cp_server_output == None:
+            if cp_server_output is None:
                 logging_info("X",process,subprocess,hostname,
                              "ARP Registration not found in CP {}".format(self.queriedcp))
                 #print("ARP Registration not found in CP {}".format(self.queriedcp))
@@ -1841,9 +1841,12 @@ class LISPLocalDB:
             rlocs = path['locators']
             locators = []
             for locator in rlocs:
-                priority = rlocs[locator]['priority']
-                weight = rlocs[locator]['weight']
-                locators.append({'rloc': locator, 'priority': priority, 'weight': weight})
+                try:
+                    priority = rlocs[locator]['priority']
+                    weight = rlocs[locator]['weight']
+                    locators.append({'rloc': locator, 'priority': priority, 'weight': weight})
+                except KeyError:
+                    continue
             mapservers = []
             dbmap_servers = path['map_servers']
             for map_server in dbmap_servers:

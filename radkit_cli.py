@@ -2,11 +2,12 @@ from dataclasses import dataclass
 from datetime import datetime
 import radkit_client
 import sys
-import json
 import radkit_genie
 import logging
+import threading
 import time
-
+import json
+import random
 from radkit_client.sync import (
     # For the creation of the context.
     create_context,
@@ -116,47 +117,52 @@ def get_single_output_genie(hostname, command: str, service):
         sys.exit("Error: {} in RADKIT Inventory, Device: {} ".format(e, hostname))
     return output
 
-def get_catc_api(dnac, api_url: str,service):
-    try:
-        device_inventory = service.inventory[dnac]
-        try:
-            response = device_inventory.http.get(api_url).wait()
-            response_js = json.loads(response.content)
-            #formatted_json = json.dumps(response_js, indent=2)
-            to_file = "Catalyst Center API: {}".format(api_url)+"\n"+str(response_js)
-            append_to_logging_file(to_file)
-            #Handling BAPI Exceptions
-            attempts = 0
-            limit = False
-            try:
-                error = response_js['error']
-                if "Rate Limit" in error:
-                    #BAPI Limits Reached (Rate Limiter), waiting 3 seconds before reattempt.
-                    attempts = 1
-                    while (attempts < 6) and limit is True:
-                        time.sleep(3)
-                        response = device_inventory.http.get(api_url).wait()
-                        response_js = json.loads(response.content)
-                        attempts = +1
-                        try:
-                            error = response_js['error']
-                            if "Rate Limit" in error:
-                                formatted_json = json.dumps(response_js, indent=2)
-                                to_file = "Catalyst Center API: {}".format(api_url) + "\n" + str(formatted_json)
-                                append_to_logging_file(to_file)
-                                continue
-                        except KeyError:
-                            formatted_json = json.dumps(response_js, indent=2)
-                            to_file = "Catalyst Center API: {}".format(api_url) + "\n" + str(formatted_json)
-                            append_to_logging_file(to_file)
-                            return response_js
-            except KeyError:
-                return response_js
+# 1. Define the lock at the top of radkit_cli.py
+# This ensures every thread that imports this module shares the same lock.
+CATC_API_LOCK = threading.Lock()
 
-        except:
+def get_catc_api(dnac, api_url: str, service):
+    # 2. Wrap the logic in the lock
+    with CATC_API_LOCK:
+        try:
+            device_inventory = service.inventory[dnac]
+            attempts = 0
+
+            while attempts < 6:
+                try:
+                    # Execute the API call
+                    response = device_inventory.http.get(api_url).wait()
+                    response_js = json.loads(response.content)
+
+                    # Log to file
+                    to_file = f"Catalyst Center API: {api_url}\n{json.dumps(response_js, indent=2)}"
+                    append_to_logging_file(to_file)
+
+                    # 3. Check for Rate Limit or Concurrency Rejection
+                    error_msg = str(response_js.get("error", ""))
+                    status_code = response_js.get("bapiExtendedStatusCode", "")
+
+                    if "Rate Limit" in error_msg or status_code == "REJECTED_ABOVE_MAX_CONCURRENCY_LIMIT":
+                        attempts += 1  # Fixed the += logic
+                        # Wait with jitter to allow the API gateway to breathe
+                        time.sleep(3 + random.uniform(1, 3))
+                        continue
+
+                    # Success: return the response
+                    return response_js
+
+                except Exception as e:
+                    # Handle network/parsing errors
+                    attempts += 1
+                    time.sleep(2)
+                    if attempts == 6:
+                        return None
+
             return None
-    except ValueError:
-        print ("Error when getting the following API: {}".format(api_url))
+
+        except Exception as e:
+            print(f"Error when getting the following API: {api_url} - {str(e)}")
+            return None
 
 def get_catc_name(service):  
         #Find CatC in inventory list

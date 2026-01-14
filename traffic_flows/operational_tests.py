@@ -51,7 +51,7 @@ class Ping():
             dfbit = "df-bit"
         else:
             dfbit = ""
-        ping_cmd = "ping {} {} source {} {} {}".format(vrf_mode, self.dstip, source, size_mode, dfbit, service)
+        ping_cmd = "ping {} {} source {} {} {} timeout 1".format(vrf_mode, self.dstip, source, size_mode, dfbit, service)
         ping_op = radkit_cli.get_any_single_output(self.hostname,ping_cmd,service)
         self.result = ping_validation(ping_op)
         
