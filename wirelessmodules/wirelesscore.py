@@ -531,149 +531,63 @@ def parse_show_wireless_client_detail(output: str) -> Dict[str, Any]:
 
     return {k: v for k, v in parsed.items() if v}
 
-def parse_show_wireless_client_detail(output: str) -> dict:
-    d = {"client": {}, "ap": {}, "wlan": {}, "mobility": {}, "session_manager": {}, "statistics": {}, "fabric": {}}
-    lines = [ln.rstrip() for ln in output.splitlines()]
-
-    # Simple key: value lines
-    kv_patterns = [
-        (r"^Client MAC Address\s*:\s*(.+)$", ("client", "mac_address")),
-        (r"^Client MAC Type\s*:\s*(.+)$", ("client", "mac_type")),
-        (r"^Client DUID:\s*(.+)$", ("client", "duid")),
-        (r"^Client IPv4 Address\s*:\s*(.+)$", ("client", "ipv4_address")),
-        (r"^Client IPv6 Addresses\s*:\s*(.+)$", ("client", "ipv6_addresses_raw")),
-        (r"^Client Username:\s*(.+)$", ("client", "username")),
-        (r"^Client State\s*:\s*(.+)$", ("client", "state")),
-        (r"^Client Active State\s*:\s*(.+)$", ("client", "active_state")),
-        (r"^Connected For\s*:\s*(\d+)\s+seconds", ("client", "connected_for_seconds")),
-        (r"^Protocol\s*:\s*(.+)$", ("client", "protocol")),
-        (r"^Channel\s*:\s*(\d+)\s*$", ("client", "channel")),
-        (r"^Client IIF-ID\s*:\s*(.+)$", ("client", "client_iif_id")),
-        (r"^Association Id\s*:\s*(\d+)\s*$", ("client", "association_id")),
-        (r"^Authentication Algorithm\s*:\s*(.+)$", ("client", "authentication_algorithm")),
-        (r"^Session Timeout\s*:\s*(\d+)\s*sec\s*\(Remaining time:\s*(\d+)\s*sec\)", ("client", "session_timeout_pair")),
-        (r"^WMM Support\s*:\s*(.+)$", ("client", "wmm_support")),
-        (r"^U-APSD Support\s*:\s*(.+)$", ("client", "uapsd_support")),
-        (r"^Fastlane Support\s*:\s*(.+)$", ("client", "fastlane_support")),
-        (r"^Power Save\s*:\s*(.+)$", ("client", "power_save")),
-        (r"^Current Rate\s*:\s*(.+)$", ("client", "current_rate")),
-        (r"^Supported Rates\s*:\s*(.+)$", ("client", "supported_rates_raw")),
-        (r"^Encryption Cipher\s*:\s*(.+)$", ("client", "encryption_cipher")),
-        (r"^Policy Manager State\s*:\s*(.+)$", ("client", "policy_manager_state")),
-        (r"^Protected Management Frame\s*-\s*802\.11w\s*:\s*(.+)$", ("client", "pmf_80211w")),
-        (r"^EAP Type\s*:\s*(.+)$", ("client", "eap_type")),
-        (r"^VLAN\s*:\s*(.+)$", ("client", "vlan_name")),
-        (r"^Central NAT\s*:\s*(.+)$", ("client", "central_nat")),
-        (r"^AP MAC Address\s*:\s*(.+)$", ("ap", "mac_address")),
-        (r"^AP Name:\s*(.+)$", ("ap", "name")),
-        (r"^AP slot\s*:\s*(\d+)\s*$", ("ap", "slot")),
-        (r"^BSSID\s*:\s*(.+)$", ("ap", "bssid")),
-        (r"^Wireless LAN Id:\s*(\d+)\s*$", ("wlan", "wlan_id")),
-        (r"^WLAN Profile Name:\s*(.+)$", ("wlan", "wlan_profile_name")),
-        (r"^Wireless LAN Network Name \(SSID\):\s*(.+)$", ("wlan", "ssid")),
-        (r"^Policy Profile\s*:\s*(.+)$", ("wlan", "policy_profile")),
-        (r"^Flex Profile\s*:\s*(.+)$", ("wlan", "flex_profile")),
-        (r"^Fabric status\s*:\s*(.+)$", ("fabric", "status")),
-        (r"^\s*RLOC\s*:\s*(.+)$", ("fabric", "rloc")),
-        (r"^\s*VNID\s*:\s*(\d+)\s*$", ("fabric", "vnid")),
-        (r"^\s*SGT\s*:\s*(\d+)\s*$", ("fabric", "sgt")),
-        (r"^\s*Control plane name\s*:\s*(.+)$", ("fabric", "control_plane_name")),
-        (r"^\s*Move Count\s*:\s*(\d+)\s*$", ("mobility", "move_count")),
-        (r"^\s*Mobility Role\s*:\s*(.+)$", ("mobility", "role")),
-        (r"^\s*Mobility Roam Type\s*:\s*(.+)$", ("mobility", "roam_type")),
-        (r"^\s*Mobility Complete Timestamp\s*:\s*(.+)$", ("mobility", "complete_timestamp_utc")),
-        (r"^\s*Join Time Of Client\s*:\s*(.+)$", ("client", "join_time_utc")),
-        (r"^\s*Point of Attachment\s*:\s*(.+)$", ("session_manager", "point_of_attachment")),
-        (r"^\s*IIF ID\s*:\s*(.+)$", ("session_manager", "iif_id")),
-        (r"^\s*Authorized\s*:\s*(.+)$", ("session_manager", "authorized_raw")),
-        (r"^\s*Common Session ID:\s*(.+)$", ("session_manager", "common_session_id")),
-        (r"^\s*Acct Session ID\s*:\s*(.+)$", ("session_manager", "acct_session_id")),
-        (r"^\s*Number of Bytes Received from Client\s*:\s*(\d+)\s*$", ("statistics", "bytes_received_from_client")),
-        (r"^\s*Number of Bytes Sent to Client\s*:\s*(\d+)\s*$", ("statistics", "bytes_sent_to_client")),
-        (r"^\s*Number of Packets Received from Client\s*:\s*(\d+)\s*$", ("statistics", "packets_received_from_client")),
-        (r"^\s*Number of Packets Sent to Client\s*:\s*(\d+)\s*$", ("statistics", "packets_sent_to_client")),
-        (r"^\s*Radio Signal Strength Indicator\s*:\s*([-]?\d+)\s*dBm\s*$", ("statistics", "rssi_dbm")),
-        (r"^\s*Signal to Noise Ratio\s*:\s*(\d+)\s*dB\s*$", ("statistics", "snr_db")),
-    ]
-
-    for ln in lines:
-        for pat, (section, key) in kv_patterns:
-            m = re.match(pat, ln)
-            if not m:
-                continue
-            val = m.group(1).strip()
-            if key in {"connected_for_seconds", "channel", "association_id", "vnid", "sgt", "move_count"}:
-                d[section][key] = _to_int(val)
-            elif key == "slot":
-                d[section][key] = _to_int(val)
-            elif key == "session_timeout_pair":
-                d["client"]["session_timeout_sec"] = _to_int(m.group(1))
-                d["client"]["session_timeout_remaining_sec"] = _to_int(m.group(2))
-            else:
-                d[section][key] = val
-
-    # Post-processing for lists/booleans
-    raw_v6 = d["client"].pop("ipv6_addresses_raw", None)
-    if raw_v6 and raw_v6 != "None":
-        d["client"]["ipv6_addresses"] = [x.strip() for x in raw_v6.split(",") if x.strip()]
-    else:
-        d["client"]["ipv6_addresses"] = []
-
-    raw_rates = d["client"].pop("supported_rates_raw", None)
-    d["client"]["supported_rates_mbps"] = _to_float_list(raw_rates) if raw_rates else []
-
-    auth_raw = d["session_manager"].pop("authorized_raw", None)
-    if auth_raw is not None:
-        d["session_manager"]["authorized"] = auth_raw.strip().upper() == "TRUE"
-
-    # Remove empty sections for cleaner output (optional)
-    return {k: v for k, v in d.items() if v}
-
 def parse_resultant_policies(session_output: str) -> Dict[str, Any]:
     """
-    Extracts the 'Resultant Policies' block from a 'show wireless client ... | sec Session'
-    style output and returns it as a dict of key/value pairs.
+    Extracts 'Auth Method Status' and 'Resultant Policies' from
+    'show wireless client ... detail' output.
 
-    Error-tolerant:
-      - Returns {} if block not present
-      - Ignores malformed lines
-      - Preserves values containing ':' (e.g., https://...)
+    Returns a dictionary with two keys:
+    - 'auth_method_status': { 'method': ..., 'status': ... }
+    - 'resultant_policies': { 'Key': 'Value', ... }
     """
     if not session_output or not isinstance(session_output, str):
         return {}
 
     lines = session_output.splitlines()
+    result = {
+        "auth_method_status": {},
+        "resultant_policies": {}
+    }
 
-    # Find the "Resultant Policies:" line
-    start_idx = None
-    for i, ln in enumerate(lines):
-        if re.match(r"^\s*Resultant Policies\s*:\s*$", ln):
-            start_idx = i
-            break
-    if start_idx is None:
-        return {}
+    # Track which section we are currently inside
+    current_section = None
 
-    policies: Dict[str, Any] = {}
-
-    # Parse subsequent indented "key : value" lines until the next section header or EOF
-    for ln in lines[start_idx + 1 :]:
-        if not ln.strip():
+    for line in lines:
+        # --- Section Detection ---
+        if "Auth Method Status List" in line:
+            current_section = "auth"
+            continue
+        if "Resultant Policies:" in line:
+            current_section = "resultant"
             continue
 
-        # Stop when a new section header begins (e.g., "Client Statistics:", "Mobility:", etc.)
-        if re.match(r"^\S[^:]*:\s*$", ln):  # non-indented "Something:" line
-            break
+        # Stop parsing a section if we hit a new top-level header (no leading whitespace)
+        # and it's not one of the headers we just checked for.
+        if line.strip() and not line.startswith(" "):
+            current_section = None
 
-        # Expect indented "key : value"
-        m = re.match(r"^\s+([^:]+?)\s*:\s*(.+)\s*$", ln)
-        if not m:
-            continue
+        # --- 1. Parse Auth Method Status List ---
+        if current_section == "auth":
+            # Extract Method (e.g., MAB, Web Auth, dot1x)
+            m = re.search(r"Method\s*:\s*(.*)", line, re.IGNORECASE)
+            if m:
+                result["auth_method_status"]["method"] = m.group(1).strip()
 
-        key = re.sub(r"\s+", " ", m.group(1).strip())
-        value = m.group(2).strip()
-        policies[key] = value
+            # Extract Status (Authen Status for MAB/dot1x, Webauth State for Web Auth)
+            s = re.search(r"(?:Authen Status|Webauth State)\s*:\s*(.*)", line, re.IGNORECASE)
+            if s:
+                result["auth_method_status"]["status"] = s.group(1).strip()
 
-    return policies
+        # --- 2. Parse Resultant Policies ---
+        elif current_section == "resultant":
+            # Expect indented "key : value"
+            kv = re.match(r"^\s+([^:]+?)\s*:\s*(.+)\s*$", line)
+            if kv:
+                key = re.sub(r"\s+", " ", kv.group(1).strip())
+                value = kv.group(2).strip()
+                result["resultant_policies"][key] = value
+
+    return result
 
 def parse_show_wireless_exclusionlist_client_detail(output: str) -> Dict[str, Any]:
     """
@@ -1144,7 +1058,6 @@ class WirelessControllerInfo:
             ewlc_flag = True
 
         self.ewlc = ewlc_flag
-
 
 class WirelessEndpointMac:
     def __init__(self, device,mac):

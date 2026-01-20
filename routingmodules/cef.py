@@ -33,6 +33,86 @@ def parse_cef_sgt(output: str) -> Optional[int]:
             return int(m.group(1))
     return 0
 
+def parse_mpls_nexthops(output):
+    nh_list = []
+
+    # 1. Safely navigate to the prefix level
+    # We use next(iter(...)) to get the first VRF and Prefix found in the dict
+    vrf_dict = output.get('vrf', {})
+    vrf_name = next(iter(vrf_dict.keys()), None)
+    if not vrf_name:
+        return []
+
+    af_dict = vrf_dict[vrf_name].get('address_family', {}).get('ipv4', {})
+    prefix_dict = af_dict.get('prefix', {})
+    prefix_val = next(iter(prefix_dict.keys()), None)
+    if not prefix_val:
+        return []
+
+    # 2. Access the path_list
+    path_list = prefix_dict[prefix_val].get('path_list', {})
+
+    # 3. Iterate through each path group and individual path
+    for pl_id, pl_data in path_list.items():
+        paths = pl_data.get('path', {})
+
+        for p_id, p_data in paths.items():
+            # Extract Nexthop IP (often stored as 'address' or 'nexthop')
+            nh_ip = p_data.get('address') or p_data.get('nexthop')
+
+            # Extract OIF (Handle if it's a dict or a string)
+            oif_raw = p_data.get('interface')
+            if isinstance(oif_raw, dict):
+                oif_name = next(iter(oif_raw.keys()), None)
+            else:
+                oif_name = oif_raw
+
+            # 4. Construct the entry
+            entry = {
+                "nexthop": nh_ip,
+                "oif": oif_name
+            }
+
+            # 5. Check for 'unusable' status in flags or type
+            flags = str(p_data.get('flags', '')).lower()
+            p_type = str(p_data.get('type', '')).lower()
+
+            if 'unusable' in flags or 'unusable' in p_type:
+                entry["unusable"] = True
+
+            nh_list.append(entry)
+
+    return nh_list
+
+def is_mpls_labeled(cef_dict):
+    # Navigate to the prefix data
+    vrf_name = next(iter(cef_dict.get('vrf', {}).keys()), None)
+    if not vrf_name: return False
+
+    af_dict = cef_dict['vrf'][vrf_name].get('address_family', {}).get('ipv4', {})
+    prefix_val = next(iter(af_dict.get('prefix', {}).keys()), None)
+    if not prefix_val: return False
+
+    prefix_data = af_dict['prefix'][prefix_val]
+
+    # Check 1: Presence of labels in the output chain
+    if 'label' in prefix_data.get('output_chain', {}):
+        return True
+
+    # Check 2: 'rlbls' (Remote Labels) in top-level flags
+    if 'rlbls' in prefix_data.get('flags', []):
+        return True
+
+    # Check 3: 'must-be-lbld' in path flags
+    path_list = prefix_data.get('path_list', {})
+    for pl_id, pl_data in path_list.items():
+        paths = pl_data.get('path', {})
+        for p_id, p_data in paths.items():
+            if 'must-be-lbld' in str(p_data.get('flags', '')).lower():
+                return True
+
+    return False
+
 class IPCef:
 
     def __init__(self, ip, vrf, device):
@@ -56,6 +136,7 @@ class IPCef:
         #show ip route command:
         ipcefint_cmd = "show ip cef {} {} internal".format(vrf_mode,self.ip)
         ipcefint_op = get_single_output_genie(self.hostname,ipcefint_cmd,service)
+        ismpls = is_mpls_labeled(ipcefint_op)
         #VRF utilization
         prefix = None
         if vrf_mode == "":
@@ -105,6 +186,10 @@ class IPCef:
 
         #Next Hop Calculation
         if self.sources is not None:
+            if ismpls is True:
+                self.ismpls = True
+                nhlist = parse_mpls_nexthops(ipcefint_op)
+                self.nexthops = nhlist
             if any (x in self.sources for x in special_types):
                 special_flag = True
             if (no_ifnums is True) and (special_flag is False):

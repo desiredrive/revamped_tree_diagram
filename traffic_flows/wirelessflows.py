@@ -645,19 +645,48 @@ def wlcEndpointValidation(step, wlcname, endpoint_attributes,ewlcflag, service):
     flex_profile_obj = wlan_set.flexprofile
 
     #Extraction of Resultant Policies on the Endpoint side (ACL, URLFilter, SGT, RLOC and VNID)
-    endpoint_polcicies = getattr(endpoint_attributes, "endpoint_policies", None) or {}
-    redirect_acl = (endpoint_polcicies or {}).get("URL Redirect ACL")
+    endpoint_data = getattr(endpoint_attributes, "endpoint_policies", {}) or {}
 
-    if redirect_acl:
-        if not flex_profile_has_redirect_acl(flex_profile_obj, redirect_acl):
-            error = "Wireless Endpoint - Redirect ACL Missing in Flex Profile"
-            flex_name = ((flex_profile_obj or {}).get("flex_profile", {}) or {}).get("name")
+    res_policies = endpoint_data.get("resultant_policies", {})
+    auth_status = endpoint_data.get("auth_method_status", {})
+
+    method = (auth_status.get("method") or "").upper()
+
+    acl_to_validate = None
+    acl_type_label = ""
+
+    # 2. Apply logic: MAB needs URL Redirect ACL, Webauth needs Preauth ACL
+    if "MAB" in method:
+        acl_to_validate = res_policies.get("URL Redirect ACL")
+        acl_type_label = "URL Redirect ACL"
+    elif "WEB" in method:
+        acl_to_validate = res_policies.get("Preauth ACL")
+        acl_type_label = "Preauth ACL"
+
+    # 3. Perform validation against the Flex Profile
+    if acl_to_validate:
+        if not flex_profile_has_redirect_acl(flex_profile_obj, acl_to_validate):
+            error = "Wireless Endpoint - Policy ACL Missing in Flex Profile"
+            flex_name = (getattr(flex_profile_obj, "flex_profile", {}) or {}).get("name", "Unknown")
+
             message = (
-                f"Endpoint {mac} has received the URL Redirect ACL '{redirect_acl}' in resultant policies, but it is not present in "
-                f"Flex profile '{flex_name}'. Remediation: add the redirect ACL to the Flex profile Policy ACL list as CWA ACL"
-                f"or adjust the AAA/redirect policy to reference an ACL available on the AP."
+                f"Endpoint {mac} is authenticated via {method} and requires the {acl_type_label} '{acl_to_validate}'. "
+                f"Finding: This ACL is missing from Flex profile '{flex_name}'. "
+                f"Remediation: Add the ACL '{acl_to_validate}' to the Flex profile 'Policy ACL' list. "
+                f"For MAB/CWA, ensure it is marked as 'Central Webauth' (ENABLED)."
             )
             exit_program(step, process, subprocess, hostname, error, message)
+        else:
+            msg1 = f"Wireless Endpoint - {acl_type_label} Validated"
+            message = f"The required {acl_type_label} '{acl_to_validate}' for {method} was successfully found in the Flex Profile."
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+    elif method:
+        # If a method is found but no ACL is assigned to it in the resultant policies
+        msg1 = "Wireless Endpoint - No Redirect Policy"
+        message = f"Endpoint {mac} is authenticated via {method}, but no redirection ACL (URL Redirect or Preauth) was pushed by the AAA server."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
 
     # endpoint_attributes.endpointinfo is expected to come from parse_show_wireless_client_detail(...)
     fabric = (endpointinfo.get("fabric", {}) or {})

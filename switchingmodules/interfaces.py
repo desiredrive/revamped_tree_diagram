@@ -14,79 +14,93 @@ def show_run_interface(interface, pattern, device, service):
         
         return parsedstring
 
-class Interfaces:
 
+class Interfaces:
     def __init__(self, interface, device):
         self.hostname = device
-        self.interface = interface 
+        self.interface = interface
+        # Initialize attributes with defaults to prevent AttributeError elsewhere
+        self.linestate = None
+        self.operstate = None
+        self.encapsulations = None
+        self.bw = None
+        self.delay = None
+        self.connected = None
+        self.errdisabled = None
+        self.intfmac = None
+        self.description = None
+        self.mtu = None
+        self.txload = None
+        self.rxload = None
+        self.speed = None
+        self.intfsubnet = {}
+        self.intfips = []
+        self.iqdrops = 0
+        self.outputdrops = 0
+        self.crcerrors = 0
+        self.giants = 0
+        self.runts = 0
+        self.inputpps = 0
+        self.outputpps = 0
 
     def show_interface(self, service):
-        intf_cmd = "show interface {}".format(self.interface)
-        intf_op = radkit_cli.get_single_output_genie(self.hostname,intf_cmd,service)
-        interface = None
-        for i in intf_op:
-            if "exclude" in i:
-                continue
-            else:
-                interface = i
-        interface_path = intf_op[interface]
-        self.linestate = interface_path['line_protocol']
-        self.operstate = interface_path['oper_status']
-        self.encapsulations = interface_path['encapsulations']
-        self.bw = interface_path['bandwidth']
-        self.delay = interface_path['delay']
-        try:
-            self.connected = interface_path['connected']
-        except KeyError:
-            pass
-        try:
-            self.errdisabled = interface_path['err_disabled']
-        except KeyError:
-            pass
-        try:
-            self.intfmac = interface_path['mac_address']
-        except KeyError:
-            pass
-        try:
-            self.description = interface_path['description']
-        except KeyError:
-            pass
-        self.mtu = interface_path['mtu']
-        self.txload = interface_path['txload']
-        self.rxload = interface_path['rxload']
-        try:
-            self.speed = interface_path['port_speed']
-        except KeyError:
-            pass
-        #IP and Subnet Information (if any)
-        ip = None
-        try:
-            self.intfsubnet = interface_path['ipv4']
-            ips = []
-            for i in self.intfsubnet:
-                subnet = i
-                ip = self.intfsubnet[subnet][ip]
-                ips.append(ip)
-            self.intfips = ips
-        except KeyError:
-            pass
-        #Queues
-        try:
-            interface_queues_path = intf_op[interface]['queues']
-            self.iqdrops = interface_queues_path['input_queue_drops']
-            self.outputdrops = interface_queues_path['total_output_drop']
-        except KeyError:
-            pass
-        #Counters
-        try:
-            interface_counters_path = intf_op[interface]['counters']
-            self.crcerrors = interface_counters_path['in_crc_errors']
-            self.giants = interface_counters_path['in_giants']
-            self.runts = interface_counters_path['in_runts']
-            self.inputpps = interface_counters_path['rate']['in_rate_pkts']
-            self.outputpps = interface_counters_path['rate']['out_rate_pkts']
-        except KeyError:
-            pass
+        intf_cmd = f"show interface {self.interface}"
+        # Safely get the dictionary from Genie
+        intf_op = radkit_cli.get_single_output_genie(self.hostname, intf_cmd, service)
+
+        # 1. Guard clause: if Genie returned None, exit early
+        if not intf_op:
+            return
+
+        # 2. Identify the correct interface key in the returned dictionary
+        # Genie returns a dict where the key is the interface name (e.g., {"TenGigabitEthernet1/0/5": {...}})
+        interface_key = None
+        for key in intf_op:
+            if "exclude" not in key.lower() and key != "info":
+                interface_key = key
+                break
+
+        if not interface_key:
+            return
+
+        interface_path = intf_op[interface_key]
+
+        # 3. Extract basic info using .get() for safety
+        self.linestate = interface_path.get('line_protocol')
+        self.operstate = interface_path.get('oper_status')
+        self.encapsulations = interface_path.get('encapsulations')
+        self.bw = interface_path.get('bandwidth')
+        self.delay = interface_path.get('delay')
+        self.connected = interface_path.get('connected')
+        self.errdisabled = interface_path.get('err_disabled')
+        self.intfmac = interface_path.get('mac_address')
+        self.description = interface_path.get('description')
+        self.mtu = interface_path.get('mtu')
+        self.txload = interface_path.get('txload')
+        self.rxload = interface_path.get('rxload')
+        self.speed = interface_path.get('port_speed')
+
+        # 4. IP and Subnet Information
+        ipv4_data = interface_path.get('ipv4', {})
+        self.intfsubnet = ipv4_data
+        if ipv4_data:
+            # Extract IPs from the nested subnets
+            self.intfips = [details.get('ip') for subnet, details in ipv4_data.items() if 'ip' in details]
+
+        # 5. Queues and Counters
+        queues = interface_path.get('queues', {})
+        self.iiqdrops = queues.get('input_queue_drops', 0)
+        self.outputdrops = queues.get('total_output_drop', 0)
+
+        counters = interface_path.get('counters', {})
+        self.crcerrors = counters.get('in_crc_errors', 0)
+        self.giants = counters.get('in_giants', 0)
+        self.runts = counters.get('in_runts', 0)
+
+        # Rate counters
+        rate = counters.get('rate', {})
+        self.inputpps = rate.get('in_rate_pkts', 0)
+        self.outputpps = rate.get('out_rate_pkts', 0)
 
     def show_interface_counters(self,service):
         intfc_cmd = "show interface {} counter".format(self.interface)

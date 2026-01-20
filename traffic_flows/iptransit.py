@@ -415,21 +415,41 @@ def petr_availability(hostname, vrf, iid, ispubsub, border_type, service, step):
 
     return extracted_data
 
-def forwarding_state(iid,dstip, hostname, vrf, service,step):
-    forwarding_state = IPCef(dstip,vrf,hostname)
+def forwarding_state(iid, dstip, hostname, vrf, service, step):
+    forwarding_state = IPCef(dstip, vrf, hostname)
     forwarding_state.get_cef_internal(service)
-    #If the forwarding state has LISP as OIF, retrieve Map_Cache.
-    #If the forwarding state has LISP as OIF, retrieve forwarding EID remote
-    #If the forwarding state has LISP as OIF and the nexthop is "attached", treat it as Glean, totalphy is empty
-    #If the forwarding state has LISP as OIF and the nexthop have RLOCs, recurse to the underlay.
+
+    process = "externalConnectivity"
+    subprocess = "[forwardingValidation]"
+
     lispmapcache = None
     lispforwarding = None
     rlocs = []
     total_phys = []
     map_cache_triggered = False
+
+    # --- 1. Check for Unusable MPLS/VPNv4 Path at the Object Level ---
+    # We check the 'ismpls' attribute directly from the forwarding_state object
+    if getattr(forwarding_state, "ismpls", False):
+        msg1 = "Fabric Edge - Unusable MPLS Path"
+        message = (
+            f"Finding: The CEF entry for {dstip} is identified as an unusable MPLS/VPNv4 path. "
+            f"Reason: In SD-Access, a BGP VPNv4 route is a last-resort path that should not be used "
+            f"for data plane forwarding. This occurs when the expected LISP or iBGP VRF route is missing. "
+            f"Action: Treating this path as 'drop' to prevent suboptimal or broken routing."
+        )
+        logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+        total_phys.append("drop")
+        # Since the path is unusable, we return early with the 'drop' status
+        return forwarding_state, lispmapcache, lispforwarding, total_phys
+
+    # --- 2. Process Nexthops (Only if not MPLS) ---
     for nh in (getattr(forwarding_state, "nexthops", None) or []):
         nexthop = (nh.get("nexthop") or "").strip()
         oif_val = nh.get("oif")
+
+        # Normalize OIF to a list of strings
         if isinstance(oif_val, dict):
             oifs = list(oif_val.keys())
         elif isinstance(oif_val, str):
@@ -439,49 +459,60 @@ def forwarding_state(iid,dstip, hostname, vrf, service,step):
 
         for oif in oifs:
             oif_str = str(oif)
+
             # OIF is LISP
             if oif_str.startswith("LISP"):
                 if not map_cache_triggered:
-                    # Trigger Map-Cache and LISP FWDING
-                    map_cache = LISPMapCache(iid,hostname)
-                    map_cache.mapcache("ipv4",dstip,service)
+                    map_cache = LISPMapCache(iid, hostname)
+                    map_cache.mapcache("ipv4", dstip, service)
                     lispmapcache = map_cache
+
                     lispfwd = LISPForwarding(hostname, iid)
                     lispfwd.fwdingeidremote(dstip, service)
+                    lispforwarding = lispfwd
+
                     fwdeidremote = getattr(lispfwd, "fwdeidremote", None) or {}
                     ifnums = fwdeidremote.get("ifnums", []) or []
                     rlocs = [x.get("rloc") for x in ifnums if isinstance(x, dict) and x.get("rloc")]
+                    map_cache_triggered = True
+
                 if nexthop.lower() == "attached":
-                    continue  # no interface added
-                #Underlay Recursion for available nexthop
+                    continue
+
                 for rloc in rlocs:
-                    underlaycef = IPCef(rloc, None,hostname)
+                    underlaycef = IPCef(rloc, None, hostname)
                     underlaycef.get_cef_internal(service)
-                    phys_list = physical_recursion(underlaycef,hostname)
-                    phys_list.get_physical_interfaces(service,step)
-                    phys_list = phys_list.total_phys
+                    phys_list_obj = physical_recursion(underlaycef, hostname)
+                    phys_list_obj.get_physical_interfaces(service, step)
+                    phys_list = phys_list_obj.total_phys
                     normalized = [item for sublist in phys_list for item in sublist]
                     total_phys.extend(normalized)
                 continue
 
             # OIF is Null/Drop/Tunnel
-            if oif_str in {"Null0", "Drop", "drop"} or oif_str.startswith("Tunnel"):
+            if oif_str.lower() in {"null0", "drop"} or oif_str.startswith("Tunnel"):
                 total_phys.append(oif_str)
                 continue
+
             # OIF is VLAN
             if oif_str.startswith("Vlan"):
-                ipcefvlan = IPCef(dstip,vrf,hostname)
+                ipcefvlan = IPCef(dstip, vrf, hostname)
                 ipcefvlan.get_cef_internal(service)
-                phys_list = physical_recursion(ipcefvlan,hostname)
-                phys_list.get_physical_interfaces(service,step)
-                phys = phys_list.total_phys
+                phys_list_obj = physical_recursion(ipcefvlan, hostname)
+                phys_list_obj.get_physical_interfaces(service, step)
+                phys = phys_list_obj.total_phys
+                if any(isinstance(i, list) for i in phys):
+                    phys = [item for sublist in phys for item in sublist]
                 total_phys.extend(phys)
+
             # Otherwise treat as physical
             else:
                 total_phys.append(oif_str)
 
+    # De-duplicate and preserve order
     seen = set()
-    total_phys =  [i for i in total_phys if not (i in seen or seen.add(i))]
+    total_phys = [i for i in total_phys if not (i in seen or seen.add(i))]
+
     return forwarding_state, lispmapcache, lispforwarding, total_phys
 
 def destinationreachability(hostname, vrf,dstip, sourceintf, service, step):
@@ -573,31 +604,42 @@ def interfacecounters(sourceports, dstports, hostname, service):
         interface_objects.append(interfaceobject)
     return interface_objects
 
-def ctsinformation(dstip,vrf,hostname,destcefinformation, egressintf, service, step):
-
+def ctsinformation(dstip, vrf, hostname, destcefinformation, egressintf, service, step):
     process = "externalConnectivity"
     subprocess = "ctsEnforcement"
     ctsenforcementinfo = []
-    l3interfaces = destcefinformation.nexthops
+
+    # 1. Safely retrieve nexthops to prevent 'NoneType' iteration error
+    l3interfaces = getattr(destcefinformation, "nexthops", []) or []
+
+    if not l3interfaces:
+        msg1 = "CTS Enforcement - No Path Found"
+        message = f"Finding: No L3 nexthops found in CEF for destination {dstip}. Action: Skipping CTS validation."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        return ctsenforcementinfo, step + 1
+
+    # 2. Extract unique Outgoing Interfaces (OIFs)
     oifs = []
     for item in l3interfaces:
         oif = item.get("oif")
         if isinstance(oif, dict):
+            # Extract the first key if it's a dictionary
             oifs.append(next(iter(oif.keys()), None))
         else:
             oifs.append(oif)
 
+    # Remove duplicates while preserving order
     oifs_unique = [x for x in dict.fromkeys(oifs) if x]
-    for oif in (oifs_unique or []):
-        if not oif:
-            continue
 
+    # 3. Evaluate each unique interface
+    for oif in oifs_unique:
         oif_str = str(oif)
 
-        if "LISP" in oif_str:
+        if "LISP" in oif_str.upper():
             msg1 = "CTS Enforcement - LISP Interface"
             message = (
-                f"CTS enforcement is not evaluated on LISP interfaces ({oif_str}); CTS validation is not required for this path."
+                f"Finding: Path uses LISP interface {oif_str}. "
+                f"Action: CTS enforcement is not evaluated on LISP interfaces; skipping validation for this hop."
             )
             logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
             step += 1
@@ -606,19 +648,25 @@ def ctsinformation(dstip,vrf,hostname,destcefinformation, egressintf, service, s
         elif oif_str.startswith("Vlan"):
             msg1 = "CTS Enforcement - VLAN Interface"
             message = (
-                f"CTS enforcement will be evaluated at the VLAN level and at the downstream Layer 2 port(s) for {oif_str}."
+                f"Finding: Path uses {oif_str}. "
+                f"Action: CTS will be evaluated at the VLAN and downstream port level."
             )
             logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
             step += 1
 
+            # Initialize CTS info object
             ctsinfo = cts_endpoint_info(dstip, vrf, hostname)
             ctsinfo.cts_sgt_mapping(service)
-            m = search(r"vlan\s*(\d+)", oif_str, IGNORECASE)
-            vlan_id = int(m.group(1)) if m else None
+
+            # Extract VLAN ID from string (e.g., 'Vlan3002' -> 3002)
+            vlan_match = re.search(r"vlan\s*(\d+)", oif_str, re.IGNORECASE)
+            vlan_id = int(vlan_match.group(1)) if vlan_match else None
+
+            # Perform enforcement check
             ctsinfo.cts_enforcement(vlan_id, egressintf, service)
             ctsenforcementinfo.append(ctsinfo)
 
-    return ctsenforcementinfo
+    return ctsenforcementinfo, step
 
 def aclinformation(handoff_list, target_vrf, hostname,service):
     """
@@ -1477,18 +1525,32 @@ def validate_destination_not_lisp(border, step, hostname):
             step += 1
             return step
 
-    # If LISP is not in any OIF, validate physical recursion using destoutgoingports
+    # 1. Check if the list is empty (Recursion failure)
     if not destoutgoingports:
         error = "External Connectivity - Destination Recursion Failed"
         message = (
-            f"Destination {dstip} on {hostname} is not using LISP forwarding, but no physical outgoing ports were derived. "
-            f"This indicates recursion to an egress interface was not possible for reaching the destination."
+            f"Finding: Destination {dstip} on {hostname} is not using LISP forwarding, but no physical outgoing ports were derived. "
+            f"Remediation: This indicates recursion to an egress interface was not possible. Verify the routing table (RIB) "
+            f"and CEF adjacency for the destination IP."
         )
         exit_program(step, process, subprocess, hostname, error, message)
 
+    # 2. Check for "drop" or "null" in the outgoing ports (Case-insensitive)
+    bad_ports = [p for p in destoutgoingports if any(x in str(p).lower() for x in ["drop", "null"])]
+
+    if bad_ports:
+        error = "External Connectivity - Destination Dropped"
+        message = (
+            f"Finding: Destination {dstip} on {hostname} resolves to an invalid outgoing port: {bad_ports}. "
+            f"Remediation: A 'drop' or 'null' adjacency in CEF indicates a routing blackhole. "
+            f"Verify the routing protocol state (BGP/LISP) and ensure a valid next-hop is present in the RIB."
+        )
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    # 3. Success Log
     msg1 = "External Connectivity - Destination Forwarding"
     message = (
-        f"Destination {dstip} on {hostname} resolves to the following outgoing interface(s): {destoutgoingports}."
+        f"Finding: Destination {dstip} on {hostname} resolves to the following outgoing interface(s): {destoutgoingports}."
     )
     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     step += 1

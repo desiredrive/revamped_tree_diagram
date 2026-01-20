@@ -2534,8 +2534,11 @@ class CEFForwardingState:
     def cef_underlay(self, underlay_prefixes: list, service):
         hostname = self.device
         cef_internal_underlay = []
+        # Guard clause: if underlay_prefixes is None, treat it as an empty list
+        if underlay_prefixes is None:
+            underlay_prefixes = []
         for prefix in underlay_prefixes:
-            cef_internal = IPCef(prefix,None,hostname)
+            cef_internal = IPCef(prefix, None, hostname)
             cef_internal.get_cef_internal(service)
             cef_internal_underlay.append(cef_internal)
         self.cef_internal_underlay = cef_internal_underlay

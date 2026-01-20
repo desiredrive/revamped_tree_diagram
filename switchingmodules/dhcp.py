@@ -451,14 +451,16 @@ class DHCPDevice:
             self.helper_addresses
             self.lisp_mobility_entries
 
-    def dhcpsnoopclientstat(self,mac,anycastgw,helpers,service,step):
+    def dhcpsnoopclientstat(self, mac, anycastgw, helpers, service, step):
         hostname = self.device
         showclockcmd = "show clock"
-        showclockop = get_single_output_genie(hostname,showclockcmd,service)
-        #For the past hour, parse the events of dhcpsnoopclient:
+        showclockop = get_single_output_genie(hostname, showclockcmd, service)
         pipe_string = generate_ios_pipe(showclockop)
         dhcpsnoocmd = f"show platform dhcpsnooping client stat {mac} {pipe_string}"
-        dhcpsnoopop = get_any_single_output(hostname,dhcpsnoocmd,service)
-        analyze_dhcp_snooping_trace(dhcpsnoopop,anycastgw,helpers,step)
+        dhcpsnoopop = get_any_single_output(hostname, dhcpsnoocmd, service)
+        # Capture the 3 values from the analysis function
+        step, final_status, summary_msg = analyze_dhcp_snooping_trace(dhcpsnoopop, anycastgw, helpers, step)
+        # Return the 2 values the main script is expecting
+        return step, final_status
 
 

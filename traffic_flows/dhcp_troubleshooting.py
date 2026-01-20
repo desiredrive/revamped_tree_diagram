@@ -98,13 +98,15 @@ class EdgeNodeClassifier:
         dhcpparameters.svi_running_config(vlan,service)
         self.dhcpparameters_info = dhcpparameters
 
-    def dhcpsnoopingclientstats(self,service,step):
+    def dhcpsnoopingclientstats(self, service, step):
         hostname = self.profiled_device.hostname
         mac = self.mac
         anycastgw = self.dhcpparameters_info.prefix
-        helpers =  self.dhcpparameters_info.helper_address
+        helpers = self.dhcpparameters_info.helper_address
         dhcpsnoopingclientstatistics = DHCPDevice(hostname)
-        dhcpsnoopingclientstatistics.dhcpsnoopclientstat(mac,anycastgw,helpers,service,step)
+        # Add 'return' here so the values pass back up to the main script
+        return dhcpsnoopingclientstatistics.dhcpsnoopclientstat(mac, anycastgw, helpers, service, step)
+
 
     def raclvaclpacl(self,service,step):
         hostname = self.profiled_device.hostname
@@ -184,11 +186,11 @@ def dhcp_mac_address_validation(mac_learning_info,step):
     process = "dhcpTroubleshooting"
     subprocess = "[macAddressLearning]"
 
-    port = mac_learning_info.port
-    type = mac_learning_info.type
-    mac = mac_learning_info.mac
-    vlan = mac_learning_info.vlan
-    hostname = mac_learning_info.hostname
+    port = getattr(mac_learning_info, "port", None)
+    m_type = getattr(mac_learning_info, "type", None)
+    mac = getattr(mac_learning_info, "mac", "Unknown")
+    vlan = getattr(mac_learning_info, "vlan", "Unknown")
+    hostname = getattr(mac_learning_info, "hostname", "Unknown")
 
     #If 'port' attribute is set to None, exit the program, no MAC address was found
     if port is None:
@@ -1159,14 +1161,28 @@ def forwarding_parameters_recursion(cefinternallist_info,catc_name,step, hostnam
         final_rlocs_list = unique_list
         return final_rlocs_list
 
-def underlay_ports(ports,hostname,step):
+def underlay_ports(ports, hostname, step):
     subprocess = "[edgeNodeForwarding]"
     process = "dhcpTroubleshooting"
+
+    # Check if the ports list is empty or None
+    if not ports:
+        error = "Fabric Edge - Underlay Recursion Failed"
+        message = (
+            "Finding: No physical outgoing ports were identified for the LISP/VXLAN forwarding path to the DHCP server. "
+            "Remediation: Verify CEF recursion to the DHCP server on the fabric edge; ensure a valid RLOC is reachable "
+            "and that the underlay routing path to the DHCP server is operational."
+        )
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    # If ports are found, log the success
     msg1 = "Fabric Edge - DHCP Forwarding Path"
     message = (
-        f"The following physical ports were identified for the LISP/VXLAN forwarding path to the DHCP server: {ports}."
+        f"Finding: The following physical ports were identified for the LISP/VXLAN forwarding path to the DHCP server: {ports}."
     )
     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+    return step + 1
 
 def rloc_reachability(ports, hostname, service, rlocs, step):
     subprocess = "[underlayReachability]"
@@ -1301,6 +1317,120 @@ def local_policies(dhcpparameters_info, hostname, vlan_id, port, service, step):
     # Return both lists separately
     return unique_racls, unique_vacls
 
+def process_map_cache_recursion(edge_node_device, mac, vlan, service, step, iid, vrf):
+    """
+    Analyzes LISP map-cache entries for helper addresses.
+    Triggers LISP and Border troubleshooting flows for unresolved entries.
+    Returns the updated step and a list of valid forwarding_prefixes.
+    """
+    process = "dhcpTroubleshooting"
+    subprocess = "[edgeNodeForwarding]"
+    forwarding_prefixes = []
+    # Safely retrieve the profiled_device object, defaulting to None if missing or if edge_node_device is None
+    sourcextr = getattr(edge_node_device, "profiled_device", None) if edge_node_device else None
+    mgmtip = (getattr(sourcextr, "mgmtip", "Unknown") or "Unknown") if sourcextr else "Unknown"
+    catc_name = (getattr(sourcextr, "dnac", "Unknown") or "Unknown") if sourcextr else "Unknown"
+    hostname = (getattr(edge_node_device, "hostname", "Unknown") or "Unknown") if sourcextr else "Unknown"
+    fabric_id  = (getattr(sourcextr, "fabric_id", "Unknown") or "Unknown") if sourcextr else "Unknown"
+    srcip = getattr(sourcextr, "loopback", None) if sourcextr else None
+    map_caches = (getattr(getattr(edge_node_device, "lispparameters_info", None), "map_cache_information", []) or [])
+    # Helper for shared object access
+
+    for map_cache in map_caches:
+        # Safely get the attributes
+        source_type = str(getattr(map_cache, "sources", "")).lower()
+        helper_address = getattr(map_cache, "requested_eid", "Unknown")
+        eid_prefix = getattr(map_cache, "eid_prefix", None)
+        rlocs = getattr(map_cache, "rlocs", []) or []
+
+        # --- Scenario 1: Data-Signal Detected ---
+        if "data-signal" in source_type:
+            msg1 = "LISP Map-Cache - Data-Signal Detected"
+            message = (
+                f"Finding: Map-cache for helper address {helper_address} is in 'data-signal' state. "
+                f"Action: Triggering LISP session flow to investigate Control Plane connectivity."
+            )
+            logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+            # Trigger the LISP session flow
+            step = singleETRProfiling(mgmtip, mac, vlan, None, catc_name, service, step, sourcextr)
+            continue
+
+            # --- Scenario 2: Default Route Recursion with No RLOCs ---
+        elif eid_prefix == "0.0.0.0/0" and not rlocs:
+            msg1 = "LISP Map-Cache - Default Route Recursion"
+            message = (
+                f"Finding: Map-cache for destination {helper_address} resolves to the default route (0.0.0.0/0) "
+                f"but contains no valid RLOCs. Action: Initiating LISP troubleshooting and Border validation."
+            )
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+            # 1. Trigger LISP Troubleshooting Session
+            step = singleETRProfiling(mgmtip, mac, vlan, vrf, catc_name, service, step, sourcextr)
+            # 2. Trigger Border Validation Functions (using helper_address as dstip)
+            border_objects, step = border_ip_transit(step, catc_name, fabric_id, vrf, vlan, srcip, helper_address,
+                                                     service, True, iid)
+            continue
+
+            # --- Scenario 3: Valid/Standard Source ---
+        # Purge RLOCs not in "up" state
+        new_rlocs = [rloc for rloc in rlocs if rloc.get('state') == 'up']
+
+        if new_rlocs:
+            prefixes = {
+                'prefix': helper_address,
+                'expectedrlocs': new_rlocs
+            }
+            forwarding_prefixes.append(prefixes)
+        else:
+            msg1 = "LISP Map-Cache - No Active RLOCs"
+            message = f"Finding: Map-cache for {helper_address} found, but no RLOCs are in the 'up' state."
+            logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+            step += 1
+
+    return step, forwarding_prefixes
+
+def validate_dhcp_server_compatibility(border_objects, dora_state, step):
+    """
+    Final validation to check if the DHCP server supports Option 82
+    when reachability is confirmed but DORA fails at the start.
+    """
+    process = "dhcpTroubleshooting"
+    subprocess = "[serverCompatibility]"
+    hostname = "Fabric-Wide"
+
+    # Check if at least one border successfully pinged the DHCP server
+    # (Assuming border_objects have a 'ping_reachable' attribute from your border_ip_transit logic)
+    reachability_confirmed = any(getattr(border, 'ping_reachable', False) for border in border_objects)
+
+    if dora_state == "STUCK at DISCOVER" and reachability_confirmed:
+        msg1 = "DHCP - Option 82 & Server Trust"
+        message = (
+            "CRITICAL REVIEW REQUIRED: The DHCP process is STUCK at DISCOVER, but the Border nodes "
+            "have confirmed IP reachability to the DHCP server. In SD-Access, the Fabric Edge "
+            "inserts Option 82 (Relay Agent Information). If the DHCP server is not configured to "
+            "honor or trust Option 82, it will silently drop the DISCOVER or strip the option from the OFFER."
+        )
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+
+        # List of well-known servers with specific Option 82 requirements
+        compat_list = (
+            "\nManual Verification Steps for DHCP Servers:\n"
+            "1. Microsoft Windows Server: Ensure 'Relay Agent Information' is enabled and the 'Trust' bit is considered.\n"
+            "2. Infoblox: Must be configured to 'Trust Relay Agent Option' and 'Echo back Option 82'.\n"
+            "3. BlueCat: Check if the 'Relay Agent Info' deployment option is active for the specific subnet.\n"
+            "4. Cisco Prime/CNR: Verify that the server is not configured to drop packets with existing Option 82 information.\n"
+            "5. ISC DHCP (Linux): Ensure 'stash-agent-options' is enabled and the server is configured to permit agent options."
+        )
+        logging_info(step, process, subprocess, hostname, compat_list)
+
+    elif dora_state == "STUCK at DISCOVER" and not reachability_confirmed:
+        logging_info(step, process, subprocess, hostname, "DHCP - Server Reachability | Borders cannot reach the DHCP server. Fix routing/ACLs before checking Option 82.")
+
+    return step + 1
+
 def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, service):
 
         process = "dhcpTroubleshooting"
@@ -1414,7 +1544,14 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
 
-        edge_node_device.dhcpsnoopingclientstats(service,step)
+        # DHCP Configuration
+        subprocess = "[dhcpParameters]"
+        msg1 = "DHCP - DHCPSnooping Statistics"
+        message = "Evaluating DHCP transaction logs to determine the specific DORA stage reached by the endpoint."
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+        step, dora_state = edge_node_device.dhcpsnoopingclientstats(service,step)
 
         #Local Policies (ACL, VACL, PACL)
         #DHCP Configuration
@@ -1444,27 +1581,15 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         sisf_info = edge_node_device.sisfparameters_info
         lisp_parameters_validation_edge(lisp_info,pub_sub_flag,step,dhcp_info,sisf_info)
         iid = lisp_info.iid
-        #Recursion to CEF (LISP)
+
+        # Recursion to CEF (LISP)
         subprocess = "[edgeNodeForwarding]"
         msg1 = "DHCP - CEF, Route Recursion and RLOC Reachability"
-        message = f"DHCP Troubleshooting: Recursing Map-Cache information into CEF"
+        message = "DHCP Troubleshooting: Recursing Map-Cache information into CEF"
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
 
-        map_caches = edge_node_device.lispparameters_info.map_cache_information
-        #Sanitize map-caches to remove repeated ones, also purge RLOCs not in "up" state
-        forwarding_prefixes = []
-        for map_cache in map_caches:
-
-            helper_address = map_cache.requested_eid
-            rlocs = map_cache.rlocs
-            new_rlocs = [rloc for rloc in rlocs if rloc.get('state') == 'up']
-            prefixes = {
-                'prefix' : helper_address,
-                'expectedrlocs' : new_rlocs
-            }
-            if len(new_rlocs) != 0:
-                forwarding_prefixes.append(prefixes)
+        step, forwarding_prefixes = process_map_cache_recursion(edge_node_device,mac,vlan,service,step,iid,vrf)
 
         #Recursion to CEF Underlay
         subprocess = "[edgeNodeForwarding]"
@@ -1503,7 +1628,7 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         step += 1
 
         validate_border_acls(border_objects, service, step)
-
+        validate_dhcp_server_compatibility(border_objects,dora_state,step)
 
 
 
