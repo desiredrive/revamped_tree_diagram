@@ -2,17 +2,24 @@ import radkit_cli
 
 #Platform Independent = IOS 
 def show_run_interface(interface, pattern, device, service):
-        intf_cmd = "show running-config interface {} | i {}".format(interface,pattern)
-        intf_op = radkit_cli.get_any_single_output(device,intf_cmd,service)
-        matches = ['#', 'show']
+    intf_cmd = f"show running-config interface {interface} | i {pattern}"
+    intf_op = radkit_cli.get_any_single_output(device, intf_cmd, service)
 
-        #Parsed without #show line
-        parsedstring = ''
-        for i in intf_op.splitlines():
-            if not any(x in i for x in matches):
-                parsedstring = parsedstring+"\n"+i
-        
-        return parsedstring
+    # 1. Guard Clause: If command failed or device is unreachable, return empty string
+    if intf_op is None:
+        return ""
+
+    # 2. Filter out command echo and prompt lines
+    # We use a list comprehension for better performance
+    exclude_markers = ['#', 'show']
+
+    filtered_lines = [
+        line for line in intf_op.splitlines()
+        if not any(marker in line for marker in exclude_markers)
+    ]
+
+    # 3. Join the lines back into a single string
+    return "\n".join(filtered_lines).strip()
 
 
 class Interfaces:

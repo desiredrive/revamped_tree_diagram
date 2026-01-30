@@ -1628,7 +1628,7 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         step += 1
 
         validate_border_acls(border_objects, service, step)
-        validate_dhcp_server_compatibility(border_objects,dora_state,step)
+        #validate_dhcp_server_compatibility(border_objects,dora_state,step)
 
 
 

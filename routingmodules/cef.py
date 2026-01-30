@@ -85,33 +85,48 @@ def parse_mpls_nexthops(output):
     return nh_list
 
 def is_mpls_labeled(cef_dict):
-    # Navigate to the prefix data
-    vrf_name = next(iter(cef_dict.get('vrf', {}).keys()), None)
-    if not vrf_name: return False
+    """
+    Precisely detects if a CEF entry is currently being MPLS-labeled in the data plane.
+    Returns True only if the output chain contains labels or the path is marked as 'must-be-lbld'.
+    """
+    # 1. Navigate to the prefix data safely
+    vrf_dict = cef_dict.get('vrf', {})
+    vrf_name = next(iter(vrf_dict.keys()), None)
+    if not vrf_name:
+        return False
 
-    af_dict = cef_dict['vrf'][vrf_name].get('address_family', {}).get('ipv4', {})
-    prefix_val = next(iter(af_dict.get('prefix', {}).keys()), None)
-    if not prefix_val: return False
+    af_dict = vrf_dict[vrf_name].get('address_family', {}).get('ipv4', {})
+    prefix_dict = af_dict.get('prefix', {})
+    prefix_val = next(iter(prefix_dict.keys()), None)
+    if not prefix_val:
+        return False
 
-    prefix_data = af_dict['prefix'][prefix_val]
+    prefix_data = prefix_dict[prefix_val]
 
-    # Check 1: Presence of labels in the output chain
-    if 'label' in prefix_data.get('output_chain', {}):
+    # 2. Check the Output Chain (The most accurate indicator)
+    output_chain = prefix_data.get('output_chain', {})
+
+    # If 'label' is present, the packet is being encapsulated with MPLS
+    if 'label' in output_chain:
         return True
 
-    # Check 2: 'rlbls' (Remote Labels) in top-level flags
-    if 'rlbls' in prefix_data.get('flags', []):
-        return True
+    # If 'IP adj' is present, it's a standard IP path (even if rlbls is in the header)
+    # We check the keys of the output_chain for the string "IP adj"
+    if any("IP adj" in str(key) for key in output_chain.keys()):
+        return False
 
-    # Check 3: 'must-be-lbld' in path flags
+    # 3. Check for mandatory labeling flag in the path list
+    # This is the definitive signal from the BGP VPNv4 process
     path_list = prefix_data.get('path_list', {})
-    for pl_id, pl_data in path_list.items():
-        paths = pl_data.get('path', {})
-        for p_id, p_data in paths.items():
-            if 'must-be-lbld' in str(p_data.get('flags', '')).lower():
+    for pl_data in path_list.values():
+        for p_data in pl_data.get('path', {}).values():
+            flags = str(p_data.get('flags', '')).lower()
+            if 'must-be-lbld' in flags:
                 return True
 
+    # 4. Default to False (rlbls is ignored as it can appear on valid VLAN paths)
     return False
+
 
 class IPCef:
 
