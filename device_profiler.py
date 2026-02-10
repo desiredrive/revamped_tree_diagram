@@ -101,8 +101,7 @@ def rloc_definition(hostname, uuid, dnac, service,step):
             sys.exit("Error: {} | {}".format(error, message))
     else:
         error = "Error determining Remote Locator information"
-        message = "Empty output when profiling RLOC information on device: {}, veirfy it's Managed state on Catalyst Center or accessible via SSH/Telnet.".format(
-            hostname)
+        message = f"Empty output when profiling RLOC information on device: {hostname}. Verify its 'Managed' state on Catalyst Center and ensure it is accessible via SSH/Telnet."
         logging_error(step, process, subprocess, hostname, error)
         logging_info(step, process, subprocess, hostname, message)
         #raise BDBTaskError("Error: {} | {}".format(error, message))
@@ -149,12 +148,20 @@ def fabric_sites(siteNameHierarchy, dnac, service,step):
 
     process = 'deviceProfiler'
     subprocess = '[fabricSites]'
-
-    sitev2_api = "/dna/intent/api/v2/site?groupNameHierarchy={}".format(siteNameHierarchy)
+    isv1 = True  #Support for non v2 capable RADKIT Services
+    #sitev2_api = "/dna/intent/api/v2/site?groupNameHierarchy={}".format(siteNameHierarchy)
     fabricsite_api = "/dna/intent/api/v1/sda/fabricSites"
-    sitev2_response = get_catc_api(dnac,sitev2_api,service)['response']
+    #sitev2_response = get_catc_api(dnac,sitev2_api,service)
+    #if sitev2_response is None:
+    sitev2_api = "/dna/intent/api/v1/site?name={}".format(siteNameHierarchy)
+    sitev2_response = get_catc_api(dnac, sitev2_api, service)
+    isv1 = True
+    sitev2_response = sitev2_response['response']
     fabricsite_response = get_catc_api(dnac,fabricsite_api,service)['response']
-    grouphierarchy = sitev2_response[0]['groupHierarchy']
+    if isv1 is False:
+        grouphierarchy = sitev2_response[0]['groupHierarchy']
+    else:
+        grouphierarchy = sitev2_response[0]['siteHierarchy']
     fabric_id,site_id,is_pubsub_site = None,None,False
     for i in fabricsite_response:
         if i['siteId'] in grouphierarchy:
@@ -169,9 +176,14 @@ def fabric_sites(siteNameHierarchy, dnac, service,step):
         #raise BDBTaskError("Error: {} | {}".format(error, message))
         sys.exit("Error: {} | {}".format(error, message))
     else:
-        sitev2_finalsite_api = "/dna/intent/api/v2/site?id={}".format(site_id)
-        sitev2_finalsite_api_response = get_catc_api(dnac,sitev2_finalsite_api,service)['response']
-        site_hierarchy = sitev2_finalsite_api_response[0]['groupNameHierarchy']
+        if isv1 is False:
+            sitev2_finalsite_api = "/dna/intent/api/v2/site?id={}".format(site_id)
+            sitev2_finalsite_api_response = get_catc_api(dnac,sitev2_finalsite_api,service)['response']
+            site_hierarchy = sitev2_finalsite_api_response[0]['groupNameHierarchy']
+        else:
+            sitev2_finalsite_api = "/dna/intent/api/v1/site?siteId={}".format(site_id)
+            sitev2_finalsite_api_response = get_catc_api(dnac,sitev2_finalsite_api,service)['response']
+            site_hierarchy = sitev2_finalsite_api_response['siteNameHierarchy']
         return is_pubsub_site,fabric_id,site_id,site_hierarchy
 
 class Device:

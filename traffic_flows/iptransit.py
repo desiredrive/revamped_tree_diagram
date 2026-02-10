@@ -233,6 +233,14 @@ class ControlPlaneDevice:
         self.lispsession = lispsession
 
 #Collection Functions
+def get_obj_data(obj):
+    if hasattr(obj, 'to_dict'): # Common in Cisco/Genie objects
+        return obj.to_dict()
+    if hasattr(obj, '__dict__'):
+        return vars(obj)
+    if hasattr(obj, '__slots__'):
+        return {s: getattr(obj, s) for s in obj.__slots__ if hasattr(obj, s)}
+    return str(obj)
 
 def in_site_fabric_borders(step,fabric_id, catc_name, service):
     l3_borders = getFabricBorders(fabric_id,catc_name,service,step)
@@ -512,7 +520,6 @@ def forwarding_state(iid, dstip, hostname, vrf, service, step):
     # De-duplicate and preserve order
     seen = set()
     total_phys = [i for i in total_phys if not (i in seen or seen.add(i))]
-
     return forwarding_state, lispmapcache, lispforwarding, total_phys
 
 def destinationreachability(hostname, vrf,dstip, sourceintf, service, step):
@@ -662,8 +669,8 @@ def ctsinformation(dstip, vrf, hostname, destcefinformation, egressintf, service
             vlan_match = re.search(r"vlan\s*(\d+)", oif_str, re.IGNORECASE)
             vlan_id = int(vlan_match.group(1)) if vlan_match else None
 
-            # Perform enforcement check
-            ctsinfo.cts_enforcement(vlan_id, egressintf, service)
+            interface = egressintf[0]
+            ctsinfo.cts_enforcement(vlan_id, interface, service)
             ctsenforcementinfo.append(ctsinfo)
 
     return ctsenforcementinfo, step
@@ -1997,6 +2004,7 @@ def validate_control_plane_logic(border, step,service):
                 exit_program(step, process, "[siteUCI]", hostname, error, message)
 
         # --- 4) Pub/Sub: RLOC Members Distribute ---
+        '''
         rloc_dist = cp_config_dict.get("rloc_members_distribute")
         if is_pubsub and rloc_dist is False:
             error = "LISP CP Validation - RLOC Distribution Disabled"
@@ -2005,7 +2013,7 @@ def validate_control_plane_logic(border, step,service):
                 f"This command is indispensable for Control Plane operations in a Pub/Sub environment."
             )
             exit_program(step, process, "[cpConfig]", hostname, error, message)
-
+        '''
         # --- 5) LISP Session State ---
         peer_sessions = session_dict.get("peers", {}).get(target_ip, [])
         session_up = any(s.get("state") == "Up" for s in peer_sessions)
@@ -2028,16 +2036,26 @@ def validate_control_plane_logic(border, step,service):
 
             # --- 6) Pub/Sub: LISP Prefix-List (SITE_LOCAL_EIDS_V4) ---
         if is_pubsub:
-            prefix_lists = session_dict.get("lisp_prefixlist", {}).get("lisp_id", {}).get(0, {}).get("prefix_list_name",
-                                                                                                     {})
-            local_eids = prefix_lists.get("SITE_LOCAL_EIDS_V4", {}).get("entries", {})
-            if target_subnet not in local_eids:
-                error = "LISP CP Validation - Missing Prefix-List Entry"
-                message = (
-                    f"Subnet {target_subnet} is not configured in the LISP-internal prefix-list 'SITE_LOCAL_EIDS_V4' on {hostname}. "
-                    f"Remediation: add the subnet to the LISP prefix-list under the 'router lisp' process."
-                )
-                exit_program(step, process, "[prefixList]", hostname, error, message)
+            # 1. Safely get the top-level LISP data
+            lisp_prefix_data = session_dict.get("lisp_prefixlist")
+
+            # 2. If it's None or empty, SDA transit is not in use; skip this validation
+            if lisp_prefix_data is not None:
+                # Safely navigate the rest of the tree
+                prefix_lists = lisp_prefix_data.get("lisp_id", {}).get(0, {}).get("prefix_list_name", {})
+                local_eids = prefix_lists.get("SITE_LOCAL_EIDS_V4", {}).get("entries", {})
+
+                # 3. Only validate if we actually found local_eids data
+                if local_eids and target_subnet not in local_eids:
+                    error = "LISP CP Validation - Missing Prefix-List Entry"
+                    message = (
+                        f"Subnet {target_subnet} is not configured in the LISP-internal prefix-list 'SITE_LOCAL_EIDS_V4' on {hostname}. "
+                        f"Remediation: add the subnet to the LISP prefix-list under the 'router lisp' process."
+                    )
+                    exit_program(step, process, "[prefixList]", hostname, error, message)
+            else:
+                message = f"SDA Transit (LISP Prefix-List) is not in use on {hostname}. Skipping validation."
+                logging_info(step, process, "[prefixList]", hostname, message)
 
         # --- 7) Pub/Sub: Subscriber Type ---
         if is_pubsub:

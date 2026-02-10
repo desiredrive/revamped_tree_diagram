@@ -15,9 +15,7 @@ def get_catc_version(catc,service):
     process = 'catalystCenterAPI'
     subprocess = '[catalystCenterVersion]'
     api_url = "/dna/intent/api/v1/dnac-release"
-    print (catc)
     api_response = get_catc_api(catc, api_url, service)
-    print (api_response)
     version = (api_response['response']['displayVersion'])
     match = re.match(r'^(\d+\.\d+\.\d+\.\d+)', version)
     if match:

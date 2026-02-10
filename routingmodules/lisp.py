@@ -1221,6 +1221,32 @@ def parse_lisp_site_config(output):
 
     return site_data
 
+def parse_lisp_vrf_output(output):
+    """
+    Parses 'show lisp vrf' output to extract IPv4 topoid and LISP IID.
+    """
+    vrf_id = None
+    lisp_iid = None
+
+    # 1. Extract the IPv4 Section specifically to avoid mixing with IPv6 data
+    # This regex looks for everything between 'Topology IPv4' and the next 'Topology' or end of string
+    ipv4_section_match = re.search(r"(Topology IPv4.*?)(?=Topology|$)", output, re.DOTALL | re.IGNORECASE)
+
+    if ipv4_section_match:
+        ipv4_content = ipv4_section_match.group(1)
+
+        # 2. Extract topoid (VRF ID) from the IPv4 section
+        topoid_match = re.search(r"topoid\s+(0x[0-9a-fA-F]+|[0-9]+)", ipv4_content)
+        if topoid_match:
+            vrf_id = topoid_match.group(1)
+
+        # 3. Extract IID from the User EID line within the IPv4 section
+        iid_match = re.search(r"User EID.*?IID\s+(\d+)", ipv4_content)
+        if iid_match:
+            lisp_iid = iid_match.group(1)
+
+    return vrf_id, lisp_iid
+
 # Example Usage:
 # result = parse_lisp_site_config(your_cli_output_string)
 
@@ -2455,21 +2481,39 @@ class L3Device:
         self.vrf = vrf
 
     #LISP IID from VRF
-    def lispiid(self,service):
-        vrf = self.vrf
+    def lispiid(self, service):
+        # Safely handle VRF name
+        vrf_name = str(self.vrf) if self.vrf else "default"
         hostname = self.device
-        #Retrieve LISP IID for IPv4 and IPv6 if available
-        lispvrfcmd = f"show lisp vrf {vrf}"
-        lispvrfop = get_single_output_genie(hostname, lispvrfcmd,service)
+        # Initialize attributes
         self.iid = None
         self.vrfid = None
-        if lispvrfop is not None:
-            path = lispvrfop['vrf'][vrf]
-            self.vrfid = path['vrf_id']
-            iids = path['iid']
-            for entry in iids:
-                iid = entry
-            self.iid = int(iid)
+        lispvrfcmd = f"show lisp vrf {vrf_name}"
+        # Branch 1: Default VRF (Custom Regex Parser)
+        if vrf_name.lower() == 'default':
+            lispvrfop = get_any_single_output(hostname, lispvrfcmd, service)
+            if lispvrfop:
+                parsed_vrfid, parsed_iid = parse_lisp_vrf_output(lispvrfop)
+                self.vrfid = parsed_vrfid
+                if parsed_iid is not None:
+                    try:
+                        self.iid = int(parsed_iid)
+                    except (ValueError, TypeError):
+                        self.iid = None
+        # Branch 2: Non-Default VRF (Genie Parser)
+        else:
+            lispvrfop = get_single_output_genie(hostname, lispvrfcmd, service)
+            if isinstance(lispvrfop, dict):
+                vrf_data = lispvrfop.get('vrf', {}).get(self.vrf, {})
+                if vrf_data:
+                    self.vrfid = vrf_data.get('vrf_id')
+                    iids_dict = vrf_data.get('iid', {})
+                    if iids_dict:
+                        raw_iid = next(iter(iids_dict))
+                        try:
+                            self.iid = int(raw_iid)
+                        except (ValueError, TypeError):
+                            self.iid = None
 
     def instance_properties(self,service):
         hostname = self.device

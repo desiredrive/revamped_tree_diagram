@@ -1106,28 +1106,28 @@ class WLANProfile:
 
     def policyprofile(self, profile_name,service):
         hostname = self.hostname
-        pprofilecmd = f"show wireless profile policy detailed {profile_name}"
+        pprofilecmd = f"show wireless profile policy detailed \"{profile_name}\""
         pprofileop = get_any_single_output(hostname,pprofilecmd, service)
         pprofileop = parse_wireless_policy_profile_detailed(pprofileop)
         self.policyprofile = pprofileop
 
     def fabricprofile(self, fabricprofilename, service):
         hostname = self.hostname
-        fprofilecmd = f"show wireless profile fabric detailed {fabricprofilename}"
+        fprofilecmd = f"show wireless profile fabric detailed \"{fabricprofilename}\""
         fprofileop = get_any_single_output(hostname,fprofilecmd, service)
         fprofileop = parse_show_wireless_profile_fabric_detailed(fprofileop)
         self.fabricprofile = fprofileop
 
     def flexprofile(self, flexprofilename, service):
         hostname = self.hostname
-        flprofilecmd = f"show wireless profile flex detailed {flexprofilename}"
+        flprofilecmd = f"show wireless profile flex detailed \"{flexprofilename}\""
         flprofileop = get_any_single_output(hostname,flprofilecmd, service)
         flprofileop = parse_wireless_flex_profile_detailed(flprofileop)
         self.flexprofile = flprofileop
 
     def sitetag(self,sitetagname,service):
         hostname = self.hostname
-        sitetagcmd = f"show wireless tag site detailed {sitetagname}"
+        sitetagcmd = f"show wireless tag site detailed \"{sitetagname}\""
         sitetagop = get_any_single_output(hostname,sitetagcmd, service)
         sitetagop = parse_show_wireless_tag_site_detailed(sitetagop)
         self.stag = sitetagop

@@ -6,10 +6,12 @@ from re import search
 from pysnmp.entity.rfc3413.config import getTargetNames
 from device_profiler import Device
 from ipverifications import subnetvalidation
-from routingmodules.cef import phy_cef_collection, IPCef
+from routingmodules.cef import phy_cef_collection, IPCef, physical_recursion
+from routingmodules.iprouting import IPRoute
 from routingmodules.lisp import L3Device, CEFForwardingState
 from securitymodules.accesslists import acl_evaluation, AccessList
 from securitymodules.authenticationsession import authen_session_for_interface
+from securitymodules.ciscotrustsec import cts_endpoint_info
 from switchingmodules.cdp import CDPinfo
 from switchingmodules.dhcp import DHCPDevice
 from switchingmodules.interfaces import Interfaces
@@ -141,7 +143,8 @@ class EdgeNodeClassifier:
         lispparameters.lispiid(service)
         lispparameters.instance_properties(service)
         lispparameters.lisp_database_information(service)
-        lispparameters.map_cache(eids,service)
+        if self.is_infravn is False:
+            lispparameters.map_cache(eids,service)
         self.lispparameters_info = lispparameters
 
     def forwarding_parameters(self,prefixes,service,step):
@@ -892,13 +895,14 @@ def validate_authentication_sessions(edge_node_device,step,service):
 
     return step
 
-def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcpparameters_info,sisf_info):
+def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcpparameters_info,sisf_info, is_infravn):
     process = "lispValidations"
     subprocess = "[lispInstanceID]"
     #LISP validations for SD-Access networks:
     #Instance-ID Configuration relevant for DHCP Flows:
     hostname = lispparameters_info.device
     #Pub-Sub identification, is this fabric pub_sub enabled?
+    '''
     if pubsub_flag is not True:
         error = "DHCP - LISP"
         message = (
@@ -906,7 +910,7 @@ def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcppar
             "DHCP validations will be skipped."
         )
         exit_program(step, process, subprocess, hostname, error, message)
-
+    '''
     #Instance Configuration and validation.
     vrf = lispparameters_info.vrf
     instance_information = lispparameters_info.instance_information
@@ -960,27 +964,50 @@ def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcppar
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
 
         #Map-Cache 0/0 exists
-    map_caches = lispparameters_info.map_cache_information
-    map_cache_default_present = False
-    for map_cache in map_caches:
-        eid_prefix = map_cache.eid_prefix
-        if eid_prefix == "0.0.0.0/0":
-            sources = map_cache.sources
-            if 'static' in sources:
-                    map_cache_default_present = True
-    if map_cache_default_present is False:
-        error = "LISP - Map-Cache , Static Default"
-        message = (
-            f"LISP Troubleshooting: Static Map-Cache entry '0.0.0.0/0' was not found for IID {iid} on device '{hostname}'. "
-            f"Please reconfigure the missing map-cache entry using the command: \"map-cache 0.0.0.0/0 map-request\" under IID {iid}."
-        )
-        exit_program(step, process, subprocess, hostname, error, message)
+    # 1. Safely attempt to retrieve map_cache_information
+    map_caches = getattr(lispparameters_info, 'map_cache_information', None)
+
+    # 2. Handle the case where map-cache information is missing
+    if map_caches is None:
+        # Check if this is an Access Point / INFRA_VN flow
+        if is_infravn is True:
+            msg1 = "LISP - Map-Cache"
+            message = (
+                f"LISP Troubleshooting: INFRA_VN (Access Point flow) does not require an upstream map-cache "
+                f"for IID {iid} on device '{hostname}', as South-North forwarding is handled by the Underlay IGP."
+            )
+            logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+            step += 1
+        else:
+            # If it's not an AP and data is missing, it's a legitimate error
+            error = "LISP - Map-Cache Data Error"
+            message = f"LISP Troubleshooting: Failed to retrieve map-cache information for IID {iid} on device '{hostname}'."
+            exit_program(step, process, subprocess, hostname, error, message)
+
+    # 3. Proceed with validation if map-cache data is present
     else:
-        msg1 = "LISP - Map-Cache , Static Default"
-        message = (
-            f"LISP Troubleshooting: Static Map-Cache entry '0.0.0.0/0' is present for IID {iid} on device '{hostname}'. "
-        )
-        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        map_cache_default_present = False
+        for map_cache in map_caches:
+            eid_prefix = getattr(map_cache, 'eid_prefix', "")
+            if eid_prefix == "0.0.0.0/0":
+                # Safely check sources (assuming it's a list or string)
+                sources = getattr(map_cache, 'sources', [])
+                if 'static' in sources:
+                    map_cache_default_present = True
+                    break  # Found it, no need to keep looping
+
+        if not map_cache_default_present:
+            error = "LISP - Map-Cache , Static Default"
+            message = (
+                f"LISP Troubleshooting: Static Map-Cache entry '0.0.0.0/0' was not found for IID {iid} on device '{hostname}'. "
+                f"Please reconfigure the missing map-cache entry using the command: \"map-cache 0.0.0.0/0 map-request\" under IID {iid}."
+            )
+            exit_program(step, process, subprocess, hostname, error, message)
+        else:
+            msg1 = "LISP - Map-Cache , Static Default"
+            message = f"LISP Troubleshooting: Static Map-Cache entry '0.0.0.0/0' is present for IID {iid} on device '{hostname}'."
+            logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+            step += 1
 
     #Map Resolvers
     map_resolvers = lispparameters_info.instance_information.mapresolvers
@@ -1086,51 +1113,77 @@ def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcppar
 
     #Map-Cache Validation:
     #RLOC Status for each Helper Address:
-    for map_cache in map_caches:
-        requested_eid = map_cache.requested_eid
-        rlocs = map_cache.rlocs
-        eid_prefix = map_cache.eid_prefix
-        no_active_rlocs = True
-        if eid_prefix != svi_subnet:
-            for rloc in rlocs:
-                state = rloc['state']
-                if state == 'up':
-                    no_active_rlocs = True
-            if no_active_rlocs is False:
-                error = "LISP - Helper-Address RLOC reachability"
-                message = (
-                    f"LISP Troubleshooting: All RLOCs associated with the Map-Cache entry for Helper-Address {requested_eid} are down on device '{hostname}'. "
-                    "Please verify RLOC reachability in the routing table. Edge nodes must have a /32 route to each RLOC. Refer to the GPS_SDA log file for additional details."
-                )
-                exit_program(step, process, subprocess, hostname, error, message)
-            else:
-                msg1 = "LISP - Helper-Address RLOC reachability"
-                message = (
-                    f"LISP Troubleshooting: At least one RLOC is in the UP state for each Helper-Address associated with the endpoint SVI on device '{hostname}'. "
-                    "No RLOC reachability issues detected."
-                )
-                logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    map_caches = getattr(lispparameters_info, 'map_cache_information', None)
+    # 2. Handle missing map-cache data (specifically for INFRA_VN/APs)
+    if map_caches is None:
+        if is_infravn is True:
+            msg1 = "LISP - Helper-Address RLOC reachability"
+            message = (
+                f"LISP Troubleshooting: INFRA_VN (Access Point flow) does not require upstream map-cache entries "
+                f"for Helper-Addresses in IID {iid} on device '{hostname}', as South-North forwarding is handled by the Underlay."
+            )
+            logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+            step += 1
+        else:
+            error = "LISP - Map-Cache Data Error"
+            message = f"LISP Troubleshooting: Failed to retrieve map-cache information for IID {iid} on device '{hostname}'."
+            exit_program(step, process, subprocess, hostname, error, message)
 
-    #Stop the flow if extranet parameters are found.
-    for map_cache in map_caches:
-        rlocs = map_cache.rlocs
-        requested_eid = map_cache.requested_eid
-        for rloc in rlocs:
-            encap_iid = rloc['encap_iid']
-            if encap_iid != "-":
-                error = "LISP - Extranet RLOC"
-                message = (
-                    f"LISP Troubleshooting: The RLOC used to reach {requested_eid} is associated with Extranet Encapsulation IID {encap_iid} on device '{hostname}'. "
-                    "This troubleshooting workflow does not support LISP Extranet configurations."
-                )
-                exit_program(step, process, subprocess, hostname, error, message)
-            else:
-                msg1 = "LISP - Helper-Address RLOC reachability"
-                message = (
-                    f"LISP Troubleshooting: The RLOC used to reach {requested_eid} is not associated with any Extranet Encapsulation IID on device '{hostname}'. "
-                    "LISP Extranet configurations are not present; standard troubleshooting steps apply."
-                )
-                logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    # 3. Proceed with RLOC reachability validation
+    else:
+        for map_cache in map_caches:
+            requested_eid = getattr(map_cache, 'requested_eid', "Unknown")
+            rlocs = getattr(map_cache, 'rlocs', [])
+            eid_prefix = getattr(map_cache, 'eid_prefix', "")
+
+            # We only validate RLOCs for entries that are NOT the local SVI subnet
+            if eid_prefix != svi_subnet:
+                any_rloc_up = False
+
+                for rloc in rlocs:
+                    # Safely get the state from the RLOC dictionary
+                    state = rloc.get('state', '').lower()
+                    if state == 'up':
+                        any_rloc_up = True
+                        break  # One UP RLOC is enough for reachability
+
+                if not any_rloc_up:
+                    error = "LISP - Helper-Address RLOC reachability"
+                    message = (
+                        f"LISP Troubleshooting: All RLOCs associated with the Map-Cache entry for Helper-Address {requested_eid} "
+                        f"are DOWN on device '{hostname}'. Please verify RLOC reachability in the routing table. "
+                        "Edge nodes must have a /32 route to each RLOC. Refer to the GPS_SDA log file for additional details."
+                    )
+                    exit_program(step, process, subprocess, hostname, error, message)
+                else:
+                    msg1 = "LISP - Helper-Address RLOC reachability"
+                    message = (
+                        f"LISP Troubleshooting: At least one RLOC is in the UP state for the Helper-Address {requested_eid} "
+                        f"associated with the endpoint SVI on device '{hostname}'. No RLOC reachability issues detected."
+                    )
+                    logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+                    step += 1
+
+        #Stop the flow if extranet parameters are found.
+        for map_cache in map_caches:
+            rlocs = map_cache.rlocs
+            requested_eid = map_cache.requested_eid
+            for rloc in rlocs:
+                encap_iid = rloc['encap_iid']
+                if encap_iid != "-":
+                    error = "LISP - Extranet RLOC"
+                    message = (
+                        f"LISP Troubleshooting: The RLOC used to reach {requested_eid} is associated with Extranet Encapsulation IID {encap_iid} on device '{hostname}'. "
+                        "This troubleshooting workflow does not support LISP Extranet configurations."
+                    )
+                    exit_program(step, process, subprocess, hostname, error, message)
+                else:
+                    msg1 = "LISP - Helper-Address RLOC reachability"
+                    message = (
+                        f"LISP Troubleshooting: The RLOC used to reach {requested_eid} is not associated with any Extranet Encapsulation IID on device '{hostname}'. "
+                        "LISP Extranet configurations are not present; standard troubleshooting steps apply."
+                    )
+                    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
 
 def forwarding_parameters_recursion(cefinternallist_info,catc_name,step, hostname):
     process = "overlayValidations"
@@ -1431,6 +1484,116 @@ def validate_dhcp_server_compatibility(border_objects, dora_state, step):
 
     return step + 1
 
+
+def process_infra_vn_underlay_recursion(destinations, loopback0, hostname, service, step):
+    """
+    Validates underlay recursion for INFRA_VN by collecting routing and CEF
+    information for DHCP server destinations in the default VRF.
+    """
+    routes = []
+    total_phys = []
+    cefhops = []
+
+    localsgt = IPCef(loopback0,None,hostname)
+    localsgt.sgtfromcef(service)
+    lsgt = getattr(localsgt, 'sgt', 0)
+
+
+    for destination in destinations:
+        # 1. Collect IP Route Information
+        iprouteobject = IPRoute(destination, 'default', hostname)
+        iprouteobject.iproute_prefix_soft(service, step)
+        routes.append(iprouteobject)
+
+        # 2. Collect CEF Information
+        ipcefobject = IPCef(destination, 'default', hostname)
+        ipcefobject.get_cef_internal(service)
+        cefhops.append(ipcefobject)
+
+    seen_prefixes = set()
+    unique_cefhops = []
+    for hop in cefhops:
+        prefix = getattr(hop, 'prefix', None) if not isinstance(hop, dict) else hop.get('prefix')
+        if prefix and prefix not in seen_prefixes:
+            unique_cefhops.append(hop)
+            seen_prefixes.add(prefix)
+    # Update the original list with unique entries
+    cefhops = unique_cefhops
+
+    # 3. Validation of proper physical interface recursion
+    for cef_obj in cefhops:
+        # Perform physical recursion check
+        phy_result = physical_recursion(cef_obj, hostname)
+        phy_result.get_physical_interfaces(service, step)
+
+        if phy_result:
+            # Safely retrieve the physical interfaces list
+            phy_list = getattr(phy_result, 'total_phys', [])
+
+            # Define a small helper to flatten nested structures
+            def extract_interfaces(item):
+                if isinstance(item, list):
+                    for subitem in item:
+                        yield from extract_interfaces(subitem)
+                elif isinstance(item, dict):
+                    # Grab the key (interface name) from Genie dicts
+                    yield next(iter(item))
+                elif isinstance(item, str) and item.strip():
+                    yield item
+
+            # Use the helper to extend the master list
+            total_phys.extend(list(extract_interfaces(phy_list)))
+
+    # Finally, remove duplicates and empty strings
+    total_phys = list(set([p for p in total_phys if isinstance(p, str)]))
+
+    access_lists = []
+    for phy in total_phys:
+        acls_obj = AccessList(hostname)
+        acls_obj.aclbyinterface(phy, service)
+        found_acls = getattr(acls_obj, 'aclnames', None)
+
+        if found_acls:
+            if isinstance(found_acls, list):
+                valid_acls = [acl for acl in found_acls if acl]
+                access_lists.extend(valid_acls)
+            else:
+                access_lists.append(found_acls)
+
+    access_lists = list(set([acl for acl in access_lists if acl]))
+
+    #Validation of SGACL enforcement status, SGACL presence, SGT/DSGT rule, rbacl, etc.
+    cts_objects = []
+    for phy in total_phys:
+        ctsobject = cts_endpoint_info(loopback0,None,hostname)
+        ctsobject.interface = phy
+        ctsobject.cts_enforcement(None,phy,service)
+        cts_objects.append(ctsobject)
+
+    evaluation_flag = False
+    if cts_objects:
+        # 1. Check if ALL items have globalenforcement: True
+        # We use a helper to handle both object attributes and dictionary keys
+        all_global = all(
+            (obj.globalenforcement if hasattr(obj, 'globalenforcement') else obj.get('globalenforcement', False))
+            for obj in cts_objects
+        )
+
+        # 2. Check if at least ONE item has ctsportenabled: True
+        any_port_enabled = any(
+            (obj.ctsportenabled if hasattr(obj, 'ctsportenabled') else obj.get('ctsportenabled', False))
+            for obj in cts_objects
+        )
+
+        # 3. Final Evaluation
+        if all_global and any_port_enabled:
+            evaluation_flag = True
+
+    #If evaluation is needed:
+
+
+    return None
+
 def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, service):
 
         process = "dhcpTroubleshooting"
@@ -1450,6 +1613,38 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         edge_node_device.device_profiler(catc_name, service,step)
         hostname = edge_node_device.profiled_device.hostname
         #print(pformat(vars(edge_node_device.profiled_device), indent=4, width=1, sort_dicts=False))
+
+        #INFRA_VN Validation
+        edge_node_device.is_infravn = False
+        if vrf is None:
+            subprocess = "[vrfValidation]"
+            error = "DHCP - VRF Error"
+            message = "VRF cannot be None. If INFRA_VN is required for Access Point or Extended Nodde troubleshooting, please use 'default' as the VRF name."
+            # Using exit_program as this is a terminal error for the flow
+            exit_program(step, process, subprocess, hostname, error, message)
+
+        # 2. Check if VRF is 'default' or 'Default'
+        elif str(vrf).lower() == "default":
+            edge_node_device.is_infravn = True
+            subprocess = "[vrfValidation]"
+            msg1 = "DHCP - VRF"
+            message = (
+                "No VRF has been provided, assuming Default VRF for INFRA_VN validations "
+                "(Access Points and Extended Nodes). Access Point troubleshooting flow is only "
+                "supported if it is directly connected to the Edge Node and CDP is enabled."
+            )
+            logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+            step += 1
+            # Stability Warning Log
+            subprocess = "[accessPointStability]"
+            msg1 = "DHCP - Warning"
+            message = (
+                "DHCP Flow for access points requires the endpoint to be as stable as it can "
+                "in the MAC address table and other LISP forwarding tables, estabilize it's "
+                "flapping as much as possible, otherwise you might need to run this script multiple times."
+            )
+            logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+            step += 1
 
         if is_few is True:
             fabric_site_id = edge_node_device.profiled_device.fabric_id
@@ -1481,10 +1676,33 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
 
+        edge_node_device.is_ap = False
         edge_node_device.cdpinfo(service)
+
+        cdp_neighbors = getattr(edge_node_device, 'cdpneighborhost', [])
+        if isinstance(cdp_neighbors, list):
+            for neighbor in cdp_neighbors:
+                # Extracting data from the neighbor dictionary
+                platform = neighbor.get('platform', '').lower()
+                capabilities = neighbor.get('capabilities', '')
+                neighbor_id = neighbor.get('device_id', 'Unknown')
+                # Check for Cisco AP signature
+                if 'cisco' in platform and 'Router' in capabilities and 'Trans-Bridge' in capabilities:
+                    # 4. Set the flag on the object to True
+                    edge_node_device.is_ap = True
+                    subprocess = "[cdpAnalysis]"
+                    msg1 = "DHCP - CDP Neighbor"
+                    local_port = getattr(edge_node_device, 'port', 'Unknown Port')
+                    message = (
+                        f"Cisco Access Point detected on interface {local_port} "
+                        f"(Neighbor ID: {neighbor_id}). 'is_ap' flag set to True."
+                    )
+                    logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+                    step += 1
+                    break
+
         edge_node_device.authenticationsession(service)
         step = validate_authentication_sessions(edge_node_device,step,service)
-
 
         #Pool Identification (AnycastGW or L2 Only)
         subprocess = "[poolIdentification]"
@@ -1498,31 +1716,37 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         pool_information = get_catc_api(catc_name, url,service)['response'][0]
         siteNameHierarchy = edge_node_device.profiled_device.fabric_site_hierarchy
         vlanName = pool_information['vlanName']
+        if edge_node_device.is_infravn is True:
+            vn_name = 'INFRA_VN'
+        else:
+            vn_name = vrf
         pool_details = (
             f"/dna/intent/api/v1/business/sda/virtualnetwork/ippool"
             f"?siteNameHierarchy={siteNameHierarchy}"
-            f"&virtualNetworkName={vrf}"
+            f"&virtualNetworkName={vn_name}"
             f"&ipPoolName={vlanName}"
         )
-        pool_information_detail = get_catc_api(catc_name,pool_details,service)
+        pool_information_detail = get_catc_api(catc_name, pool_details, service)
         edge_node_device.pool_info = pool_information_detail
-
-        if edge_node_device.pool_info['isLayer2OnlyPool'] is True:
+        pool_data = edge_node_device.pool_info
+        if pool_data.get('isLayer2OnlyPool') is True:
             error = "DHCP - Pool Identification"
             message = (
                 "DHCP Troubleshooting: DHCP traffic flow information is not available for Layer 2-only pools."
             )
             exit_program(step, process, subprocess, catc_name, error, message)
         else:
-            ippoolname = edge_node_device.pool_info['vlanName']
-            pooltype = edge_node_device.pool_info['trafficType']
+            ippoolname = pool_data.get('vlanName', pool_data.get('ipPoolName', 'Unknown'))
+            pooltype = pool_data.get('poolType', pool_data.get('trafficType', 'DATA'))
+            vlan_id_api = pool_data.get('vlanId', 'Unknown')
 
             msg1 = "DHCP - Pool Identification"
             message = (
-                f"DHCP Troubleshooting: IP pool '{ippoolname}' is assigned to VLAN {vlan}. "
+                f"DHCP Troubleshooting: IP pool '{ippoolname}' is assigned to VLAN {vlan_id_api}. "
                 f"The pool type is '{pooltype}', and it is configured as an Anycast Gateway."
             )
-            logging_info(step, process, subprocess, catc_name, msg1 + " | " + message)
+            logging_info(step, process, subprocess, catc_name, f"{msg1} | {message}")
+            step += 1
 
         #DHCP Configuration
         subprocess = "[dhcpParameters]"
@@ -1579,7 +1803,7 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         edge_node_device.sisf_parameters(service)
         lisp_info = edge_node_device.lispparameters_info
         sisf_info = edge_node_device.sisfparameters_info
-        lisp_parameters_validation_edge(lisp_info,pub_sub_flag,step,dhcp_info,sisf_info)
+        lisp_parameters_validation_edge(lisp_info,pub_sub_flag,step,dhcp_info,sisf_info,edge_node_device.is_infravn)
         iid = lisp_info.iid
 
         # Recursion to CEF (LISP)
@@ -1589,7 +1813,8 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
 
-        step, forwarding_prefixes = process_map_cache_recursion(edge_node_device,mac,vlan,service,step,iid,vrf)
+        if edge_node_device.is_infravn is False:
+            step, forwarding_prefixes = process_map_cache_recursion(edge_node_device,mac,vlan,service,step,iid,vrf)
 
         #Recursion to CEF Underlay
         subprocess = "[edgeNodeForwarding]"
@@ -1597,10 +1822,14 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         message = f"DHCP Troubleshooting: Recursing CEF Route on the Underlay"
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
+        if edge_node_device.is_infravn is False:
+            edge_node_device.forwarding_parameters(forwarding_prefixes,service,step)
+            rlocs = edge_node_device.final_rlocs
+            ports = edge_node_device.underlay_ports
+        else:
+            #Infra_VN Specific Underlay Validations.
+            return
 
-        edge_node_device.forwarding_parameters(forwarding_prefixes,service,step)
-        rlocs = edge_node_device.final_rlocs
-        ports = edge_node_device.underlay_ports
         #Connectivity Tests
         subprocess = "[underlayReachability]"
         msg1 = "DHCP - Underlay Reachability"

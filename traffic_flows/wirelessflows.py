@@ -934,6 +934,7 @@ def fabric_edge_mac_validation(step, mac, vnid, rloc, sourcextr, service):
     ap_ip =  access_tunnel.accesstunneldstip
     phyport = access_tunnel.accesstunnelphyport[0]
 
+
     if not tunnel_name or not ap_ip or not phyport:
         error = "Fabric Edge - Access-Tunnel Not Found"
         message = (

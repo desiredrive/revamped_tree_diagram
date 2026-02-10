@@ -170,7 +170,8 @@ def mac_address_validator(mac: str):
         r'([0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})'  # aaaa-bbbb-cccc
     )
     try:
-        match = mac_address_pattern.match(mac).group()
+        if mac_address_pattern.fullmatch(mac) is None:
+            raise AttributeError
         #print(f"'{mac}' is a valid MAC address")
         i = mac
         if "." in i:

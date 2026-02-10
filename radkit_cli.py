@@ -85,6 +85,7 @@ def radkit_login(email: str, domain: str, serial: str):
 
 def get_any_single_output(hostname,command: str,service):
     try:
+        append_to_logging_file(command)
         device_inventory = service.inventory[hostname]
         commands = device_inventory.exec([command]).wait()
         try:
@@ -102,6 +103,7 @@ def get_single_output_genie(hostname, command: str, service):
     #Currently available only for IOS_XE platforms!
     type = 'iosxe'
     try:
+        append_to_logging_file(command)
         device_inventory = service.inventory[hostname]
         raw = device_inventory.exec(command).wait()
         execution = radkit_genie.parse(raw, os=type)
@@ -133,7 +135,6 @@ def get_catc_api(dnac, api_url: str, service):
                     # Execute the API call
                     response = device_inventory.http.get(api_url).wait()
                     response_js = json.loads(response.content)
-
                     # Log to file
                     to_file = f"Catalyst Center API: {api_url}\n{json.dumps(response_js, indent=2)}"
                     append_to_logging_file(to_file)
@@ -161,6 +162,7 @@ def get_catc_api(dnac, api_url: str, service):
             return None
 
         except Exception as e:
+            logging_warning("X", "Catalyst Center API", "[apiError]", dnac, f"Error when getting the following API: {api_url} - {str(e)}")
             print(f"Error when getting the following API: {api_url} - {str(e)}")
             return None
 

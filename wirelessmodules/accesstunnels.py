@@ -137,6 +137,9 @@ class AccessTunnel:
         phy.get_physical_interfaces(service, "X")
         interface = phy.total_phys
 
+        if isinstance(interface, list):
+            interface = interface[0]
+
         cdp_neighbor = CDPinfo(hostname)
         cdp_neighbor.cdpneighborinterface(interface[0], service)
         cdpinfo = cdp_neighbor.cdpneighbors

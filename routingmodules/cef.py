@@ -1,3 +1,4 @@
+from pprint import pformat
 
 from switchingmodules import etherchannel
 from switchingmodules.arp import arp_modules
@@ -162,6 +163,7 @@ class IPCef:
         cefpath = ipcefint_op['vrf'][vrf]['address_family'][addipv4]['prefix']
         for i in cefpath:
             prefix = i
+            self.prefix = prefix
         cefpath = cefpath[prefix]
 
         #CEF sources
@@ -198,7 +200,7 @@ class IPCef:
         #CEF Special Type exclusion:
         special_types = ['Spc','DRH']
         special_flag = False
-
+        self.ismpls = False
         #Next Hop Calculation
         if self.sources is not None:
             if ismpls is True:
@@ -296,6 +298,54 @@ class IPCef:
                                 nhlist.append(nexthop_format)
                     self.nexthops = nhlist
 
+    def get_cef_detail(self, service):
+
+        if self.vrf == "default":
+            vrf_mode = ""
+            self.vrf = 'default'
+        elif self.vrf is None:
+            vrf_mode = ""
+            self.vrf  = 'default'
+        elif self.vrf == "None":
+            vrf_mode = ""
+            self.vrf  = 'default'
+        else:
+            vrf_mode = "vrf " + self.vrf + " "
+
+        # show ip route command:
+        ipcefint_cmd = "show ip cef {} {} detail".format(vrf_mode, self.ip)
+        ipcefint_op = get_single_output_genie(self.hostname, ipcefint_cmd, service)
+        cef_data = ipcefint_op
+        vrf_container = cef_data.get("vrf", {})
+
+        for vrf_name, vrf_content in vrf_container.items():
+            prefixes_dict = (
+                vrf_content.get("address_family", {})
+                .get("ipv4", {})
+                .get("prefix", {})
+            )
+
+            for prefix_str, prefix_data in prefixes_dict.items():
+                flags = prefix_data.get("flags", [])
+
+                formatted_nexthops = []
+                raw_nexthops = prefix_data.get("nexthop", {})
+
+                for nh_ip, nh_info in raw_nexthops.items():
+                    oif_dict = nh_info.get("outgoing_interface", {})
+
+                    oif_name = next(iter(oif_dict)) if oif_dict else "Unknown"
+
+                    formatted_nexthops.append({
+                        "nexthop": nh_ip,
+                        "oif": oif_name
+                    })
+
+
+                self.prefix = prefix_str
+                self.flags = flags
+                self.nexthops = formatted_nexthops
+
     def sgtfromcef(self,service):
         hostname = self.hostname
         if self.vrf == "default":
@@ -319,41 +369,47 @@ class physical_recursion():
         self.hostname = device
         self.vrf = cef_hops.vrf
         self.nexthops = cef_hops.nexthops
-    
-    def get_physical_interfaces(self,service,step):
+
+    def get_physical_interfaces(self, service, step):
         process = 'CEF'
         hostname = self.hostname
-        #VRF Is needed for ARP recursion
-        #print("Calculating Physical Interfaces\n")
-        #Current state supports the following Next Hop parsing form CEF: L3 Port-Channel, SVI and Physical (L2 or L3)
-        #Support for Tunnel, Apphosting, VTI, LISP and NVE interfaces is not yet considered...
         total_phys = []
+
         for i in self.nexthops:
             nhphys = []
             interface = i['oif']
+
             if "LISP" in interface:
-                #LISP Interface has no physical interface
+                # LISP Interface has no physical interface
                 continue
+
             elif "channel" in interface:
-                phys = etherchannel.etherchannel_parse(interface,self.hostname)
-                nhphys.append(phys)
-            #SVI as next as hop
+                phys = etherchannel.etherchannel_parse(interface, self.hostname)
+                phys.get_active_etherchannel_ports(service)
+                phys = phys.port_list
+                if isinstance(phys, list):
+                    nhphys.extend(phys)
+                else:
+                    nhphys.append(phys)
+
             elif "Vlan" in interface:
                 nhop = i['nexthop']
                 intf = i['oif']
-                vid = compile("(?<=Vlan)[0-9]{4}(?=.*)").search(intf).group().strip()
+                vid_match = search(r"(?<=Vlan)[0-9]{1,4}", intf)
+                vid = vid_match.group() if vid_match else None
+
                 arp = arp_modules(self.vrf, self.hostname)
                 arp.arp_resolution_single_ip(nhop, intf, service)
+
                 try:
                     mac = arp.mac
-                except KeyError:
+                except (KeyError, AttributeError):
                     subprocess = "[ARP]"
                     error = "CEF - Incomplete Adjacency"
-                    message = "ARP Is Incomplete for next hop {}, fix the ARP entry for this IP address in device: {}".format(nhop,hostname)
+                    message = f"ARP Is Incomplete for next hop {nhop}, fix the ARP entry for this IP address in device: {hostname}"
                     logging_error(step, process, subprocess, hostname, error)
                     logging_info(step, process, subprocess, hostname, message)
-                    #raise BDBTaskError("Error: {} | {}".format(error, message))
-                    sys.exit("Error: {} | {}".format(error, message))
+                    sys.exit(f"Error: {error} | {message}")
 
                 mac_ports = mac_learning(self.hostname)
                 mac_ports.mac_learning_mac(mac, vid, service)
@@ -361,41 +417,54 @@ class physical_recursion():
                 if mac_ports is None:
                     subprocess = "[macLearning]"
                     error = "CEF - No Layer2 Recursion"
-                    message = "MAC address {} is not learnt in any port, troubleshoot the MAC learning event in device: {}".format(
-                        mac, hostname)
+                    message = f"MAC address {mac} is not learnt in any port, troubleshoot the MAC learning event in device: {hostname}"
                     logging_error(step, process, subprocess, hostname, error)
                     logging_info(step, process, subprocess, hostname, message)
-                    # raise BDBTaskError("Error: {} | {}".format(error, message))
-                    sys.exit("Error: {} | {}".format(error, message))
+                    sys.exit(f"Error: {error} | {message}")
 
-                if type(mac_ports) is list:
-                    for i in mac_ports.port:
-                        if "Po" in i:
-                            phys = etherchannel.etherchannel_parse(i, self.hostname)
-                            nhphys.append(phys)
+                # --- FIX: Robust Port Extraction ---
+                # This ensures strings like "Te1/0/17" aren't iterated character-by-character
+                ports = []
+                if hasattr(mac_ports, 'port') and mac_ports.port:
+                    val = mac_ports.port
+                    ports = [val] if isinstance(val, str) else val
+                elif hasattr(mac_ports, 'ports') and mac_ports.ports:
+                    val = mac_ports.ports
+                    ports = [val] if isinstance(val, str) else val
+                elif isinstance(mac_ports, list):
+                    ports = mac_ports
+                elif isinstance(mac_ports, str):
+                    ports = [mac_ports]
+
+                for port in ports:
+                    if "Po" in port:
+                        phys = etherchannel.etherchannel_parse(port, self.hostname)
+                        phys.get_active_etherchannel_ports(service)
+                        phys = phys.port_list
+                        if isinstance(phys, list):
+                            nhphys.extend(phys)
                         else:
-                            nhphys.append(i)
-                else:
-                    if "Po" in mac_ports.port:
-                        phys = etherchannel.etherchannel_parse(i, self.hostname)
-                        nhphys = phys
+                            nhphys.append(phys)
                     else:
-                        nhphys = mac_ports.port
-            #Physical Interfaces 
+                        nhphys.append(port)
+
             else:
+                # Direct physical interface (e.g., Gi1/0/1)
                 nhphys.append(interface)
-            if len(nhphys)==0:
+
+            # Validation and final assignment
+            if len(nhphys) == 0:
                 subprocess = "[physicalPort]"
                 error = "CEF - No Physical Port Recursion"
-                message = "Unable to resolve the physical port for next-hop {}, validate the physical port recursion for ARP and MAC in device: {}".format(
-                    i, hostname)
+                message = f"Unable to resolve the physical port for next-hop {i}, validate the physical port recursion for ARP and MAC in device: {hostname}"
                 logging_error(step, process, subprocess, hostname, error)
                 logging_info(step, process, subprocess, hostname, message)
-                # raise BDBTaskError("Error: {} | {}".format(error, message))
-                sys.exit("Error: {} | {}".format(error, message))
+                sys.exit(f"Error: {error} | {message}")
             else:
                 total_phys.append(nhphys)
-            self.total_phys = total_phys
+
+        self.total_phys = total_phys
+        return total_phys
 
 
 

@@ -607,11 +607,17 @@ def unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name
     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     map_server_ips = []
     for map_server in eid_map_servers:
-        map_server_ip = map_server['map_server']
+        if 'map-server' in map_server:
+            map_server_ip = map_server['map-server']
+        elif 'map_server' in map_server:
+            map_server_ip = map_server['map_server']
+        else:
+            # Handle the case where neither key exists, if needed
+            continue
         if map_server_ip != etr_rloc:
             map_server_ips.append(map_server_ip)
     specific_lisp_sessions = []
-
+    
     #Remove the local ETR_RLOC form the map-server list, useful when validating CP-to-CP LISP Sessions.
     while etr_rloc in map_server_ips:
         map_server_ips.remove(etr_rloc)
