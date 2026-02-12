@@ -3,6 +3,7 @@ from pprint import pformat
 from asn1crypto.core import Boolean
 from re import search
 
+from ipaddress import ip_network, ip_address
 from pysnmp.entity.rfc3413.config import getTargetNames
 from device_profiler import Device
 from ipverifications import subnetvalidation
@@ -299,17 +300,17 @@ def dhcp_parameters_validation(dhcpparameters_info,interface,vlan,step):
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
 
     #DHCP Snooping proxy-bridge for the VLAN
-    if int(vlan) not in dhcpparameters_info.dhcpsnoop_configured_vlans:
+    if int(vlan) not in dhcpparameters_info.dhcpsnoop_operational_vlans_proxy:
         msg1 = "DHCP - DHCP Snooping"
         message = (
-            f"DHCP Troubleshooting: DHCP Snooping Proxy-Bridge is enabled for VLAN {vlan} on device '{hostname}'. "
+            f"DHCP Troubleshooting: DHCP Snooping Proxy-Bridge is disabled for VLAN {vlan} on device '{hostname}'. "
             "This setting is typically required only for Bridge-Mode VMs or scenarios involving multiple IP-to-MAC mappings."
         )
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     else:
         msg1 = "DHCP - DHCP Snooping"
         message = (
-            f"DHCP Troubleshooting: DHCP Snooping Proxy-Bridge is disabled for VLAN {vlan} on device '{hostname}'. "
+            f"DHCP Troubleshooting: DHCP Snooping Proxy-Bridge is enabled for VLAN {vlan} on device '{hostname}'. "
             "This setting is typically required only for Bridge-Mode VMs or scenarios involving multiple IP-to-MAC mappings."
         )
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
@@ -502,6 +503,33 @@ def dhcp_parameters_validation(dhcpparameters_info,interface,vlan,step):
                     'To resolve this issue, remove the command \"ip dhcp relay source-interface\" from the SVI configuration.'
                 )
                 exit_program(step, process, subprocess, hostname, error, message)
+
+    #DHCP Server Inside the Fabric Validation
+    # Same-Subnet DHCP Server Validation:
+    if dhcpparameters_info.prefix and dhcpparameters_info.mask and dhcpparameters_info.helper_addresses:
+            try:
+                # Combine IP and Mask to create a CIDR string (e.g., "172.19.5.1/24")
+                cidr_string = f"{dhcpparameters_info.prefix}/{dhcpparameters_info.mask}"
+                
+                # Create the network object
+                svi_network = ip_network(cidr_string, strict=False)
+
+                for helper in dhcpparameters_info.helper_addresses:
+                    helper_ip_str = helper.get('dhcpserverip')
+                    if helper_ip_str:
+                        helper_ip = ip_address(helper_ip_str)
+
+                        if helper_ip in svi_network:
+                            error = "DHCP - SVI & Relay Agent"
+                            message = (
+                                f"DHCP Troubleshooting: The DHCP helper address '{helper_ip_str}' is in the same subnet "
+                                f"as the SVI ({cidr_string}) on device '{hostname}'. "
+                                f"Same-Subnet DHCP servers are not supported in SD-Access; these can only be placed "
+                                f"inside the fabric under an L2 Only Pool."
+                            )
+                            exit_program(step, process, subprocess, hostname, error, message)
+            except ValueError as e:
+                logging_warning(step, process, subprocess, hostname, f"DHCP Troubleshooting: Could not validate subnet for helper addresses: {e}")
 
 def acl_hit_procedure(edge_node_device,acl,service,step):
     hostname = edge_node_device.profiled_device.hostname
@@ -1463,41 +1491,59 @@ def process_map_cache_recursion(edge_node_device, mac, vlan, service, step, iid,
 
 def validate_dhcp_server_compatibility(border_objects, dora_state, step):
     """
-    Final validation to check if the DHCP server supports Option 82
-    when reachability is confirmed but DORA fails at the start.
+    Final validation to check if the DHCP server supports Option 82.
+    Handles cases where DORA state might be missing to ensure the program continues.
     """
     process = "dhcpTroubleshooting"
     subprocess = "[serverCompatibility]"
     hostname = "Fabric-Wide"
 
     # Check if at least one border successfully pinged the DHCP server
-    # (Assuming border_objects have a 'ping_reachable' attribute from your border_ip_transit logic)
     reachability_confirmed = any(getattr(border, 'ping_reachable', False) for border in border_objects)
 
-    if dora_state == "STUCK at DISCOVER" and reachability_confirmed:
-        msg1 = "DHCP - Option 82 & Server Trust"
-        message = (
-            "CRITICAL REVIEW REQUIRED: The DHCP process is STUCK at DISCOVER, but the Border nodes "
-            "have confirmed IP reachability to the DHCP server. In SD-Access, the Fabric Edge "
-            "inserts Option 82 (Relay Agent Information). If the DHCP server is not configured to "
-            "honor or trust Option 82, it will silently drop the DISCOVER or strip the option from the OFFER."
-        )
-        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    # Shared list of manual verification steps to avoid code duplication
+    compat_list = (
+        "\nManual Verification Steps for DHCP Servers:\n"
+        "1. Microsoft Windows Server: Ensure 'Relay Agent Information' is enabled and the 'Trust' bit is considered.\n"
+        "2. Infoblox: Must be configured to 'Trust Relay Agent Option' and 'Echo back Option 82'.\n"
+        "3. BlueCat: Check if the 'Relay Agent Info' deployment option is active for the specific subnet.\n"
+        "4. Cisco Prime/CNR: Verify that the server is not configured to drop packets with existing Option 82 information.\n"
+        "5. ISC DHCP (Linux): Ensure 'stash-agent-options' is enabled and the server is configured to permit agent options."
+    )
 
-        # List of well-known servers with specific Option 82 requirements
-        compat_list = (
-            "\nManual Verification Steps for DHCP Servers:\n"
-            "1. Microsoft Windows Server: Ensure 'Relay Agent Information' is enabled and the 'Trust' bit is considered.\n"
-            "2. Infoblox: Must be configured to 'Trust Relay Agent Option' and 'Echo back Option 82'.\n"
-            "3. BlueCat: Check if the 'Relay Agent Info' deployment option is active for the specific subnet.\n"
-            "4. Cisco Prime/CNR: Verify that the server is not configured to drop packets with existing Option 82 information.\n"
-            "5. ISC DHCP (Linux): Ensure 'stash-agent-options' is enabled and the server is configured to permit agent options."
-        )
+    # Logic handling
+    if dora_state == "STUCK at DISCOVER":
+        msg1 = "DHCP - Option 82 & Server Trust"
+        
+        if reachability_confirmed:
+            message = (
+                "CRITICAL REVIEW REQUIRED: The DHCP process is STUCK at DISCOVER, but the Border nodes "
+                "have confirmed IP reachability to the DHCP server. In SD-Access, the Fabric Edge "
+                "inserts Option 82. If the server does not trust Option 82, it will silently drop the DISCOVER."
+            )
+        else:
+            message = (
+                "CRITICAL REVIEW REQUIRED: The DHCP process is STUCK at DISCOVER and Border nodes "
+                "cannot reach the DHCP server. This suggests an Underlay/Routing issue or a server-side drop."
+            )
+            
+        logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
         logging_info(step, process, subprocess, hostname, compat_list)
 
-    elif dora_state == "STUCK at DISCOVER" and not reachability_confirmed:
-        logging_info(step, process, subprocess, hostname, "DHCP - Server Reachability | Borders cannot reach the DHCP server. Fix routing/ACLs before checking Option 82.")
+    elif not dora_state or dora_state == "Unknown":
+        # Handle the "Not Found" case specifically so the program doesn't exit or crash
+        msg_missing = "DHCP - DORA State Missing"
+        warning = (
+            "The specific DORA transaction state could not be determined. "
+            "Skipping Option 82 specific analysis, but reachability checks remain valid."
+        )
+        logging_info(step, process, subprocess, hostname, f"{msg_missing} | {warning}")
 
+    else:
+        # Handle cases where DHCP might be working or in a different stage
+        logging_info(step, process, subprocess, hostname, f"DHCP - Server Compatibility | Current state: {dora_state}. No critical Option 82 issues identified.")
+
+    # Always increment the step and return to ensure the program flow continues
     return step + 1
 
 def local_sgt_determination(loopback,hostname,service):
@@ -1993,14 +2039,8 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
 
-        # DHCP Configuration
-        subprocess = "[dhcpParameters]"
-        msg1 = "DHCP - DHCPSnooping Statistics"
-        message = "Evaluating DHCP transaction logs to determine the specific DORA stage reached by the endpoint."
-        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
-        step += 1
-
         step, dora_state = edge_node_device.dhcpsnoopingclientstats(service,step)
+
 
         #Local Policies (ACL, VACL, PACL)
         #DHCP Configuration
@@ -2088,7 +2128,7 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         step += 1
 
         validate_border_acls(border_objects, service, step)
-        #validate_dhcp_server_compatibility(border_objects,dora_state,step)
+        validate_dhcp_server_compatibility(border_objects,dora_state,step)
 
 
 

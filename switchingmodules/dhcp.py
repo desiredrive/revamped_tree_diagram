@@ -416,31 +416,38 @@ class DHCPDevice:
             except KeyError:
                 self.outboundacl = None
 
-    def svi_running_config(self,vlan,service):
+    def svi_running_config(self, vlan, service):
         device = self.device
-        svishworuncmd  = "show run interface vlan {}".format(vlan)
-        svishworunop = get_any_single_output(device,svishworuncmd,service)
+        svishworuncmd = "show run interface vlan {}".format(vlan)
+        svishworunop = get_any_single_output(device, svishworuncmd, service)
 
         self.ip_dhcp_commands = []
-        self.vrf = "default"
+        self.vrf = "default"  # This is your safety fallback
         self.helper_addresses = []
         self.lisp_mobility_entries = []
+
         if svishworunop is not None:
             for line in svishworunop.splitlines():
                 stripped = line.strip()
-                # VRF
+                
+                # VRF: Update the instance attribute if found
                 m_vrf = re.match(r"vrf forwarding (\S+)", stripped)
                 if m_vrf:
-                    vrf = m_vrf.group(1)
+                    self.vrf = m_vrf.group(1)
+                
                 # ip dhcp
                 if stripped.startswith("ip dhcp"):
                     self.ip_dhcp_commands.append(stripped)
+                
                 # ip helper-address
                 m_helper = re.match(r"ip helper-address(?: vrf (\S+))? (\d+\.\d+\.\d+\.\d+)", stripped)
                 if m_helper:
-                    helper_vrf = m_helper.group(1) if m_helper.group(1) else vrf
+                    # Use the VRF from the helper command if present, 
+                    # otherwise use the SVI's VRF (self.vrf)
+                    helper_vrf = m_helper.group(1) if m_helper.group(1) else self.vrf
                     helper_ip = m_helper.group(2)
                     self.helper_addresses.append({"dhcpserverip": helper_ip, "vrf": helper_vrf})
+                
                 # lisp mobility
                 m_lisp = re.match(r"lisp mobility (.+)", stripped)
                 if m_lisp:

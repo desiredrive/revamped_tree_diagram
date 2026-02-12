@@ -155,6 +155,7 @@ class IPCef:
         ismpls = is_mpls_labeled(ipcefint_op)
         #VRF utilization
         prefix = None
+        self.prefix = None
         if vrf_mode == "":
             vrf = 'default'
         else:
@@ -395,7 +396,7 @@ class physical_recursion():
             elif "Vlan" in interface:
                 nhop = i['nexthop']
                 intf = i['oif']
-                vid_match = search(r"(?<=Vlan)[0-9]{1,4}", intf)
+                vid_match = compile(r"(?<=Vlan)[0-9]{1,4}").search(intf)
                 vid = vid_match.group() if vid_match else None
 
                 arp = arp_modules(self.vrf, self.hostname)

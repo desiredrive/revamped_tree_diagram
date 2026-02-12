@@ -62,16 +62,43 @@ def loggin_file():
     f.write("\n")
     f.close()
 
-def append_to_logging_file(content):
-    f = open("collection_logfile.txt", "a")
-    if "STEP" in content:
-        f.write("\n")
-        f.write(
-            "----------------------------------------------------------------------------------------------------------------------------\n")
-    f.write(content)
-    f.write("\n")
-    f.close()
+def append_to_logging_file(content, char_limit=15000):
+    """
+    Appends content to collection_logfile.txt with character-based truncation.
+    Snaps to the last full line to avoid cutting CLI output in half.
+    """
+    # 1. Truncation Logic
+    is_truncated = False
+    if len(content) > char_limit:
+        is_truncated = True
+        # Slice to the limit
+        chunk = content[:char_limit]
+        # Find the last newline to avoid breaking a line mid-sentence
+        last_newline = chunk.rfind('\n')
+        
+        if last_newline != -1:
+            content_to_write = chunk[:last_newline]
+        else:
+            content_to_write = chunk
+    else:
+        content_to_write = content
 
+    # 2. File Writing
+    with open("collection_logfile.txt", "a") as f:
+        # STEP separator logic
+        if "STEP" in content:
+            f.write("\n")
+            f.write("-" * 124 + "\n")
+        
+        # Write the content
+        f.write(content_to_write)
+        
+        # 3. Add legend if truncated
+        if is_truncated:
+            f.write(f"\n\n[!!!] Output exceeds {char_limit} characters. "
+                    "Truncated for display efficiency. [!!!]\n")
+        
+        f.write("\n")
 
 def radkit_version(service):
     radkit_version = service.version
