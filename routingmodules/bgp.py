@@ -326,7 +326,6 @@ class BGP:
             bgpupdcmd = f"show ip bgp update-group"
         else:
             bgpupdcmd = f"show bgp vpnv4 unicast vrf {vrf} update-group"
-        bgpupdcmd =  f"show bgp vpnv4 unicast vrf {vrf} update-group"
         bgpupdcop = get_any_single_output(hostname,bgpupdcmd,service)
         self.bgpupdgroups = parse_bgp_update_groups(bgpupdcop)
 
@@ -363,6 +362,7 @@ class BGPNeighbor:
             bgpweightop = get_any_single_output(hostname,bgpneicmd,service)
         m = re.search(r"\bDefault weight\s+(\d+)\b", bgpweightop or "", re.IGNORECASE)
         weight = int(m.group(1)) if m else 0
+        bgpneiop = dict(bgpneiop) 
         bgpneiop["default_weight"] = weight
         self.bgpneighbor = bgpneiop
 
