@@ -8,15 +8,15 @@ import threading
 import time
 import json
 import random
-from radkit_client.sync import (
+#from radkit_client.sync import (
     # For the creation of the context.
-    create_context,
+    #create_context,
     #certificate_login,
-    access_token_login,
-    sso_login,
+    #access_token_login,
+    #sso_login,
     # Direct login method.
-    direct_login,
-)
+    #direct_login,
+#)
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)-1s %(message)s',
@@ -77,11 +77,11 @@ def radkit_version(service):
     radkit_version = service.version
     return radkit_version
 
-def radkit_login(email: str, domain: str, serial: str):
-    # Connect to the given service, using SSO login.
-    client = sso_login(identity=email, domain=domain)
-    service = client.service(serial).wait()
-    return service
+#def radkit_login(email: str, domain: str, serial: str):
+#    # Connect to the given service, using SSO login.
+#    client = sso_login(identity=email, domain=domain)
+#    service = client.service(serial).wait()
+#    return service
 
 def get_any_single_output(hostname,command: str,service):
     try:
