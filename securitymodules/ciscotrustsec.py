@@ -255,7 +255,6 @@ class cts_rules():
         
         ctsrbacperm_cmd = "show cts role-based permissions from {} to {}".format(sgt,dgt)
         ctsrbacperm_op = radkit_cli.get_single_output_genie(self.hostname, ctsrbacperm_cmd, service)
-
         if ctsrbacperm_op is not None:
             ctsrbacpath = ctsrbacperm_op['indexes']
             matches = ["#"]
@@ -263,7 +262,10 @@ class cts_rules():
                 if type(i) is int:
                     index = i
                     self.srcsgt = ctsrbacpath[index]['src_grp_id']
-                    self.dstsgt = ctsrbacpath[index]['dst_group_id']
+                    try:
+                        self.dstsgt = ctsrbacpath[index]['dst_group_id']
+                    except KeyError:
+                        self.dstsgt = 0
                     try:
                         self.sgtname = ctsrbacpath[index]['src_grp_name']
                     except KeyError:
@@ -273,6 +275,9 @@ class cts_rules():
                     except KeyError:
                         self.dgtname = None
                     rbacls = ctsrbacpath[index]['policy_groups']
+                    filtered_rbacl = [item for item in rbacls if "#" not in item]
+                    self.isdownloaded = len(filtered_rbacl[0]) >= 3 and filtered_rbacl[0][-3] == "-" and filtered_rbacl[0][-2:].isdigit()
+                    self.rawrbacl = filtered_rbacl[0]
                     self.isdefaultrule = False
                     try:
                         if ctsrbacpath[index]['action_policy']:
@@ -305,9 +310,11 @@ class cts_rules():
                         self.isdefaultrule = True
                         try:
                             self.rbacl = ctsrbacpath[index]['action_policy']+" IP"
+                            self.rawrbacl = ctsrbacpath[index]['action_policy']+" IP-00"
                         except:
                             matches = ["#"]
                             rbacls = ctsrbacpath[index]['policy_groups']
+                            self.rbacl = None
                             for j in rbacls:
                                 if not any(x in j for x in matches):
                                     try:
@@ -315,6 +322,7 @@ class cts_rules():
                                     except:
                                         rbacl = None
                             self.rbacl = rbacl
+                            self.rawrbacl = rbacl+"-00 "
             else:
                 self.srcsgt = sgt
                 self.dstsgt = dgt

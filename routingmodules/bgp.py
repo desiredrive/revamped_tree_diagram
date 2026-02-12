@@ -286,7 +286,10 @@ class BGP:
     def bgp_sum_vrf(self,service):
         hostname = self.hostname
         vrf = self.vrf
-        bgpsumcmd = f"show bgp vpnv4 unicast vrf {vrf} summary"
+        if str(vrf).lower() == "default":
+            bgpsumcmd = "show ip bgp summary"
+        else:
+            bgpsumcmd = f"show bgp vpnv4 unicast vrf {vrf} summary"
         bgpsumop = get_single_output_genie(hostname,bgpsumcmd,service)
         self.bgsum = bgpsumop
 
@@ -299,20 +302,30 @@ class BGP:
     def bgp_rib_vrf(self,route,service):
         hostname = self.hostname
         vrf = self.vrf
-        bgproutecmd =  f"show bgp vpnv4 unicast vrf {vrf} {route}"
+        if str(vrf).lower() == "default":
+            bgproutecmd = f"show ip bgp {route}"
+        else:
+            bgproutecmd =  f"show bgp vpnv4 unicast vrf {vrf} {route}"
         bgprouteop = get_single_output_genie(hostname,bgproutecmd,service)
         self.route = bgprouteop
 
     def bgp_defaultroute_vrf(self,service):
         hostname = self.hostname
         vrf = self.vrf
-        bgproutecmd =  f"show bgp vpnv4 unicast vrf {vrf} 0.0.0.0/0"
+        if str(vrf).lower() == "default":
+            bgproutecmd = f"show ip bgp 0.0.0.0/0"
+        else:
+            bgproutecmd =  f"show bgp vpnv4 unicast vrf {vrf} 0.0.0.0/0"
         bgprouteop = get_single_output_genie(hostname,bgproutecmd,service)
         self.defroute = bgprouteop
 
     def bgp_updategroups_vrf(self,service):
         hostname = self.hostname
         vrf = self.vrf
+        if str(vrf).lower() == "default":
+            bgpupdcmd = f"show ip bgp update-group"
+        else:
+            bgpupdcmd = f"show bgp vpnv4 unicast vrf {vrf} update-group"
         bgpupdcmd =  f"show bgp vpnv4 unicast vrf {vrf} update-group"
         bgpupdcop = get_any_single_output(hostname,bgpupdcmd,service)
         self.bgpupdgroups = parse_bgp_update_groups(bgpupdcop)
@@ -320,7 +333,10 @@ class BGP:
     def bgp_ipprotocols(self,service):
         hostname = self.hostname
         vrf = self.vrf
-        ipprotocmd =  f"show ip protocols vrf {vrf}"
+        if str(vrf).lower() == "default":
+            ipprotocmd = f"show ip protocols"
+        else:
+            ipprotocmd = f"show ip protocols vrf {vrf}"
         ipprotoop = get_any_single_output(hostname,ipprotocmd,service)
         ipprotoop = parse_show_ip_protocols_vrf(ipprotoop)
         self.ipprotocols = ipprotoop
@@ -335,10 +351,16 @@ class BGPNeighbor:
         hostname = self.hostname
         vrf = self.vrf
         neighborip = self.neighborip
-        bgpneicmd = f"show bgp vpnv4 unicast vrf {vrf} neighbor {neighborip}"
-        bgpneiop = get_single_output_genie(hostname,bgpneicmd,service)
-        bgpneicmd = f"show bgp vpnv4 unicast vrf {vrf} neighbor {neighborip} | i Default weight|Route map for incoming"
-        bgpweightop = get_any_single_output(hostname,bgpneicmd,service)
+        if str(vrf).lower() == "default":
+            bgpneicmd = f"show ip bgp neighbor {neighborip}"
+            bgpneiop = get_single_output_genie(hostname,bgpneicmd,service)
+            bgpneicmd = f"show ip bgp neighbor {neighborip} | i Default weight|Route map for incoming"
+            bgpweightop = get_any_single_output(hostname,bgpneicmd,service)
+        else:
+            bgpneicmd = f"show bgp vpnv4 unicast vrf {vrf} neighbor {neighborip}"
+            bgpneiop = get_single_output_genie(hostname,bgpneicmd,service)
+            bgpneicmd = f"show bgp vpnv4 unicast vrf {vrf} neighbor {neighborip} | i Default weight|Route map for incoming"
+            bgpweightop = get_any_single_output(hostname,bgpneicmd,service)
         m = re.search(r"\bDefault weight\s+(\d+)\b", bgpweightop or "", re.IGNORECASE)
         weight = int(m.group(1)) if m else 0
         bgpneiop["default_weight"] = weight
@@ -364,7 +386,10 @@ class BGPNeighbor:
         hostname = self.hostname
         vrf = self.vrf
         neighborip = self.neighborip
-        bgpneicmd = f"show run vrf {vrf} | i {neighborip}"
+        if str(vrf).lower() == "default":
+            bgpneicmd = f"show run | i {neighborip}"
+        else:
+            bgpneicmd = f"show run vrf {vrf} | i {neighborip}"
         bgpneiop = get_any_single_output(hostname,bgpneicmd,service)
         bgpneiop = parse_bgp_neighbor_route_maps(bgpneiop, neighborip)
         self.bgpneiroutemaps = bgpneiop
@@ -373,6 +398,9 @@ class BGPNeighbor:
         hostname = self.hostname
         vrf = self.vrf
         neighborip = self.neighborip
-        bgpneicmd = f"show bgp vpnv4 unicast vrf {vrf} neighbor {neighborip} advertised-routes"
+        if str(vrf).lower() == "default":
+            bgpneicmd = f"show ip bgp neighbor {neighborip} advertised-routes"
+        else:
+            bgpneicmd = f"show bgp vpnv4 unicast vrf {vrf} neighbor {neighborip} advertised-routes"
         bgpneiop = get_single_output_genie(hostname,bgpneicmd,service)
         self.advertisdedroutes = bgpneiop

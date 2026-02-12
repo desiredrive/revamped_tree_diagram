@@ -580,7 +580,7 @@ class AccessList:
 
     def rbaclacl(self,aclname,service):
         hostname = self.hostname
-        rbaclcmd= "show ip access-list  {}".format(aclname)
+        rbaclcmd= "show ip access-list  \"{}\"".format(aclname)
         rbaclop = radkit_cli.get_any_single_output(hostname,rbaclcmd,service)
         if rbaclop is not None:
             parsed_aces = []

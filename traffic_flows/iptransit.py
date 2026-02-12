@@ -103,12 +103,16 @@ class BorderDevice:
     def vrf_information(self,vrf, anycastgw, service,step):
         hostname = self.profiled_device.hostname
         self.vrf = vrf
-        vrfdetail_info, anycastgw, anycastgwphy = vrf_configuration(step, vrf, hostname, anycastgw,service)
-        li_interface = next((i for i in (vrfdetail_info.get("interfaces") or []) if str(i).startswith("LI")), None)
-        m = search(r"LI\d+\.(\d+)", li_interface or "")
-        lisp_instance_id = int(m.group(1)) if m else None
-        self.lispiid = lisp_instance_id
-        self.vrfdetail_info = vrfdetail_info
+        if vrf.lower() == "default":
+            anycastgw, anycastgwphy = infravn_anycasatgw(step,vrf,hostname,anycastgw,service)
+            self.lispiid = 4097
+        else:
+            vrfdetail_info, anycastgw, anycastgwphy = vrf_configuration(step, vrf, hostname, anycastgw,service)
+            li_interface = next((i for i in (vrfdetail_info.get("interfaces") or []) if str(i).startswith("LI")), None)
+            m = search(r"LI\d+\.(\d+)", li_interface or "")
+            lisp_instance_id = int(m.group(1)) if m else None
+            self.lispiid = lisp_instance_id
+            self.vrfdetail_info = vrfdetail_info
         self.anycastgw = anycastgw
         self.anycastgwphy = anycastgwphy
 
@@ -283,6 +287,15 @@ def vrf_configuration(step, vrf, borderhostname, anycastgw, service):
     anycastgwphy.get_physical_interfaces(service,step)
 
     return vrfdetail_info, anycastgwphy, anycastgwphy
+
+def infravn_anycasatgw(step,vrf,borderhostname,anycastgw,service):
+    anycastgw = IPCef(anycastgw,vrf,borderhostname)
+    anycastgw.get_cef_internal(service)
+
+    anycastgwphy = physical_recursion(anycastgw,borderhostname)
+    anycastgwphy.get_physical_interfaces(service,step)
+
+    return anycastgwphy, anycastgwphy
 
 def bgp_parameters(vrf, l3handoffneighbors, hostname, dstip, service):
     target_vn = (vrf or "").strip().lower()  # e.g. "campus"
@@ -1074,8 +1087,9 @@ def validate_vrf_configuration(border, step):
     interfaces = vrfdetail.get("interfaces") or []
     ipv4_af = (vrfdetail.get("address_family", {}) or {}).get("ipv4 unicast", {}) or {}
     route_targets = ipv4_af.get("route_targets", {}) or {}
-
-    if not route_distinguisher:
+    lispiid = getattr(border, "lispiid", 0)
+    current_iid = int(lispiid) if lispiid is not None else 0
+    if not route_distinguisher and current_iid != 4097:
         error = "VRF Validation - Missing Route Distinguisher"
         message = (
             f"VRF configuration on {border.mgmtip} is missing a route distinguisher. "
@@ -1088,7 +1102,7 @@ def validate_vrf_configuration(border, step):
     expected_li = f"LI0.{iid_from_rd}" if iid_from_rd else None
 
     li_intf = next((i for i in interfaces if str(i).startswith("LI")), None)
-    if not li_intf:
+    if not li_intf and current_iid != 4097:
         error = "VRF Validation - Missing LISP Interface"
         message = (
             f"VRF configuration on {border.mgmtip} does not include a LISP interface (expected LI0.<iid>). "
@@ -1096,7 +1110,7 @@ def validate_vrf_configuration(border, step):
         )
         exit_program(step, PROCESS, subprocess, hostname, error, message)
 
-    if expected_li and li_intf != expected_li:
+    if expected_li and li_intf != expected_li and current_iid != 4097:
         error = "VRF Validation - RD and LISP IID Mismatch"
         message = (
             f"VRF route distinguisher {route_distinguisher} does not match the LISP interface {li_intf}. "
@@ -1105,7 +1119,7 @@ def validate_vrf_configuration(border, step):
         )
         exit_program(step, PROCESS, subprocess, hostname, error, message)
 
-    if route_distinguisher not in route_targets:
+    if route_distinguisher not in route_targets and current_iid != 4097:
         error = "VRF Validation - Missing IPv4 Route Target"
         message = (
             f"VRF {border.vrf} on {border.mgmtip} is missing the expected IPv4 route-target {route_distinguisher}. "
@@ -1400,12 +1414,18 @@ def validate_advertised_local_prefix(border, step):
     subprocess = "bgpAdvertisedRoute"
     hostname = border.hostname
     vrf_name = getattr(border, "vrf", None)
-
     local_route = getattr(border, "local_route", None) or {}
-    local_prefixes = (
-        ((((local_route.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {}).get(vrf_name, {}) or {})
-        .get("address_family", {}) or {}
-    ).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
+    if vrf_name.lower() == "default":
+        local_prefixes = (
+            ((((local_route.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {}).get(vrf_name, {}) or {})
+            .get("address_family", {}) or {}
+        ).get("", {}).get("prefixes", {}) or {}
+    else:
+        local_prefixes = (
+            ((((local_route.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {}).get(vrf_name, {}) or {})
+            .get("address_family", {}) or {}
+        ).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
+
     local_prefix = next(iter(local_prefixes.keys()), None)
     if not local_prefix:
         error = "BGP Advertised Route - Local Prefix Not Found"
@@ -1751,11 +1771,18 @@ def validate_default_route_and_default_etr(border, step, hostname):
     #bgpinfo = getattr(border, "bgpinfo", None) or {}
     #defroute = bgpinfo.get("defroute", {}) or {}
 
-    prefixes = (
-        ((((defroute.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {})
-         .get(vrf_name, {}) or {})
-        .get("address_family", {}) or {}
-    ).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
+    if vrf_name.lower() == "default":
+        prefixes = (
+            ((((defroute.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {})
+             .get(vrf_name, {}) or {})
+            .get("address_family", {}) or {}
+        ).get("", {}).get("prefixes", {}) or {}
+    else:
+        prefixes = (
+            ((((defroute.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {})
+             .get(vrf_name, {}) or {})
+            .get("address_family", {}) or {}
+        ).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
 
     has_default = "0.0.0.0/0" in prefixes
 
@@ -1771,7 +1798,7 @@ def validate_default_route_and_default_etr(border, step, hostname):
     lispdb = getattr(border, "lispdbroute", None) or {}
     eid = getattr(lispdb, "eid", None) or {}
 
-    if eid != "0.0.0.0/0":
+    if eid != "0.0.0.0/0" and vrf_name.lower() != "default":
         error = "External Connectivity - Default ETR Missing"
         message = (
             f"Border {hostname} has a BGP default route in VRF {vrf_name}, but 0.0.0.0/0 is not present in the LISP database. "
@@ -1779,13 +1806,13 @@ def validate_default_route_and_default_etr(border, step, hostname):
             f"under the appropriate LISP instance-id."
         )
         exit_program(step, process, subprocess, hostname, error, message)
-
-    msg1 = "External Connectivity - Default Route and Default ETR"
-    message = (
-        f"Border {hostname} has a BGP default route in VRF {vrf_name}, and 0.0.0.0/0 is present in the LISP database."
-    )
-    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
-    step += 1
+    if vrf_name.lower() != "default":
+        msg1 = "External Connectivity - Default Route and Default ETR"
+        message = (
+            f"Border {hostname} has a BGP default route in VRF {vrf_name}, and 0.0.0.0/0 is present in the LISP database."
+        )
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
 
     # Validate remote_iid_locators for this border loopback (lispstatus.rloc) and priority != 255
     lispstatus = getattr(border, "lispstatus", None) or {}
@@ -1794,16 +1821,18 @@ def validate_default_route_and_default_etr(border, step, hostname):
     remote_iid_locators = getattr(border, "remote_iid_locators", None) or []
     match_entry = next((e for e in remote_iid_locators if (e.get("rloc_ip") or "").strip() == border_rloc), None)
 
-    if not match_entry:
+    if not match_entry and vrf_name.lower() != "default":
         error = "External Connectivity - Missing Default ETR Locator"
         message = (
             f"Border {hostname} loopback RLOC {border_rloc} was not found in remote IID locator entries. "
             f"Remediation: verify the default-etr locator-set configuration and control-plane locator programming."
         )
         exit_program(step, process, subprocess, hostname, error, message)
-
-    priority = str(match_entry.get("priority") or "").strip()
-    if priority == "255":
+    if vrf_name.lower() == "default":
+        priority = 0
+    else:
+        priority = str(match_entry.get("priority") or "").strip()
+    if priority == "255" and vrf_name.lower() != "default":
         error = "External Connectivity - Default ETR Priority Invalid"
         message = (
             f"Border {hostname} loopback RLOC {border_rloc} is present in remote IID locators, but has priority 255. "
@@ -1811,10 +1840,16 @@ def validate_default_route_and_default_etr(border, step, hostname):
         )
         exit_program(step, process, subprocess, hostname, error, message)
 
-    msg1 = "External Connectivity - Default ETR Locator Validated"
-    message = (
-        f"Border {hostname} loopback RLOC {border_rloc} is present in remote IID locators with priority {priority}."
-    )
+    if vrf_name.lower() == "default":
+        msg1 = "External Connectivity - Default ETR Locator not needed for INFRA_VN"
+        message = (
+            f"Border {hostname} loopback RLOC {border_rloc} has a default route but it is not required on LISP for INFRA_VN connectivity."
+        )
+    else:
+        msg1 = "External Connectivity - Default ETR Locator Validated"
+        message = (
+            f"Border {hostname} loopback RLOC {border_rloc} is present in remote IID locators with priority {priority}."
+        )
     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     step += 1
 
@@ -2157,7 +2192,7 @@ def multi_border_validation(borders, step, service):
 
     # Since Pub/Sub state is consistent across the site, check the first border
     is_pubsub_site = getattr(borders[0].profiled_device, "ispubsub", False)
-
+    current_vrf = None
     # --- FIRST PASS: Collect global data across all borders ---
     for border in borders:
         hostname = border.hostname
@@ -2213,17 +2248,22 @@ def multi_border_validation(borders, step, service):
     # Global 2: Site-Wide PETR Availability (Pub/Sub Only)
     is_external_site = any(getattr(b, "type", "").lower() in ["isexternal", "isanywhere"] for b in borders)
     if is_pubsub_site and is_external_site:
-        if not any_valid_petr_found:
-            error = "Multi-Border - No Default Route in LISP"
-            message = (
-                "Pub/Sub is enabled, but none of the external borders have the default route (0.0.0.0/0) "
-                "propagated into the LISP database with valid locators. At least one external border "
-                "must provide this for the fabric to reach unknown destinations."
-            )
-            exit_program(step, process, subprocess, "Fabric-Wide", error, message)
+        if current_vrf.lower() != 'default':
+            if not any_valid_petr_found:
+                error = "Multi-Border - No Default Route in LISP"
+                message = (
+                    "Pub/Sub is enabled, but none of the external borders have the default route (0.0.0.0/0) "
+                    "propagated into the LISP database with valid locators. At least one external border "
+                    "must provide this for the fabric to reach unknown destinations."
+                )
+                exit_program(step, process, subprocess, "Fabric-Wide", error, message)
+            else:
+                logging_info(step, process, subprocess, "Fabric-Wide",
+                             "Multi-Border - LISP Default Route | At least one border is propagating 0.0.0.0/0 into LISP.")
+                step += 1
         else:
             logging_info(step, process, subprocess, "Fabric-Wide",
-                         "Multi-Border - LISP Default Route | At least one border is propagating 0.0.0.0/0 into LISP.")
+                         "Multi-Border - LISP Default Route | INFRA_VN does not require default-route importing, skipping validation")
             step += 1
 
     # --- SECOND PASS: Individual Border consistency checks ---
@@ -2257,7 +2297,7 @@ def multi_border_validation(borders, step, service):
                     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
                     step += 1
 
-                    if lisp_db.get("eid") != "0.0.0.0/0":
+                    if lisp_db.get("eid") != "0.0.0.0/0" and current_vrf.lower() != 'default':
                         error = "PETR Availability - LISP DB Entry Missing"
                         message = (
                             f"Border {hostname} has a valid default route in RIB, but it is missing in LISP DB for IID {iid}. "
@@ -2265,7 +2305,7 @@ def multi_border_validation(borders, step, service):
                         )
                         exit_program(step, process, subprocess, hostname, error, message)
 
-                    if not (lisp_db.get("locators") or []):
+                    if not (lisp_db.get("locators") or []) and current_vrf.lower() != 'default':
                         error = "PETR Availability - Missing Locators"
                         message = (
                             f"Border {hostname} has 0.0.0.0/0 in LISP DB, but 0 RLOCs. "

@@ -11,7 +11,7 @@ from routingmodules.iprouting import IPRoute
 from routingmodules.lisp import L3Device, CEFForwardingState
 from securitymodules.accesslists import acl_evaluation, AccessList
 from securitymodules.authenticationsession import authen_session_for_interface
-from securitymodules.ciscotrustsec import cts_endpoint_info
+from securitymodules.ciscotrustsec import cts_endpoint_info, cts_rules
 from switchingmodules.cdp import CDPinfo
 from switchingmodules.dhcp import DHCPDevice
 from switchingmodules.interfaces import Interfaces
@@ -66,6 +66,12 @@ class EdgeNodeClassifier:
         mac_learning_info = mac_learning(hostname)
         mac_learning_info.mac_learning_mac(mac,vlan,service)
         self.mac_learning_info = mac_learning_info
+
+    def localsgt(self,service):
+        hostname = self.profiled_device.hostname
+        loopback = self.loopback
+        localsgt = local_sgt_determination(loopback,hostname,service)
+        self.localsgt = localsgt
 
     def cdpinfo(self,service):
         maclearninginfo = self.mac_learning_info
@@ -146,6 +152,16 @@ class EdgeNodeClassifier:
         if self.is_infravn is False:
             lispparameters.map_cache(eids,service)
         self.lispparameters_info = lispparameters
+
+    def infra_vn_forwarding(self,service,step):
+        hostname = self.profiled_device.hostname
+        helpers = self.dhcpparameters_info.helper_address
+        loopback = self.loopback
+        localsgt = self.localsgt
+        routes, cefhops, total_phys = process_infra_vn_underlay_recursion(helpers,loopback,localsgt,hostname,service,step)
+        self.upstreamroutes = routes
+        self.upstreamcef = cefhops
+        self.upstreamphy = total_phys
 
     def forwarding_parameters(self,prefixes,service,step):
         hostname = self.profiled_device.hostname
@@ -1484,8 +1500,14 @@ def validate_dhcp_server_compatibility(border_objects, dora_state, step):
 
     return step + 1
 
+def local_sgt_determination(loopback,hostname,service):
+    localsgt = IPCef(loopback,None,hostname)
+    localsgt.sgtfromcef(service)
+    lsgt = getattr(localsgt, 'sgt', 0)
 
-def process_infra_vn_underlay_recursion(destinations, loopback0, hostname, service, step):
+    return lsgt
+
+def process_infra_vn_underlay_recursion(destinations, loopback0, localsgt, hostname, service, step):
     """
     Validates underlay recursion for INFRA_VN by collecting routing and CEF
     information for DHCP server destinations in the default VRF.
@@ -1493,11 +1515,6 @@ def process_infra_vn_underlay_recursion(destinations, loopback0, hostname, servi
     routes = []
     total_phys = []
     cefhops = []
-
-    localsgt = IPCef(loopback0,None,hostname)
-    localsgt.sgtfromcef(service)
-    lsgt = getattr(localsgt, 'sgt', 0)
-
 
     for destination in destinations:
         # 1. Collect IP Route Information
@@ -1521,7 +1538,7 @@ def process_infra_vn_underlay_recursion(destinations, loopback0, hostname, servi
     cefhops = unique_cefhops
 
     # 3. Validation of proper physical interface recursion
-    for cef_obj in cefhops:
+    for cef_obj in unique_cefhops:
         # Perform physical recursion check
         phy_result = physical_recursion(cef_obj, hostname)
         phy_result.get_physical_interfaces(service, step)
@@ -1544,7 +1561,6 @@ def process_infra_vn_underlay_recursion(destinations, loopback0, hostname, servi
             # Use the helper to extend the master list
             total_phys.extend(list(extract_interfaces(phy_list)))
 
-    # Finally, remove duplicates and empty strings
     total_phys = list(set([p for p in total_phys if isinstance(p, str)]))
 
     access_lists = []
@@ -1561,7 +1577,6 @@ def process_infra_vn_underlay_recursion(destinations, loopback0, hostname, servi
                 access_lists.append(found_acls)
 
     access_lists = list(set([acl for acl in access_lists if acl]))
-
     #Validation of SGACL enforcement status, SGACL presence, SGT/DSGT rule, rbacl, etc.
     cts_objects = []
     for phy in total_phys:
@@ -1589,10 +1604,211 @@ def process_infra_vn_underlay_recursion(destinations, loopback0, hostname, servi
         if all_global and any_port_enabled:
             evaluation_flag = True
 
-    #If evaluation is needed:
+    #If evaluation is needed, get localsgt from endpointdevice and dgst from unique CEF hops
+    finalacls = []
+    if evaluation_flag is True:
+        dsgts = []
+        for hop in cefhops:
+            ip = getattr(hop, 'ip', None) if not isinstance(hop, dict) else hop.get('ip')
+            dsgtobject = IPCef(ip, None, hostname)
+            dsgtobject.sgtfromcef(service)
+            dsgt = getattr(dsgtobject, 'sgt', 0)
+            dsgts.append(dsgt)
+        dsgts = list(set(dsgts))
+        rbacls = []
+        for dsgt in dsgts:
+            rules = cts_rules(hostname)
+            rules.cts_rbac_permissions(localsgt,dsgt,service)
+            rbacl = getattr(rules, 'rawrbacl', None)
+            isrbacl = getattr(rules, 'isdownloaded', False)
+            rbacldict  = {
+                'isdownloaded' : isrbacl,
+                'rbacl' : rbacl,
+            }
+            rbacls.append(rbacldict)
 
+        process = "DHCP Underlay"
+        subprocess = "[aclRBACLPolicy]"
+        # Define the two directions of the DHCP flow
+        flows = [
+            {
+                "description": "DHCP Discover (Client to Server)",
+                "params": {
+                    "sourceip": "0.0.0.0",
+                    "destinationip": "255.255.255.255",
+                    "protocol": "udp",
+                    "srcport": 68,
+                    "dstport": 67
+                }
+            }
+        ]
+        for rbacl in rbacls:
+            acl = rbacl['rbacl']
+            for flow in flows:
+                flow_desc = flow["description"]
+                # Perform the ACL evaluation
+                hit = acl_evaluation(service, hostname, acl, True, flow["params"])
+                action = hit[1].lower() if len(hit) > 1 else "unknown"
 
-    return None
+                if action == 'deny':
+                    error = "RACL Validation - Traffic Denied"
+                    message = (
+                        f"Security Policy Violation: RBACL '{acl}' on {hostname} on TrustSec is denying {flow_desc}. "
+                        f"Traffic flow: {flow['params']}. Remediation: Update the ACL on the "
+                        f"device configuration to permit DHCP traffic."
+                    )
+                    exit_program(step, process, subprocess, hostname, error, message)
+
+                elif action == 'permit':
+                    msg1 = "RACL Validation - Traffic Permitted"
+                    message = f"Security Policy Pass: RBACL '{acl}' on {hostname} permits {flow_desc}."
+                    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                    step += 1
+        for acl in access_lists:
+            for flow in flows:
+                flow_desc = flow["description"]
+                # Perform the ACL evaluation
+                hit = acl_evaluation(service, hostname, acl, False, flow["params"])
+                action = hit[1].lower() if len(hit) > 1 else "unknown"
+
+                if action == 'deny':
+                    error = "RACL Validation - Traffic Denied"
+                    message = (
+                        f"Security Policy Violation: RACL/PACL '{acl}' on {hostname} is denying {flow_desc}. "
+                        f"Traffic flow: {flow['params']}. Remediation: Update the ACL on the "
+                        f"device configuration to permit DHCP traffic."
+                    )
+                    exit_program(step, process, subprocess, hostname, error, message)
+
+                elif action == 'permit':
+                    msg1 = "RACL Validation - Traffic Permitted"
+                    message = f"Security Policy Pass: RACL/PACL '{acl}' on {hostname} permits {flow_desc}."
+                    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                    step += 1
+
+    return routes,cefhops,total_phys
+
+def validate_infra_vn_underlay_nexthops(cefhops, total_phys, hostname, service, step):
+    """
+    Validates that INFRA_VN South-North routing uses valid physical/logical
+    underlay paths and not overlay/tunnel interfaces.
+    """
+    process = 'DHCP Troubleshooting - INFRA-VN'
+    subprocess = "[edgeNodeForwarding]"
+    invalid_keywords = ["lisp", "tunnel", "accesstunnel", "drop", "null", "loopback"]
+    valid_nexthop_found = False
+
+    msg1_pos = "DHCP - Underlay Validation"
+    msg1_err = "DHCP - Underlay Error"
+
+    for cef_obj in cefhops:
+        prefix = getattr(cef_obj, 'prefix', 'Unknown') if not isinstance(cef_obj, dict) else cef_obj.get('prefix',
+                                                                                                         'Unknown')
+        # 1. Check if ismpls is True
+        ismpls = getattr(cef_obj, 'ismpls', False) if not isinstance(cef_obj, dict) else cef_obj.get('ismpls', False)
+        if ismpls:
+            error = msg1_err
+            message = (
+                f"Invalid path detected for prefix {prefix}: ismpls is set to True. "
+                "MPLS is not a valid nexthop for INFRA_VN South-North routing."
+            )
+            exit_program(step, process, subprocess, hostname, error, message)
+
+        # 2. Extract nexthops
+        nexthops = getattr(cef_obj, 'nexthops', []) if not isinstance(cef_obj, dict) else cef_obj.get('nexthops', [])
+
+        for nh in nexthops:
+            oif = nh.get('oif', '')
+
+            # Handle if oif is a dictionary (e.g., {'Loopback0': {}}) or a string
+            if isinstance(oif, dict):
+                oif_name = next(iter(oif)).lower()
+            else:
+                oif_name = str(oif).lower()
+
+            # 3. Check for invalid OIF keywords (case-insensitive)
+            is_invalid = any(keyword in oif_name for keyword in invalid_keywords)
+
+            if is_invalid:
+                error = msg1_err
+                message = (
+                    f"Invalid Outgoing Interface (oif) '{oif}' detected for prefix {prefix}. "
+                    "LISP, Loopback, Tunnel, AccessTunnel, drop, and Null are not valid nexthops for INFRA_VN South-North routing."
+                )
+                exit_program(step, process, subprocess, hostname, error, message)
+
+            # Mark that we found at least one valid physical/logical path
+            valid_nexthop_found = True
+
+    # 4. Final check: Ensure at least one valid path exists
+    if not valid_nexthop_found:
+        error = msg1_err
+        message = "Validation Failed: Not a single valid physical underlay nexthop was found for INFRA_VN South-North routing."
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    # 5. Positive Logging if all checks pass
+    message = (
+        "DHCP Troubleshooting: All nexthops for INFRA_VN South-North routing are valid physical or "
+        "logical underlay paths. No overlay or tunnel recursion detected."
+    )
+    logging_info(step, process, subprocess, hostname, f"{msg1_pos} | {message}")
+    step += 1
+
+    #Physical Interface Counters
+    mtu_values = []
+    if not total_phys:
+        error = "DHCP - Underlay Interface Error"
+        message = (
+            f"No physical interfaces were identified for the underlay path on device '{hostname}'. "
+            "This usually indicates a failure in CEF recursion or missing routing information. "
+            "Validation cannot proceed."
+        )
+        exit_program(step, process, subprocess, hostname, error, message)
+
+    for interface in total_phys:
+        # 1. Instantiate and collect interface data
+        intf_obj = Interfaces(interface, hostname)
+        intf_obj.show_interface(service)
+
+        # 2. Collect MTU for later analysis
+        # Safely get MTU and convert to int for comparison
+        raw_mtu = getattr(intf_obj, 'mtu', None)
+        if raw_mtu:
+            try:
+                mtu_values.append(int(raw_mtu))
+            except (ValueError, TypeError):
+                pass
+
+        # 3. Check for Errors and Drops
+        # We map the attribute names from your class to readable labels
+        counter_map = {
+            "Input Queue Drops": getattr(intf_obj, 'iiqdrops', 0),
+            "Output Drops": getattr(intf_obj, 'outputdrops', 0),
+            "Giants": getattr(intf_obj, 'giants', 0),
+            "Runts": getattr(intf_obj, 'runts', 0),
+            "CRC Errors": getattr(intf_obj, 'crcerrors', 0)
+        }
+
+        # Identify any counter > 0
+        active_issues = [f"{label} ({val})" for label, val in counter_map.items() if val and val > 0]
+
+        if active_issues:
+            msg1 = "DHCP - Interface Performance Warning"
+            message = (
+                f"Interface {interface} on {hostname} is reporting increments in error counters: "
+                f"{', '.join(active_issues)}. This could lead to DHCP packet drops in the underlay."
+            )
+            logging_warning(step, process, subprocess, hostname, f"{msg1} | {message}")
+            step += 1
+
+        # 4. Check Line/Oper State (Bonus safety check)
+        if getattr(intf_obj, 'linestate', '').lower() != 'up' or getattr(intf_obj, 'operstate', '').lower() != 'up':
+            msg1 = "DHCP - Interface State Warning"
+            message = f"Interface {interface} on {hostname} is not in a fully 'UP' state. Verify physical connectivity."
+            logging_warning(step, process, subprocess, hostname, f"{msg1} | {message}")
+            step += 1
+
+    return step
 
 def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, service):
 
@@ -1703,6 +1919,15 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
 
         edge_node_device.authenticationsession(service)
         step = validate_authentication_sessions(edge_node_device,step,service)
+
+        #Local SGT Identification
+        subprocess = "[localSGT]"
+        msg1 = "DHCP - Local SGT"
+        message = f"DHCP Troubleshooting: Determining Local SGT for device: {hostname}"
+        logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+        step += 1
+
+        edge_node_device.localsgt(service)
 
         #Pool Identification (AnycastGW or L2 Only)
         subprocess = "[poolIdentification]"
@@ -1827,8 +2052,11 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
             rlocs = edge_node_device.final_rlocs
             ports = edge_node_device.underlay_ports
         else:
-            #Infra_VN Specific Underlay Validations.
-            return
+            edge_node_device.infra_vn_forwarding(service,step)
+            step +=1
+            upstreamhops = edge_node_device.upstreamcef
+            upstreamphy = edge_node_device.upstreamphy
+            validate_infra_vn_underlay_nexthops(upstreamhops,upstreamphy,hostname,service,step)
 
         #Connectivity Tests
         subprocess = "[underlayReachability]"
@@ -1836,16 +2064,19 @@ def dhcp_troubleshooting(step, mgmtip, catc_name, vlan, mac, vrf, is_few: bool, 
         message = f"DHCP Troubleshooting: Verifying reachability between Edge and destination RLOC"
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
+        if edge_node_device.is_infravn is False:
+            rloc_reachability(ports,hostname,service,rlocs,step)
+            srcip = edge_node_device.loopback
+            dstip = forwarding_prefixes[0]['prefix']
+        else:
+            srcip = edge_node_device.loopback
+            dstip = edge_node_device.dhcpparameters_info.helper_address[0]
 
         subprocess = "[borderValidation]"
         msg1 = "DHCP - Border Validations"
         message = f"DHCP Troubleshooting: Running Border Validation modules for DHCP operation"
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
-
-        rloc_reachability(ports,hostname,service,rlocs,step)
-        srcip = edge_node_device.loopback
-        dstip = forwarding_prefixes[0]['prefix']
 
         #Border Troubleshooting
         border_objects, step = border_ip_transit(step,catc_name,fabric_id,vrf,vlan,srcip,dstip,service,True,iid)
