@@ -359,7 +359,7 @@ class Device:
             if self.isfabric is not False:
                 l2handoff_api = "/dna/intent/api/v1/sda/fabricDevices/layer2Handoffs/count?fabricId={}&networkDeviceId={}".format(self.fabric_id,self.deviceuuid)
                 l2handoff_response = get_catc_api(self.dnac, l2handoff_api,service)['response']
-                if l2handoff_response['count'] == 1:
+                if l2handoff_response['count'] >= 1:
                     self.l2handoff = True
                 else:
                     self.l2handoff = False

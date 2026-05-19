@@ -118,7 +118,7 @@ def analyze_dhcp_snooping_trace(log_output: str, anycast_gw: str, helpers: List[
     hostname = "edge-1-jalejand-cisco-com"
 
     # 1. Initial check for completely empty output
-    if not log_output.strip():
+    if not log_output or not log_output.strip():
         message = "No DHCP events were captured in the past 30 minutes. The endpoint may already have an IP address."
         logging_info(step, process, subprocess, hostname, message)
         return step + 1, "NO_DATA", "No logs"

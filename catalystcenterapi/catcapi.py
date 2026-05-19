@@ -1,6 +1,7 @@
 import sys
 from device_profiler import Device
 from radkit_cli import logging_info, logging_error, get_catc_api, get_hostname_from_mgmtip
+from ipverifications import ip_validator_input
 import re
 
 def is_version_valid(version_string, minimum_version="2.3.7"):
@@ -187,24 +188,28 @@ def getFabricWLC(fabric_id,catc,service,step):
     api_url = "/dna/intent/api/v1/sda/fabricDevices?fabricId={}&deviceRoles=WIRELESS_CONTROLLER_NODE".format(fabric_id)
     api_response = get_catc_api(catc, api_url, service)
     api_status = api_response['response']
-    if api_status == "failed":
-        error = "Catalyst Center API - Unable to Collect"
-        message = "Could not find the Fabric WLC for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
-        logging_error(step, process, subprocess, catc, error)
-        logging_info(step, process, subprocess, catc, message)
-        # raise BDBTaskError("Error: {} | {}".format(error, message))
-        sys.exit("Error: {} | {}".format(error, message))
 
-    else:
+    wlcnetworkdeviceid = None
+    api_failed = (api_status == "failed")
+    if not api_failed:
         try:
             wlcnetworkdeviceid = api_response['response'][0]['networkDeviceId']
-        except KeyError:
-            error = "Catalyst Center API - Unable to Collect"
-            message = "Could not find the Fabric WLC for the Fabric Site in Catalyst Center, Review the latest API retrieved in Catalyst Center in the log file "
-            logging_error(step, process, subprocess, catc, error)
-            logging_info(step, process, subprocess, catc, message)
-            # raise BDBTaskError("Error: {} | {}".format(error, message))
-            sys.exit("Error: {} | {}".format(error, message))
+        except (KeyError, IndexError, TypeError):
+            wlcnetworkdeviceid = None
+
+    if wlcnetworkdeviceid is None:
+        # CatC /sda/fabricDevices is known to return an empty response on some
+        # releases even when a fabric WLC is assigned. Fall back to a manual
+        # operator-supplied management IP.
+        error = "Catalyst Center API - Unable to Collect"
+        message = ("Could not find the Fabric WLC for the Fabric Site in Catalyst Center "
+                   "(suspected CatC defect on /sda/fabricDevices). Falling back to manual input.")
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        mgmtip = ip_validator_input("Enter the Fabric WLC Management IP address > ")
+        logging_info(step, process, subprocess, catc,
+                     "Operator-provided Fabric WLC Management IP: {}".format(mgmtip))
+        return mgmtip
 
     # Obtaining the WLC name:
     mgmtip = get_network_device_byuuid(wlcnetworkdeviceid,catc,service)

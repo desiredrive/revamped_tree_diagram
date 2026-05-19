@@ -202,6 +202,31 @@ def expand_port(short_name):
             return short_name.replace(abbr, full, 1)
     return short_name
 
+
+def abbrev_port(name):
+    """Reverse of expand_port — produce the short IOS form (e.g. Gi1/0/1)."""
+    if not name:
+        return name
+    # Order matters: longer full-prefixes must come before any that share a
+    # leading substring (e.g. TwentyFive before Twenty).
+    mapping = [
+        ('TwentyFiveGigE',         'Twe'),
+        ('TwentyGigabitEthernet',  'Tw'),
+        ('TenGigabitEthernet',     'Te'),
+        ('AppGigabitEthernet',     'Ap'),
+        ('FiveGigabitEthernet',    'Fi'),
+        ('FortyGigabitEthernet',   'Fo'),
+        ('HundredGigEthernet',     'Hu'),
+        ('GigabitEthernet',        'Gi'),
+        ('FastEthernet',           'Fa'),
+        ('AccessTunnel',           'Ac'),
+        ('Ethernet',               'Eth'),
+    ]
+    for full, abbr in mapping:
+        if name.startswith(full):
+            return abbr + name[len(full):]
+    return name
+
 def dhcp_mac_address_validation(mac_learning_info,step):
     process = "dhcpTroubleshooting"
     subprocess = "[macAddressLearning]"
@@ -223,7 +248,7 @@ def dhcp_mac_address_validation(mac_learning_info,step):
         message = f"DHCP Troubleshooting: MAC Address {mac} on VLAN {vlan} in DROP state on device {hostname}."
         exit_program(step, process, subprocess, hostname, error, message)
     #If Port is "Ac[0-9]", add "FEW Flag on it"
-    elif port is None:
+    elif port.startswith("Ac"):
         mac_learning_info.fewendpoint = True
         msg1 = "DHCP - Layer 2"
         message = f"DHCP Troubleshooting: MAC Address {mac} on VLAN {vlan} detected on device {hostname}. As the interface is {port}, Fabric-enabled wireless features will not be validated in this flow."
@@ -1651,7 +1676,6 @@ def process_infra_vn_underlay_recursion(destinations, loopback0, localsgt, hostn
             evaluation_flag = True
 
     #If evaluation is needed, get localsgt from endpointdevice and dgst from unique CEF hops
-    finalacls = []
     if evaluation_flag is True:
         dsgts = []
         for hop in cefhops:
@@ -1688,6 +1712,7 @@ def process_infra_vn_underlay_recursion(destinations, loopback0, localsgt, hostn
                 }
             }
         ]
+        
         for rbacl in rbacls:
             acl = rbacl['rbacl']
             for flow in flows:

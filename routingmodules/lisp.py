@@ -1259,23 +1259,28 @@ class lisp_route_import:
     def ridb_state(self, service):
         ridb_cmd = "show lisp instance-id {} ipv4 route-import database".format(self.iid)
         ridb_op = get_any_single_output(self.hostname,ridb_cmd,service)
-        iids = []
-        configflag = []
-        limits = []
+        if not ridb_op:
+            return None
+        result = {}
+        current_iid = None
         for line in ridb_op.splitlines():
             if "Output for" in line:
-                iid = re.compile("(?<=ce-id )[0-9]+").search(line).group().strip()
-                iids.append(iid)
-            if "There are no" in line:
-                configflag.append(None)
-                limits.append(None)
-            if "Config" in line:
-                configflag.append(True)
-                limit = re.compile("(?<=limit )[0-9]+").search(line).group().strip()
-                limits.append(limit)
-            if "EID table not" in line:
-                configflag.append(False)
-                limits.append(False)
+                m = re.compile("(?<=ce-id )[0-9]+").search(line)
+                if m:
+                    current_iid = m.group().strip()
+                    result[current_iid] = {"configured": None, "limit": None}
+            elif current_iid is None:
+                continue
+            elif "There are no" in line:
+                result[current_iid]["configured"] = None
+            elif "Config" in line:
+                result[current_iid]["configured"] = True
+                m = re.compile("(?<=limit )[0-9]+").search(line)
+                if m:
+                    result[current_iid]["limit"] = m.group().strip()
+            elif "EID table not" in line:
+                result[current_iid]["configured"] = False
+        return result or None
 
     def route_import_database_specific(self,prefix,service):
         hostname = self.hostname
