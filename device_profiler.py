@@ -268,6 +268,11 @@ class Device:
             self.deviceuuid = netdevice_response['instanceUuid']
             self.platform = netdevice_response['platformId']
             self.reachabilitystatus = netdevice_response['reachabilityStatus']
+            # CatC stores the device's actual configured hostname (FQDN as
+            # advertised in CDP), distinct from self.hostname which is the
+            # RADKIT inventory key. Used to match CDP neighbors back to a
+            # profiled device.
+            self.catc_hostname = netdevice_response.get('hostname')
         except KeyError:
             error = "Error Retrieving Device Details from Catalyst Center API"
             message = "Review the latest API retrieved in Catalyst Center in the GPS_SDA Collection, API:{}".format(

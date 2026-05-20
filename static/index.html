@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SDA Fabric Troubleshooter</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <!-- Step 1: RADKIT login -->
+  <form id="loginForm">
+    <h1>RADKIT Login</h1>
+
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" required placeholder="you@cisco.com">
+
+    <label for="domain">Domain</label>
+    <select id="domain" name="domain">
+      <option value="PROD" selected>PROD</option>
+      <option value="STAGE">STAGE</option>
+    </select>
+
+    <label for="method">Login method</label>
+    <select id="method" name="method">
+      <option value="sso" selected>SSO</option>
+      <option value="certificate">Certificate</option>
+    </select>
+
+    <div id="passphraseRow" style="display:none;">
+      <label for="passphrase">Certificate private-key password</label>
+      <input id="passphrase" name="passphrase" type="password" autocomplete="current-password">
+    </div>
+
+    <button type="submit">Log in</button>
+    <div id="status"></div>
+  </form>
+
+  <!-- Step 2: pick a service -->
+  <form id="serviceForm" class="card" style="display:none; width:320px;">
+    <h1>Connect to RADKIT service</h1>
+    <div class="muted" id="serviceUser" style="margin-bottom:1rem;"></div>
+    <label for="serial">Service serial</label>
+    <input id="serial" name="serial" type="text" required placeholder="e.g. 7an6-bxvq-tkcs">
+    <button type="submit">Connect</button>
+    <div id="serviceStatus" class="status-line"></div>
+  </form>
+
+  <!-- Step 3: pick a scenario -->
+  <form id="scenarioForm" class="card" style="display:none; width:360px;">
+    <h1>Pick a scenario</h1>
+    <div class="muted" id="scenarioService" style="margin-bottom:0.5rem;"></div>
+
+    <label for="scenario">Scenario</label>
+    <select id="scenario" name="scenario">
+      <option value="dhcp" selected>DHCP Troubleshooting</option>
+      <option value="east_west">East-West Trace</option>
+    </select>
+
+    <!-- DHCP inputs -->
+    <div id="dhcpInputs">
+      <label>XTR Inventory Management IP</label>
+      <input id="dhcp_mgmt_ip" type="text" placeholder="10.62.102.152">
+
+      <label>Catalyst Center name <span style="color:#64748b;">(optional)</span></label>
+      <input id="dhcp_catc_name" type="text" placeholder="172-31-126-6">
+      <div class="hint">Only required if RADKIT Standalone Server is in use.</div>
+
+      <label>VLAN ID</label>
+      <input id="dhcp_vlan" type="number" placeholder="1021">
+
+      <label>Endpoint MAC</label>
+      <input id="dhcp_mac" type="text" placeholder="b4de.31fa.c74a or b4:de:31:fa:c7:4a">
+      <div id="dhcp_mac_msg" class="field-msg"></div>
+
+      <label>VRF</label>
+      <input id="dhcp_vrf" type="text" value="default">
+      <div class="hint">If the endpoint is an INFRA_VN (AP, Extended Node), set it as <code>default</code>.</div>
+
+      <div style="display:flex; align-items:center; justify-content:space-between; margin:1rem 0 0.25rem; gap:1rem;">
+        <span style="font-size:0.85rem; color:#e2e8f0;">Fabric Enabled Wireless Endpoint</span>
+        <label class="toggle">
+          <input id="dhcp_is_few" type="checkbox" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- East-West inputs -->
+    <div id="ewInputs" style="display:none;">
+      <label>Source XTR management IP</label>
+      <input id="ew_device_ip" type="text" placeholder="172.19.1.68">
+
+      <label>Source endpoint IP</label>
+      <input id="ew_endpoint_ip" type="text" placeholder="172.19.10.15">
+
+      <label>Destination IP</label>
+      <input id="ew_destination_ip" type="text" placeholder="172.19.10.10">
+
+      <label style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:#e2e8f0; margin:0.9rem 0 0.25rem;">
+        <input id="ew_l2only" type="checkbox" style="width:auto;"> L2 only pool
+      </label>
+
+      <div id="ewL2Inputs" style="display:none;">
+        <label>Mask (prefix length)</label>
+        <input id="ew_mask" type="number" placeholder="24">
+
+        <label>Gateway IP</label>
+        <input id="ew_gateway" type="text" placeholder="172.19.10.1">
+      </div>
+    </div>
+
+    <button type="submit">Run</button>
+    <div id="scenarioStatus" class="status-line" style="background:#064e3b; color:#d1fae5;"></div>
+  </form>
+
+  <!-- Step 4: live topology + checks panel -->
+  <div id="topologyPanel">
+    <div class="topology-header">
+      <div id="topologyTitle">Topology</div>
+      <div id="topologySub"></div>
+      <label id="topologyWiredToggle" style="display:none;" class="slider-toggle">
+        <input id="topologyTreatAsWired" type="checkbox">
+        <span class="slider"></span>
+        <span class="slider-label">Treat as wired (skip wireless onboarding)</span>
+      </label>
+      <button id="topologyDownloadLog" type="button" title="Download collection_logfile.txt">Download Log</button>
+      <button id="topologyRefresh" type="button" title="Run the whole flow again">Run Again</button>
+    </div>
+    <div class="topology-body">
+      <div id="cy"></div>
+      <div id="checksPanel">
+        <div class="header">
+          <span id="checksPanelTitle">Checks</span>
+          <span id="checksPanelSummary"></span>
+          <button id="checksPanelClose" type="button" title="Close">×</button>
+        </div>
+        <div id="checksList"></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
