@@ -1057,13 +1057,37 @@ def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcppar
     else:
         map_cache_default_present = False
         for map_cache in map_caches:
-            eid_prefix = getattr(map_cache, 'eid_prefix', "")
-            if eid_prefix == "0.0.0.0/0":
-                # Safely check sources (assuming it's a list or string)
-                sources = getattr(map_cache, 'sources', [])
-                if 'static' in sources:
-                    map_cache_default_present = True
-                    break  # Found it, no need to keep looping
+            eid_prefix = getattr(map_cache, 'eid_prefix', "") or ""
+            eid_attr = getattr(map_cache, 'eid', "") or ""
+            mask_attr = getattr(map_cache, 'mask', None)
+            # Normalize: parsers may set eid_prefix="0.0.0.0/0" OR split it into
+            # eid="0.0.0.0" + mask=0. Accept both forms.
+            is_default = (
+                str(eid_prefix).strip() == "0.0.0.0/0"
+                or (str(eid_attr).strip() == "0.0.0.0" and str(mask_attr) == "0")
+            )
+            if not is_default:
+                continue
+            # IOS-XE reports the static map-cache entry's Sources as
+            # `static-send-map-request` (sometimes alongside `map-reply`).
+            # Genie may return a list; the manual parser returns a comma-
+            # separated string. Flatten before substring-matching.
+            sources = getattr(map_cache, 'sources', []) or []
+            if isinstance(sources, str):
+                sources_text = sources
+            else:
+                sources_text = ",".join(str(s) for s in sources)
+            sources_text = sources_text.lower()
+            # The configured `map-cache 0.0.0.0/0 map-request` statement
+            # produces an entry whose Sources include `static` or, at minimum,
+            # `send-map-request`. If neither token is present but an entry for
+            # 0.0.0.0/0 still exists, treat that as proof of configuration
+            # rather than false-negative on a parser quirk.
+            if ('static' in sources_text
+                    or 'send-map-request' in sources_text
+                    or sources_text == ""):
+                map_cache_default_present = True
+                break
 
         if not map_cache_default_present:
             error = "LISP - Map-Cache , Static Default"
@@ -1215,6 +1239,23 @@ def lisp_parameters_validation_edge(lispparameters_info,pubsub_flag,step,dhcppar
                     if state == 'up':
                         any_rloc_up = True
                         break  # One UP RLOC is enough for reachability
+
+                # LISP-BGP fabrics: when the helper-address resolves to a
+                # negative/forward-native entry, IOS-XE does not list explicit
+                # locators — the map-cache instead shows "Encapsulating to
+                # proxy ETR" and traffic exits via the globally configured
+                # use-petrs. Treat that as a valid forwarding path.
+                petr_encap = getattr(map_cache, 'petr_encap', False)
+                if not any_rloc_up and petr_encap:
+                    msg1 = "LISP - Helper-Address RLOC reachability"
+                    message = (
+                        f"LISP Troubleshooting: Map-Cache entry for Helper-Address {requested_eid} on device '{hostname}' "
+                        f"has no explicit locators; forwarding is via the configured use-petrs (LISP-BGP). "
+                        f"This is a valid path — RLOC reachability is delegated to the PETR set."
+                    )
+                    logging_info(step, process, subprocess, hostname, f"{msg1} | {message}")
+                    step += 1
+                    continue
 
                 if not any_rloc_up:
                     error = "LISP - Helper-Address RLOC reachability"
@@ -1456,6 +1497,12 @@ def process_map_cache_recursion(edge_node_device, mac, vlan, service, step, iid,
     fabric_id  = (getattr(sourcextr, "fabric_id", "Unknown") or "Unknown") if sourcextr else "Unknown"
     srcip = getattr(sourcextr, "loopback", None) if sourcextr else None
     map_caches = (getattr(getattr(edge_node_device, "lispparameters_info", None), "map_cache_information", []) or [])
+    # use-petrs from `show lisp instance-id <iid> ipv4` — the configured PETR
+    # RLOC set. When a helper-address map-cache entry has no explicit locators
+    # (LISP-BGP forward-native / "Encapsulating to proxy ETR"), forwarding goes
+    # through these use-petrs and CEF must be resolved against them.
+    _inst = getattr(getattr(edge_node_device, "lispparameters_info", None), "instance_information", None)
+    use_petrs = list(getattr(_inst, "usepetrs", []) or [])
     # Helper for shared object access
 
     for map_cache in map_caches:
@@ -1481,6 +1528,30 @@ def process_map_cache_recursion(edge_node_device, mac, vlan, service, step, iid,
 
             # --- Scenario 2: Default Route Recursion with No RLOCs ---
         elif eid_prefix == "0.0.0.0/0" and not rlocs:
+            # LISP-BGP: a 0.0.0.0/0 entry without RLOCs is expected to be
+            # forward-native / "Encapsulating to proxy ETR". The only thing
+            # to verify is that use-petrs are configured; LISP-session /
+            # border triage is PubSub-only and would be noise here.
+            petr_encap = getattr(map_cache, 'petr_encap', False)
+            if petr_encap:
+                if not use_petrs:
+                    error = "LISP - Use-PETR Configuration"
+                    message = (
+                        f"LISP Troubleshooting: Map-cache entry 0.0.0.0/0 on device '{hostname}' is "
+                        f"forward-native (LISP-BGP) but no use-petrs are configured under IID {iid}. "
+                        f"Without use-petrs, Edge nodes have no PETR set to encapsulate traffic toward."
+                    )
+                    exit_program(step, process, subprocess, hostname, error, message)
+                msg1 = "LISP Map-Cache - Default Route (LISP-BGP)"
+                message = (
+                    f"Finding: Map-cache 0.0.0.0/0 for IID {iid} on device '{hostname}' is "
+                    f"forward-native via the configured use-petrs {use_petrs}. "
+                    f"LISP-BGP default behavior — no LISP-Session / border triage required."
+                )
+                logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
+                continue
+
             msg1 = "LISP Map-Cache - Default Route Recursion"
             message = (
                 f"Finding: Map-cache for destination {helper_address} resolves to the default route (0.0.0.0/0) "
@@ -1507,10 +1578,33 @@ def process_map_cache_recursion(edge_node_device, mac, vlan, service, step, iid,
             }
             forwarding_prefixes.append(prefixes)
         else:
-            msg1 = "LISP Map-Cache - No Active RLOCs"
-            message = f"Finding: Map-cache for {helper_address} found, but no RLOCs are in the 'up' state."
-            logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
-            step += 1
+            # LISP-BGP / forward-native: no explicit RLOCs in the map-cache,
+            # but the entry is "Encapsulating to proxy ETR" — forwarding goes
+            # through the configured use-petrs. Substitute them so CEF can be
+            # resolved against the actual forwarding destinations.
+            petr_encap = getattr(map_cache, 'petr_encap', False)
+            if petr_encap and use_petrs:
+                synthetic_rlocs = [
+                    {'rloc': p, 'uptime': '-', 'state': 'up', 'priority': 0, 'encap_iid': '-'}
+                    for p in use_petrs
+                ]
+                forwarding_prefixes.append({
+                    'prefix': helper_address,
+                    'expectedrlocs': synthetic_rlocs,
+                })
+                msg1 = "LISP Map-Cache - Use-PETR Forwarding (LISP-BGP)"
+                message = (
+                    f"Finding: Map-cache entry for {helper_address} has no explicit RLOCs "
+                    f"(forward-native / Encapsulating to proxy ETR). Action: using the configured "
+                    f"use-petrs {use_petrs} from `show lisp instance-id {iid} ipv4` as forwarding destinations."
+                )
+                logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
+            else:
+                msg1 = "LISP Map-Cache - No Active RLOCs"
+                message = f"Finding: Map-cache for {helper_address} found, but no RLOCs are in the 'up' state."
+                logging_warning(step, process, subprocess, hostname, msg1 + " | " + message)
+                step += 1
 
     return step, forwarding_prefixes
 

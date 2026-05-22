@@ -183,14 +183,16 @@ button:hover { background: #1d4ed8; }
 }
 #topologyRefresh:hover { background: #475569; }
 #topologyRefresh:disabled { background: #1e293b; color: #64748b; cursor: not-allowed; }
-#topologyDownloadLog {
+#topologyDownloadLog,
+#topologyDownloadTopology {
   margin: 0 0.5rem 0 0;
   width: auto;
   padding: 0.4rem 0.9rem;
   font-size: 0.8rem;
   background: #334155;
 }
-#topologyDownloadLog:hover { background: #475569; }
+#topologyDownloadLog:hover,
+#topologyDownloadTopology:hover { background: #475569; }
 
 /* Slider toggle */
 .slider-toggle {

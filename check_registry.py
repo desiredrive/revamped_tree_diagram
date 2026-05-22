@@ -1,8 +1,12 @@
 """Chain assembly for each scenario.
 
-The actual Check classes live in:
-  - checks_common.py — scenario-agnostic checks (param validation, profiling)
-  - checks_dhcp.py   — DHCP-specific checks
+Check classes live in:
+  - checks_common.py   — scenario-agnostic checks
+  - checks_profile.py  — Catalyst Center / device-profiling / fabric-role
+  - checks_lisp.py     — CP-loopback, RLOC, PITR/PETR, LISP/SISF params
+  - checks_dhcp.py     — DHCP pool/parameters/snooping/relay/SVI/ACLs
+  - checks_underlay.py — CEF forwarding, underlay reachability/CDP
+  - checks_border.py   — border discovery, control-plane, per-border chain
 
 This module just imports them and orders them per scenario.
 """
@@ -13,20 +17,27 @@ from checks_common import (
     DetectInfraVn,
     ProfileXtrHostname,
 )
-from checks_dhcp import (
+from checks_profile import (
     ResolveCatcName,
     ProfileXtrNetworkDevice,
     ProfileXtrFabricDevice,
     FabricSiteLookup,
     XtrRoleClassification,
+    FewRedirectReal,
+    MacLearning,
+    CdpNeighborCheck,
+    AuthenticationSessionCheck,
+    LocalSgt,
+)
+from checks_lisp import (
     CpLoopback,
     RlocDefinition,
     PitrValidation,
     PetrValidation,
-    FewRedirectReal,
-    MacLearning,
-    AuthSessionAndCdp,
-    LocalSgt,
+    LispParameters,
+    SisfDeviceTracking,
+)
+from checks_dhcp import (
     PoolIdentification,
     DhcpParameters,
     DhcpSnoopingValidation,
@@ -34,12 +45,13 @@ from checks_dhcp import (
     SviValidation,
     DhcpSnoopingClientStats,
     LocalPolicies,
-    LispParameters,
+)
+from checks_underlay import (
     EdgeForwarding,
     UnderlayReachability,
     UnderlayCdpDiscovery,
-    BorderDiscovery,
 )
+from checks_border import BorderDiscovery
 
 
 def build_check_chain(payload: dict) -> list[Check]:
@@ -61,7 +73,8 @@ def build_check_chain(payload: dict) -> list[Check]:
             PetrValidation(),
             FewRedirectReal(),
             MacLearning(),
-            AuthSessionAndCdp(),
+            CdpNeighborCheck(),
+            AuthenticationSessionCheck(),
             LocalSgt(),
             PoolIdentification(),
             DhcpParameters(),
@@ -71,6 +84,7 @@ def build_check_chain(payload: dict) -> list[Check]:
             DhcpSnoopingClientStats(),
             LocalPolicies(),
             LispParameters(),
+            SisfDeviceTracking(),
             EdgeForwarding(),
             UnderlayReachability(),
             UnderlayCdpDiscovery(),

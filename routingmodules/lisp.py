@@ -117,6 +117,8 @@ def parse_lisp_ethernet_statistics(cli_output):
     and returns a dictionary similar to the specified structure.
     """
     data = {}
+    if not cli_output:
+        return data
     lines = cli_output.strip().split('\n')
 
     # Helper function to extract in/out values (e.g., "4/0")
@@ -649,12 +651,19 @@ def map_cache_manual_parse(output):
     packets_out_bytes = None
     counters_not_accurate = False
     locators = {}
+    petr_encap = False  # set when entry says "Encapsulating to proxy ETR"
 
     lines = output.splitlines()
     for idx, line in enumerate(lines):
         line = line.strip()
-        # EID prefix line
-        m_eid = re.match(r"([\d\.]+)/(\d+), uptime: ([^,]+), expires: ([^,]+), via ([^,]+), (.+)", line)
+        # EID prefix line. The trailing activity field is optional — on some
+        # IOS-XE versions a quiescent static map-cache entry omits it
+        # (e.g. "0.0.0.0/0, uptime: 16w4d, expires: never, via static-send-map-request"
+        # has no extra ", <activity>" suffix).
+        m_eid = re.match(
+            r"([\d\.]+)/(\d+), uptime: ([^,]+), expires: ([^,]+), via ([^,]+?)(?:, (.+))?$",
+            line,
+        )
         if m_eid:
             eid_prefix = f"{m_eid.group(1)}/{m_eid.group(2)}"
             eid = m_eid.group(1)
@@ -662,7 +671,7 @@ def map_cache_manual_parse(output):
             uptime = m_eid.group(3)
             expires = m_eid.group(4)
             via = m_eid.group(5)
-            activity = m_eid.group(6)
+            activity = m_eid.group(6) or ""
         # Sources
         m_sources = re.match(r"Sources: (.+)", line)
         if m_sources:
@@ -679,6 +688,10 @@ def map_cache_manual_parse(output):
             packets_out = int(m_packets.group(1))
             packets_out_bytes = int(m_packets.group(2))
             counters_not_accurate = True
+        # PETR encapsulation indicator (LISP-BGP: no explicit locator block,
+        # forwarding goes through configured use-petrs).
+        if "Encapsulating to proxy ETR" in line:
+            petr_encap = True
         # Locator block
         m_locator = re.match(r"(\d+\.\d+\.\d+\.\d+)\s+(\S+)\s+(\S+)\s+(\d+)/(\d+)\s+(\S+)", line)
         if m_locator:
@@ -714,6 +727,7 @@ def map_cache_manual_parse(output):
         "packets_out": packets_out,
         "packets_out_bytes": packets_out_bytes,
         "counters_not_accurate": counters_not_accurate,
+        "petr_encap": petr_encap,
         "locators": locators
     }
 
@@ -2417,6 +2431,44 @@ class LISPMapCache:
         except KeyError:
             pass
         self.rlocs = rlocs
+        # LISP-BGP / negative-cache: an entry with no explicit locators and a
+        # state that means "no specific mapping" (forward-native,
+        # unknown-eid-forward, send-map-request) is encapsulated to the
+        # configured use-petrs. Genie doesn't surface "Encapsulating to proxy
+        # ETR", so infer the flag from state/via if the manual parser didn't
+        # set it explicitly.
+        try:
+            explicit = bool(path.get('petr_encap', False)) if isinstance(path, dict) else False
+        except Exception:
+            explicit = False
+        if explicit:
+            self.petr_encap = True
+        else:
+            # Pull state/via/activity from the parsed path dict (Genie path
+            # doesn't surface 'state' as a class attribute) so the inference
+            # also fires for forward-native / send-map-request entries.
+            path_state = ""
+            try:
+                if isinstance(path, dict):
+                    path_state = " ".join(
+                        str(path.get(k) or "") for k in ('state', 'via', 'activity', 'sources')
+                    )
+            except Exception:
+                path_state = ""
+            state_text = (
+                path_state + " "
+                + str(getattr(self, 'via', '') or '') + " "
+                + str(getattr(self, 'activity', '') or '') + " "
+                + str(getattr(self, 'sources', '') or '')
+            ).lower()
+            self.petr_encap = (
+                not rlocs
+                and any(tok in state_text for tok in (
+                    'forward-native',
+                    'unknown-eid-forward',
+                    'send-map-request',
+                ))
+            )
 
 class L2LISPStatistics:
     def __init__(self,device):

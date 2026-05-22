@@ -10,6 +10,26 @@ let currentPayload = null;
 let currentEventSource = null;
 let runInFlight = false;
 
+// ---- Session persistence (survive page reload / network blip) -------------
+
+const STORAGE_KEY = 'sdaTroubleshooterSession';
+
+function saveSession(patch) {
+  try {
+    const cur = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(Object.assign(cur, patch)));
+  } catch (e) { /* localStorage unavailable */ }
+}
+
+function clearSession() {
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+}
+
+function readSession() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+  catch (e) { return {}; }
+}
+
 // ---- Login -----------------------------------------------------------------
 
 const loginForm = document.getElementById('loginForm');
@@ -107,6 +127,7 @@ function setStatus(el, kind, html) {
 
 function showServiceForm(sid) {
   currentSession = sid;
+  saveSession({ sid });
   loginForm.style.display = 'none';
   serviceUser.textContent = 'Logged in as ' + document.getElementById('email').value;
   serviceForm.style.display = 'block';
@@ -147,6 +168,7 @@ async function pollServiceStatus(sid) {
       }
       if (d.status === 'ready') {
         setStatus(serviceStatus, 'ok', '<b>Connected!</b><br>Service: ' + (d.name || d.serial));
+        saveSession({ serviceName: d.name || d.serial, serviceSerial: d.serial });
         showScenarioForm(d.name || d.serial);
         return;
       }
@@ -487,7 +509,38 @@ function showTopology(payload) {
   document.getElementById('checksPanelClose').addEventListener('click', hideChecksPanel);
   document.getElementById('topologyRefresh').addEventListener('click', refreshTopology);
   document.getElementById('topologyDownloadLog').addEventListener('click', () => {
-    window.location.href = '/logfile';
+    // Use a hidden <a download> click instead of navigating window.location
+    // — navigation tears down the active EventSource and surfaces as
+    // "interrupted" in the network console.
+    const a = document.createElement('a');
+    a.href = '/logfile';
+    a.download = 'collection_logfile.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+  document.getElementById('topologyDownloadTopology').addEventListener('click', () => {
+    if (!cy) return;
+    // Render the full graph (not just the visible viewport) into a 1920x1080
+    // JPEG. cy.jpg() with output:'blob' returns a Blob we can download via a
+    // hidden <a download> click — no navigation, EventSource stays alive.
+    const blob = cy.jpg({
+      output: 'blob',
+      full: true,
+      bg: '#ffffff',
+      maxWidth: 1920,
+      maxHeight: 1080,
+      quality: 0.92,
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    a.download = 'topology-' + ts + '.jpg';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   });
 }
 
@@ -772,17 +825,50 @@ function appendCheck(nodeId, entry) {
   if (idx >= 0) { list[idx] = Object.assign({}, list[idx], entry); }
   else { list.push(entry); }
   n.data('checks', list);
+  // Recompute node status from the full check list. Skip is neutral — only
+  // ok/warn/fail count toward the terminal verdict. Running shows while there
+  // are still in-flight checks and no failure has surfaced.
+  n.data('status', computeNodeStatus(list));
   if (selectedNodeId === nodeId) renderChecksPanel();
 }
+
+// Terminal severity. 'skip' is intentionally absent → neutral; a node with
+// only OK + SKIP results stays green.
+const TERMINAL_RANK = { ok: 1, warn: 2, fail: 3 };
+function computeNodeStatus(checks) {
+  if (!checks || !checks.length) return 'pending';
+  let best = 0, anyTerminal = false, anyRunning = false, anySkip = false;
+  for (const c of checks) {
+    if (c.status === 'running') { anyRunning = true; continue; }
+    if (c.status === 'skip')    { anySkip = true; continue; }
+    const r = TERMINAL_RANK[c.status];
+    if (r) { anyTerminal = true; if (r > best) best = r; }
+  }
+  // A fail takes effect immediately even with checks still running.
+  if (best === 3) return 'fail';
+  if (anyRunning) return 'running';
+  if (anyTerminal) return best === 2 ? 'warn' : 'ok';
+  return anySkip ? 'skip' : 'pending';
+}
+
+let lastEventId = 0;
 
 async function startRun(payload) {
   if (currentEventSource) { try { currentEventSource.close(); } catch (e) {} }
   setRunInFlight(true);
-  const es = new EventSource('/run/events/' + currentSession);
+  // Pass `?since=<last>` so the server skips events from any earlier run on
+  // this session. EventSource auto-reconnects within the same connection use
+  // Last-Event-ID; this only affects fresh EventSource instances.
+  const url = '/run/events/' + currentSession + '?since=' + lastEventId;
+  const es = new EventSource(url);
   currentEventSource = es;
   es.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (ev.lastEventId) {
+      const n = parseInt(ev.lastEventId, 10);
+      if (!isNaN(n) && n > lastEventId) { lastEventId = n; saveSession({ lastEventId }); }
+    }
     handleEvent(msg);
     if (msg.type === 'run_complete') { es.close(); setRunInFlight(false); }
   };
@@ -831,14 +917,30 @@ function mergeNodeInto(srcId, tgtId, edgeLabel) {
   });
   tgt.data('checks', checks);
 
-  // Status escalation from src.
-  const srcStatus = src.data('status');
-  if (srcStatus) tgt.data('status', escalate(tgt.data('status'), srcStatus));
+  // Recompute merged status from the unioned check list (skip-neutral).
+  tgt.data('status', computeNodeStatus(checks));
 
   // Re-home edges that touched src to touch tgt instead, then drop duplicates.
+  // If tgt already has an edge to the same other endpoint, keep the more
+  // informative label (interface labels like "Te1/0/3 <-> Twe1/0/4" win over
+  // generic role labels like "fabric").
+  const edgeBetween = (a, b) => cy.edges().filter(e => {
+    const s = e.data('source'), t = e.data('target');
+    return (s === a && t === b) || (s === b && t === a);
+  });
   src.connectedEdges().forEach(e => {
     const otherEnd = (e.data('source') === srcId) ? e.data('target') : e.data('source');
     if (otherEnd === tgtId) { e.remove(); return; }
+    const incomingLabel = e.data('label') || '';
+    const existing = edgeBetween(tgtId, otherEnd);
+    if (existing.length > 0) {
+      const existingLabel = existing[0].data('label') || '';
+      if (incomingLabel && incomingLabel.length > existingLabel.length) {
+        existing[0].data('label', incomingLabel);
+      }
+      e.remove();
+      return;
+    }
     const newId = 'merged-' + srcId + '-' + otherEnd;
     if (!cy.getElementById(newId).empty()) { e.remove(); return; }
     cy.add({
@@ -847,18 +949,21 @@ function mergeNodeInto(srcId, tgtId, edgeLabel) {
         id: newId,
         source: tgtId,
         target: otherEnd,
-        label: e.data('label') || '',
+        label: incomingLabel,
       },
     });
     e.remove();
   });
 
   // Add the new role edge (e.g. "fabric") between tgt and its parent (xtr by
-  // default — borders are always connected through the Edge).
+  // default — borders are always connected through the Edge). Skip if an edge
+  // already exists between tgt and the parent (CDP usually added one already).
   if (edgeLabel) {
     const parentId = 'xtr';
     const newEdgeId = 'merge-role-' + srcId + '-' + tgtId;
-    if (cy.getElementById(newEdgeId).empty() && !cy.getElementById(parentId).empty()) {
+    if (cy.getElementById(newEdgeId).empty()
+        && !cy.getElementById(parentId).empty()
+        && edgeBetween(tgtId, parentId).length === 0) {
       cy.add({
         group: 'edges',
         data: {
@@ -883,8 +988,6 @@ function handleEvent(msg) {
     case 'check_started': {
       const nodeId = msg.target_node_id || 'xtr';
       appendCheck(nodeId, { name: msg.name, status: 'running', message: '' });
-      const n = cy.getElementById(nodeId);
-      if (!n.empty()) n.data('status', escalate(n.data('status'), 'running'));
       break;
     }
     case 'check_finished': {
@@ -900,7 +1003,6 @@ function handleEvent(msg) {
       }
       appendCheck(nodeId, { name: msg.name, status: msg.status, message: msg.message || '' });
       const n = cy.getElementById(nodeId);
-      if (!n.empty()) n.data('status', escalate(n.data('status'), msg.status));
       if (msg.node_relabel) {
         // Treat node_relabel as the NEW base label (e.g. XTR redirected to a
         // different device). Tags belong to the previous device, so clear them.
@@ -927,3 +1029,67 @@ function handleEvent(msg) {
       break;
   }
 }
+
+// ---- Restore-on-load --------------------------------------------------------
+// If a previous session is still alive server-side, skip the login wizard and
+// reattach. The browser's EventSource sends Last-Event-ID automatically on
+// reconnect, so the server replays anything we missed.
+
+function reattachEventStream() {
+  if (!currentSession) return;
+  if (currentEventSource) { try { currentEventSource.close(); } catch (e) {} }
+  const url = '/run/events/' + currentSession + '?since=' + lastEventId;
+  const es = new EventSource(url);
+  currentEventSource = es;
+  es.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (ev.lastEventId) {
+      const n = parseInt(ev.lastEventId, 10);
+      if (!isNaN(n) && n > lastEventId) { lastEventId = n; saveSession({ lastEventId }); }
+    }
+    handleEvent(msg);
+    if (msg.type === 'run_complete') { es.close(); setRunInFlight(false); }
+  };
+  es.onerror = () => { /* let the browser auto-reconnect */ };
+  setRunInFlight(true);
+}
+
+async function restoreSession() {
+  const saved = readSession();
+  if (!saved.sid) return;
+
+  try {
+    const r = await fetch('/login/status/' + saved.sid);
+    if (!r.ok) { clearSession(); return; }
+    const d = await r.json();
+    if (d.status !== 'ready') { clearSession(); return; }
+  } catch (e) { return; }
+
+  currentSession = saved.sid;
+  loginForm.style.display = 'none';
+
+  // Probe service state — if it's already connected, jump straight to the
+  // scenario form and (best-effort) reconnect the SSE stream so any in-flight
+  // run keeps painting.
+  try {
+    const r = await fetch('/service/status/' + saved.sid);
+    const d = await r.json();
+    if (d && d.status === 'ready') {
+      const label = d.name || d.serial || saved.serviceName || '';
+      saveSession({ serviceName: label, serviceSerial: d.serial });
+      showScenarioForm(label);
+      // Reattach to the event stream so an in-flight run keeps painting and a
+      // completed-but-missed run still replays final state.
+      if (typeof saved.lastEventId === 'number') lastEventId = saved.lastEventId;
+      reattachEventStream();
+      return;
+    }
+  } catch (e) { /* fall through to service form */ }
+
+  // Logged in but no service yet — show the service form.
+  serviceUser.textContent = 'Restored session ' + saved.sid;
+  serviceForm.style.display = 'block';
+}
+
+restoreSession();

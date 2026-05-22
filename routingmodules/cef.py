@@ -91,6 +91,8 @@ def is_mpls_labeled(cef_dict):
     Returns True only if the output chain contains labels or the path is marked as 'must-be-lbld'.
     """
     # 1. Navigate to the prefix data safely
+    if not cef_dict:
+        return False
     vrf_dict = cef_dict.get('vrf', {})
     vrf_name = next(iter(vrf_dict.keys()), None)
     if not vrf_name:
@@ -139,6 +141,16 @@ class IPCef:
     def get_cef_internal(self,service):
         #Route_Inspection:
         #print("Processing CEF Internal Information for prefix: {}\n".format(self.ip))
+
+        # Guard against missing destination IP — without this, the command
+        # below becomes "show ip cef vrf X None internal" and the device
+        # returns garbage that breaks downstream parsing.
+        if self.ip in (None, "", "None"):
+            self.prefix = None
+            self.outgoinginterface = None
+            self.nexthopip = None
+            self.ismpls = False
+            return
 
         if self.vrf == "default":
             vrf_mode = ""
