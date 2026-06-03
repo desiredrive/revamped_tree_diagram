@@ -60,7 +60,7 @@ class DetectInfraVn(Check):
 
 
 class ProfileXtrHostname(Check):
-    """Phase 1 / Check 3 (partial) — Resolve XTR hostname from RADKIT inventory.
+    """Phase 1 / Check 3 (partial) — Resolve XTR hostname from RSA inventory.
 
     Mirrors the find_device() portion of dhcp_troubleshooting.py:1874-1876 →
     device_profiler.Device.find_device(). The full profile_device() (which
@@ -75,7 +75,7 @@ class ProfileXtrHostname(Check):
         service = ctx.service
         mgmtip = ctx.payload.get("mgmt_ip") or ctx.payload.get("device_source_ip")
         if service is None:
-            return CheckResult(CheckStatus.FAIL, "No RADKIT service in run context.")
+            return CheckResult(CheckStatus.FAIL, "No RSA service in run context.")
         if not mgmtip:
             return CheckResult(CheckStatus.FAIL, "No XTR management IP supplied.")
 
@@ -85,13 +85,13 @@ class ProfileXtrHostname(Check):
             if not names:
                 return CheckResult(
                     CheckStatus.FAIL,
-                    f"Device {mgmtip} is not in RADKIT inventory.",
+                    f"Device {mgmtip} is not in RSA inventory.",
                 )
             hostname = names[0]
         except Exception as e:
             return CheckResult(
                 CheckStatus.FAIL,
-                f"RADKIT inventory lookup failed: {type(e).__name__}: {e}",
+                f"RSA inventory lookup failed: {type(e).__name__}: {e}",
             )
 
         ctx.state["xtr_hostname"] = hostname

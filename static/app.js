@@ -1,10 +1,26 @@
-// SDA Fabric Troubleshooter — frontend.
+// SDA Pathfinder — frontend.
 // Wizard: login → service → scenario → live topology with streamed Checks.
 
 window.addEventListener('error', (e) => console.error('window error:', e.message, e.error));
 
+fetch('/version').then(r => r.ok ? r.json() : null).then(v => {
+  if (!v) return;
+  const el = document.getElementById('appVersion');
+  if (!el) return;
+  const sha = v.commit ? ' · ' + v.commit : '';
+  el.textContent = 'v' + (v.version || 'dev') + sha;
+}).catch(() => {});
+
 let currentSession = null;
 let cy = null;
+// Maps virtual node ids (e.g. an RPF-walk hop's `upath3`) to the actual
+// rendered node id when the spec was IP-deduped into an existing node.
+// Lets later `connect_to` / edge specs target the virtual id and still
+// resolve to the merged node.
+const nodeIdAliases = new Map();
+function resolveNodeId(id) {
+  return id && nodeIdAliases.has(id) ? nodeIdAliases.get(id) : id;
+}
 let selectedNodeId = null;
 let currentPayload = null;
 let currentEventSource = null;
@@ -184,6 +200,7 @@ const scenarioService = document.getElementById('scenarioService');
 const scenarioStatus = document.getElementById('scenarioStatus');
 const dhcpInputs = document.getElementById('dhcpInputs');
 const ewInputs = document.getElementById('ewInputs');
+const umcastInputs = document.getElementById('umcastInputs');
 const ewL2 = document.getElementById('ew_l2only');
 const ewL2Inputs = document.getElementById('ewL2Inputs');
 const macInput = document.getElementById('dhcp_mac');
@@ -197,9 +214,24 @@ function showScenarioForm(serviceLabel) {
 
 scenarioSelect.addEventListener('change', () => {
   const v = scenarioSelect.value;
-  dhcpInputs.style.display = (v === 'dhcp') ? 'block' : 'none';
-  ewInputs.style.display   = (v === 'east_west') ? 'block' : 'none';
+  dhcpInputs.style.display   = (v === 'dhcp') ? 'block' : 'none';
+  ewInputs.style.display     = (v === 'east_west') ? 'block' : 'none';
+  umcastInputs.style.display = (v === 'underlay_multicast') ? 'block' : 'none';
 });
+
+// Sync visibility on load — the browser may restore a non-default selection
+// (east_west) without firing 'change', leaving the DHCP fields visible.
+// Run once now (covers fast-paint), again after DOMContentLoaded (covers
+// browsers that restore form state asynchronously), and again on pageshow
+// (covers bfcache restores via Back/Forward navigation).
+function _syncScenarioInputs() {
+  scenarioSelect.dispatchEvent(new Event('change'));
+}
+_syncScenarioInputs();
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _syncScenarioInputs);
+}
+window.addEventListener('pageshow', _syncScenarioInputs);
 
 ewL2.addEventListener('change', () => {
   ewL2Inputs.style.display = ewL2.checked ? 'block' : 'none';
@@ -250,6 +282,18 @@ scenarioForm.addEventListener('submit', (e) => {
       vrf: document.getElementById('dhcp_vrf').value,
       is_few: document.getElementById('dhcp_is_few').checked,
     };
+  } else if (v === 'underlay_multicast') {
+    const iid = parseInt(document.getElementById('umcast_l2vni_iid').value, 10);
+    const vlan = parseInt(document.getElementById('umcast_vlan').value, 10);
+    payload = {
+      scenario: 'underlay_multicast',
+      umcast_source_ip: document.getElementById('umcast_source_ip').value,
+      umcast_l2vni_iid: Number.isFinite(iid) ? iid : null,
+      umcast_vlan: Number.isFinite(vlan) ? vlan : null,
+      umcast_dest_ip: document.getElementById('umcast_dest_ip').value,
+      umcast_vrf: document.getElementById('umcast_vrf').value,
+      umcast_group: document.getElementById('umcast_group').value,
+    };
   } else {
     payload = {
       scenario: 'east_west',
@@ -259,6 +303,7 @@ scenarioForm.addEventListener('submit', (e) => {
       l2_only: ewL2.checked,
       mask: ewL2.checked ? parseInt(document.getElementById('ew_mask').value, 10) : null,
       gateway: ewL2.checked ? document.getElementById('ew_gateway').value : null,
+      is_few: document.getElementById('ew_is_few').checked,
     };
   }
   scenarioStatus.style.display = 'none';
@@ -384,6 +429,86 @@ const UNDERLAY_SWITCH_ICON_URL =
 const UNDERLAY_UNKNOWN_ICON_URL =
   "data:image/svg+xml;utf8," + encodeURIComponent(underlaySwitchIconSvg('#94a3b8'));
 
+// Fabric cloud — generic underlay placeholder used when next-hops resolve to
+// physical interfaces but CDP doesn't return a specific neighbor. All such
+// unresolved next-hops collapse into a single shared "Fabric" node so the
+// topology stays readable.
+function fabricCloudIconSvg() {
+  return (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<path d='M25 65 Q12 65 12 52 Q12 42 23 40 Q23 27 38 27 Q42 18 54 18 " +
+    "Q67 18 71 30 Q86 30 86 44 Q86 56 75 58 Q75 68 63 68 L28 68 " +
+    "Q25 68 25 65 Z' fill='#cbd5e1' stroke='#475569' stroke-width='2.5' " +
+    "stroke-linejoin='round'/>" +
+    "</svg>"
+  );
+}
+const FABRIC_CLOUD_ICON_URL =
+  "data:image/svg+xml;utf8," + encodeURIComponent(fabricCloudIconSvg());
+
+// Wireless LAN Controller: Cisco-style blue square — three solid white
+// triangles pointing toward the centre on top, chain-link ribbon across the
+// bottom, and a status badge in the top-right corner.
+function wlcIconSvg(badgeFill) {
+  return (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    // Rounded blue body inset on top & right so the badge can peek out.
+    "<rect x='6' y='14' width='80' height='80' rx='10' ry='10' " +
+      "fill='#1d4ed8' stroke='#0c1e5e' stroke-width='3'/>" +
+    // Three solid white triangles in a row, all pointing toward the centre
+    // (i.e. up toward the top edge of the icon body).
+    "<polygon points='28,52 18,52 23,40' fill='#ffffff'/>" +
+    "<polygon points='51,52 41,52 46,40' fill='#ffffff'/>" +
+    "<polygon points='74,52 64,52 69,40' fill='#ffffff'/>" +
+    // Divider line above the ribbon.
+    "<line x1='10' y1='62' x2='82' y2='62' stroke='#ffffff' stroke-width='2'/>" +
+    // Chain-link ribbon: six interlocking ovals centred on y=74.
+    "<g fill='none' stroke='#ffffff' stroke-width='2.4'>" +
+      "<ellipse cx='18' cy='74' rx='6' ry='4'/>" +
+      "<ellipse cx='30' cy='74' rx='6' ry='4'/>" +
+      "<ellipse cx='42' cy='74' rx='6' ry='4'/>" +
+      "<ellipse cx='54' cy='74' rx='6' ry='4'/>" +
+      "<ellipse cx='66' cy='74' rx='6' ry='4'/>" +
+      "<ellipse cx='78' cy='74' rx='6' ry='4'/>" +
+    "</g>" +
+    // Status badge in the top-right corner.
+    "<circle cx='86' cy='14' r='10' fill='" + badgeFill + "' " +
+      "stroke='white' stroke-width='2.5'/>" +
+    "</svg>"
+  );
+}
+function wlcIconUrl(fill) {
+  return "data:image/svg+xml;utf8," + encodeURIComponent(wlcIconSvg(fill));
+}
+const WLC_ICON_URL = {
+  pending: wlcIconUrl('#cbd5e1'),
+  running: wlcIconUrl('#eab308'),
+  ok:      wlcIconUrl('#22c55e'),
+  warn:    wlcIconUrl('#f97316'),
+  fail:    wlcIconUrl('#ef4444'),
+  skip:    wlcIconUrl('#94a3b8'),
+};
+
+// Access Point: Cisco-style rounded blue square with a smaller rounded
+// rectangle window and a top LED dot.
+function apIconSvg() {
+  return (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    // Rounded blue body.
+    "<rect x='14' y='14' width='72' height='72' rx='14' ry='14' " +
+      "fill='#1d4ed8' stroke='#0c1e5e' stroke-width='3'/>" +
+    // Inner rounded white window (the AP's recessed face).
+    "<rect x='34' y='30' width='32' height='44' rx='8' ry='8' " +
+      "fill='none' stroke='#ffffff' stroke-width='3'/>" +
+    // Small LED indicator at the top of the window.
+    "<rect x='46' y='36' width='8' height='5' rx='1.5' ry='1.5' " +
+      "fill='none' stroke='#ffffff' stroke-width='2'/>" +
+    "</svg>"
+  );
+}
+const AP_ICON_URL =
+  "data:image/svg+xml;utf8," + encodeURIComponent(apIconSvg());
+
 const ROLE_ICON = {
   endpoint: ENDPOINT_ICON_URL,
   border: BORDER_ICON_URL,
@@ -391,6 +516,9 @@ const ROLE_ICON = {
   'dhcp-server': DHCP_SERVER_ICON_URL,
   'underlay-switch': UNDERLAY_SWITCH_ICON_URL,
   'underlay-unknown': UNDERLAY_UNKNOWN_ICON_URL,
+  fabric: FABRIC_CLOUD_ICON_URL,
+  wlc: WLC_ICON_URL.pending,
+  'access-point': AP_ICON_URL,
 };
 
 // ---- Topology --------------------------------------------------------------
@@ -407,9 +535,14 @@ function showTopology(payload) {
   } else {
     wiredToggle.style.display = 'none';
   }
-  document.getElementById('topologySub').textContent = payload.scenario === 'dhcp'
-    ? 'DHCP — XTR ' + payload.mgmt_ip + ' · MAC ' + payload.mac + ' · VLAN ' + payload.vlan
-    : 'East-West — ' + payload.device_source_ip + ' → ' + payload.destination_ip;
+  document.getElementById('topologySub').textContent =
+    payload.scenario === 'dhcp'
+      ? 'DHCP — XTR ' + payload.mgmt_ip + ' · MAC ' + payload.mac + ' · VLAN ' + payload.vlan
+      : payload.scenario === 'underlay_multicast'
+        ? 'Underlay Multicast — FHR ' + payload.umcast_source_ip
+          + (payload.umcast_dest_ip ? (' → LHR ' + payload.umcast_dest_ip) : '')
+          + ' · IID ' + payload.umcast_l2vni_iid + ' · VLAN ' + payload.umcast_vlan
+        : 'East-West — ' + payload.device_source_ip + ' → ' + payload.destination_ip;
 
   cy = cytoscape({
     container: document.getElementById('cy'),
@@ -478,6 +611,33 @@ function showTopology(payload) {
           'font-size': '11px',
           'opacity': 0.75,
       }},
+      { selector: 'node[role = "fabric"]', style: {
+          'background-image': FABRIC_CLOUD_ICON_URL,
+          'width': 110,
+          'height': 88,
+          'text-margin-y': -36,
+          'font-size': '12px',
+          'font-weight': 'bold',
+      }},
+      { selector: 'node[role = "wlc"]', style: {
+          'background-image': WLC_ICON_URL.pending,
+          'width': 88,
+          'height': 88,
+          'text-margin-y': -40,
+      }},
+      { selector: 'node[role = "wlc"][status = "pending"]', style: { 'background-image': WLC_ICON_URL.pending } },
+      { selector: 'node[role = "wlc"][status = "running"]', style: { 'background-image': WLC_ICON_URL.running } },
+      { selector: 'node[role = "wlc"][status = "ok"]',      style: { 'background-image': WLC_ICON_URL.ok } },
+      { selector: 'node[role = "wlc"][status = "warn"]',    style: { 'background-image': WLC_ICON_URL.warn } },
+      { selector: 'node[role = "wlc"][status = "fail"]',    style: { 'background-image': WLC_ICON_URL.fail } },
+      { selector: 'node[role = "wlc"][status = "skip"]',    style: { 'background-image': WLC_ICON_URL.skip } },
+      { selector: 'node[role = "access-point"]', style: {
+          'background-image': AP_ICON_URL,
+          'width': 88,
+          'height': 88,
+          'text-margin-y': -40,
+          'font-size': '11px',
+      }},
       { selector: 'edge', style: {
           'line-color': '#94a3b8',
           'width': 2,
@@ -490,13 +650,27 @@ function showTopology(payload) {
           'text-background-padding': '2px',
           'text-background-shape': 'round-rectangle',
           'text-rotation': 'autorotate',
+          'text-wrap': 'wrap',
       }},
+      { selector: 'edge[wireless = "true"]', style: {
+          'line-style': 'dashed',
+          'line-dash-pattern': [6, 4],
+          'line-color': '#2563eb',
+          'width': 2,
+      }},
+      { selector: 'edge[rfBand = "good"]',   style: { 'color': '#16a34a' } },
+      { selector: 'edge[rfBand = "normal"]', style: { 'color': '#0f172a' } },
+      { selector: 'edge[rfBand = "bad"]',    style: { 'color': '#dc2626' } },
     ],
     layout: { name: 'preset' },
     wheelSensitivity: 0.2,
   });
 
-  const xtrIp = payload.scenario === 'dhcp' ? payload.mgmt_ip : payload.device_source_ip;
+  const xtrIp = payload.scenario === 'dhcp'
+    ? payload.mgmt_ip
+    : payload.scenario === 'underlay_multicast'
+      ? payload.umcast_source_ip
+      : payload.device_source_ip;
   cy.add({
     group: 'nodes',
     data: { id: 'xtr', label: xtrIp, baseLabel: xtrIp, tags: [], role: 'xtr', status: 'pending', checks: [] },
@@ -508,6 +682,18 @@ function showTopology(payload) {
   cy.on('tap', (e) => { if (e.target === cy) hideChecksPanel(); });
   document.getElementById('checksPanelClose').addEventListener('click', hideChecksPanel);
   document.getElementById('topologyRefresh').addEventListener('click', refreshTopology);
+  const backBtn = document.getElementById('topologyBackMenu');
+  if (backBtn) {
+    backBtn.addEventListener('click', backToMenu);
+  }
+  const resetBtn = document.getElementById('topologyResetView');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (!cy) return;
+      cy.fit(undefined, 80);
+      cy.center();
+    });
+  }
   document.getElementById('topologyDownloadLog').addEventListener('click', () => {
     // Use a hidden <a download> click instead of navigating window.location
     // — navigation tears down the active EventSource and surfaces as
@@ -542,6 +728,148 @@ function showTopology(payload) {
     a.remove();
     URL.revokeObjectURL(url);
   });
+  document.getElementById('topologyDownloadChecks').addEventListener('click', () => {
+    if (!cy) return;
+    downloadChecksPdf();
+  });
+}
+
+function downloadChecksPdf() {
+  const jspdfNs = window.jspdf || {};
+  const JsPDF = jspdfNs.jsPDF || window.jsPDF;
+  if (!JsPDF) { alert('jsPDF not loaded'); return; }
+  const doc = new JsPDF({ unit: 'pt', format: 'letter' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const marginX = 40;
+  const marginTop = 50;
+  const marginBottom = 40;
+  let y = marginTop;
+
+  const sanitize = (s) => String(s == null ? '' : s)
+    .replace(/→/g, '->')
+    .replace(/←/g, '<-')
+    .replace(/↔/g, '<->')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/…/g, '...')
+    .replace(/[^\x00-\xFF]/g, '?');
+
+  const wrap = (text, width, fontSize) => {
+    doc.setFontSize(fontSize);
+    return doc.splitTextToSize(sanitize(text), width);
+  };
+  const ensureSpace = (need) => {
+    if (y + need > pageH - marginBottom) { doc.addPage(); y = marginTop; }
+  };
+  const writeLines = (lines, fontSize, lineGap) => {
+    doc.setFontSize(fontSize);
+    const lh = fontSize * 1.25 + (lineGap || 0);
+    for (const ln of lines) {
+      ensureSpace(lh);
+      doc.text(ln, marginX, y);
+      y += lh;
+    }
+  };
+
+  // Title
+  const scenario = (currentPayload && currentPayload.scenario) || 'run';
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.text('SDA Pathfinder — Checks Report', marginX, y); y += 22;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.text('Scenario: ' + scenario, marginX, y); y += 14;
+  doc.text('Generated: ' + new Date().toLocaleString(), marginX, y); y += 20;
+
+  // Order: xtr, dxtr, then RPs (urpN), then path hops, then everything else
+  const orderRank = (id) => {
+    if (id === 'xtr') return 0;
+    if (id === 'dxtr') return 1;
+    if (/^urp\d+$/.test(id)) return 2 + parseInt(id.slice(3), 10) * 0.001;
+    if (/^upath\d+$/.test(id)) return 100 + parseInt(id.slice(5), 10) * 0.001;
+    return 1000;
+  };
+  const nodes = cy.nodes().toArray().slice().sort((a, b) => {
+    const ra = orderRank(a.id()), rb = orderRank(b.id());
+    if (ra !== rb) return ra - rb;
+    return a.id().localeCompare(b.id());
+  });
+
+  const STATUS_TAG = { ok: '[OK]', warn: '[WARN]', fail: '[FAIL]', skip: '[SKIP]', running: '[RUN]', pending: '[…]' };
+
+  for (const n of nodes) {
+    const checks = n.data('checks') || [];
+    if (!checks.length) continue;
+    const label = n.data('label') || n.id();
+    const role = n.data('role') || '';
+    ensureSpace(40);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    const titleText = sanitize(label.replace(/\n/g, ' ') + (role ? '  (' + role + ')' : '') + '  —  ' + n.id());
+    const titleLines = doc.splitTextToSize(titleText, pageW - 2 * marginX);
+    const titleLh = 13 * 1.3;
+    for (const ln of titleLines) {
+      ensureSpace(titleLh);
+      doc.text(ln, marginX, y);
+      y += titleLh;
+    }
+    y += 4;
+    doc.setFont('helvetica', 'normal');
+
+    // Counters
+    const counts = { ok: 0, warn: 0, fail: 0, skip: 0, running: 0, pending: 0 };
+    checks.forEach(c => { counts[c.status] = (counts[c.status] || 0) + 1; });
+    doc.setFontSize(10);
+    const summary = ['ok', 'warn', 'fail', 'skip']
+      .filter(k => counts[k]).map(k => counts[k] + ' ' + k).join(' · ') || 'no terminal results';
+    doc.text(summary, marginX, y); y += 16;
+
+    for (const c of checks) {
+      ensureSpace(30);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      const tag = STATUS_TAG[c.status] || '[?]';
+      const STATUS_RGB = {
+        ok:      [22, 163, 74],
+        warn:    [202, 138, 4],
+        fail:    [220, 38, 38],
+        skip:    [100, 116, 139],
+        running: [37, 99, 235],
+        pending: [100, 116, 139],
+      };
+      const rgb = STATUS_RGB[c.status] || [0, 0, 0];
+      const tagWidth = doc.getTextWidth(tag + ' ');
+      const nameText = sanitize(c.name || '(unnamed)');
+      const nameLines = doc.splitTextToSize(nameText, pageW - 2 * marginX - tagWidth);
+      const headLh = 11 * 1.3;
+      ensureSpace(headLh);
+      doc.setTextColor(rgb[0], rgb[1], rgb[2]);
+      doc.text(tag, marginX, y);
+      doc.setTextColor(0, 0, 0);
+      doc.text(' ' + nameLines[0], marginX + doc.getTextWidth(tag), y);
+      y += headLh;
+      for (let i = 1; i < nameLines.length; i++) {
+        ensureSpace(headLh);
+        doc.text(nameLines[i], marginX + tagWidth, y);
+        y += headLh;
+      }
+      doc.setFont('helvetica', 'normal');
+      const body = c.message ? wrap(c.message, pageW - 2 * marginX - 10, 9) : ['(no detail)'];
+      doc.setFontSize(9);
+      const lh = 9 * 1.25;
+      for (const ln of body) {
+        ensureSpace(lh);
+        doc.text(ln, marginX + 10, y);
+        y += lh;
+      }
+      y += 4;
+    }
+    y += 10;
+  }
+
+  doc.save('checks-' + scenario + '-' + ts + '.pdf');
 }
 
 function refreshTopology() {
@@ -552,6 +880,7 @@ function refreshTopology() {
   }
   hideChecksPanel();
   cy.elements().remove();
+  nodeIdAliases.clear();
   const xtrIp = currentPayload.scenario === 'dhcp'
     ? currentPayload.mgmt_ip
     : currentPayload.device_source_ip;
@@ -562,6 +891,37 @@ function refreshTopology() {
   });
   cy.center('#xtr');
   startRun(currentPayload);
+}
+
+function backToMenu() {
+  console.log('[backToMenu] click received, currentSession=', currentSession);
+  if (currentSession) {
+    try {
+      fetch('/run/stop/' + currentSession, { method: 'POST', keepalive: true })
+        .then(r => console.log('[backToMenu] /run/stop status:', r.status))
+        .catch(err => console.warn('[backToMenu] /run/stop failed:', err));
+    } catch (e) { console.warn('[backToMenu] fetch threw:', e); }
+  }
+  if (currentEventSource) {
+    try { currentEventSource.close(); } catch (e) {}
+    currentEventSource = null;
+  }
+  if (cy) {
+    try { cy.elements().remove(); } catch (e) {}
+    nodeIdAliases.clear();
+  }
+  hideChecksPanel();
+  const panel = document.getElementById('topologyPanel');
+  if (panel) panel.style.display = 'none';
+  document.body.classList.remove('topology-active');
+  if (typeof scenarioForm !== 'undefined' && scenarioForm) {
+    scenarioForm.style.display = 'block';
+  } else {
+    const sf = document.getElementById('scenarioForm');
+    if (sf) sf.style.display = 'block';
+  }
+  const status = document.getElementById('status');
+  if (status) { status.className = ''; status.style.display = 'none'; status.textContent = ''; }
 }
 
 // ---- Checks panel ----------------------------------------------------------
@@ -616,7 +976,9 @@ function renderChecksPanel() {
         '<span class="row-chevron">▶</span>' +
       '</div>' +
       '<div class="row-detail">' + escapeHtml(it.message || '(no detail)') + '</div>';
-    row.addEventListener('click', () => row.classList.toggle('expanded'));
+    // Toggle only when the header is clicked — the detail body stays
+    // selectable so users can copy text without collapsing the row.
+    row.querySelector('.row-head').addEventListener('click', () => row.classList.toggle('expanded'));
     list.appendChild(row);
   });
 }
@@ -663,15 +1025,96 @@ function addEndpointNode(info) {
   if (parent.empty()) return;
 
   const macLine = 'MAC: ' + (info.mac || '?');
-  const vlanLine = 'VLAN: ' + (info.vlan != null ? info.vlan : '?');
+  const vlanLabel = info.wireless ? 'VNID' : 'VLAN';
+  const vlanLine = vlanLabel + ': ' + (info.vlan != null ? info.vlan : '?');
   const sgtLine = 'SGT: ' + (info.sgt != null && info.sgt !== '' ? info.sgt : '0');
-  const label = macLine + '\n' + vlanLine + '\n' + sgtLine;
+  const lines = [];
+  if (info.ip) lines.push('IP: ' + info.ip);
+  lines.push(macLine, vlanLine, sgtLine);
+  const label = lines.join('\n');
 
-  const existing = cy.getElementById('endpoint');
-  if (!existing.empty()) {
+  // Build the edge label. Wireless edges show SSID + RSSI/SNR; wired edges
+  // show the access port. info.edge_label wins if the backend provided one.
+  let edgeLabel = info.edge_label;
+  if (!edgeLabel) {
+    if (info.wireless) {
+      const parts = [];
+      if (info.port) parts.push('SSID ' + info.port);
+      if (info.rssi != null) parts.push('RSSI ' + info.rssi + ' dBm');
+      if (info.snr != null) parts.push('SNR ' + info.snr + ' dB');
+      edgeLabel = parts.join('\n');
+    } else {
+      edgeLabel = info.port || '';
+    }
+  }
+  const wirelessFlag = info.wireless ? 'true' : 'false';
+  const rfBand = info.rf_band || '';
+
+  // Find an existing endpoint to merge with: prefer MAC match on any
+  // role=endpoint node (covers east-west src-endpoint / dest-endpoint added
+  // via add_nodes), fall back to the canonical 'endpoint' id used by the
+  // wired DHCP path.
+  const normMac = (m) => (m || '').toLowerCase().replace(/[^0-9a-f]/g, '');
+  const macKey = normMac(info.mac);
+  let existing = null;
+  if (macKey) {
+    cy.nodes().forEach((n) => {
+      if (existing) return;
+      if (n.data('role') !== 'endpoint') return;
+      if (normMac(n.data('mac')) === macKey) existing = n;
+    });
+  }
+  if (!existing) {
+    const canon = cy.getElementById('endpoint');
+    if (!canon.empty()) existing = canon;
+  }
+  console.log('[addEndpointNode] mac=', info.mac, 'macKey=', macKey,
+              'merge_into=', existing ? existing.id() : '(none — new node)');
+  if (existing) {
+    const existingId = existing.id();
     existing.data({ label: label, baseLabel: label, mac: info.mac, vlan: info.vlan, sgt: info.sgt });
-    const edge = cy.getElementById('endpoint-edge');
-    if (!edge.empty() && info.port) edge.data('label', info.port);
+    // Edge id naming convention: 'endpoint-edge' for the canonical node,
+    // '<nodeId>-edge' or just rely on connectedEdges() for spawned ones.
+    let edge = cy.getElementById(existingId + '-edge');
+    if (edge.empty()) edge = cy.getElementById('endpoint-edge');
+    if (edge.empty()) {
+      // No tracked edge — look at any edge with this node as source.
+      const candidates = existing.connectedEdges().filter(e => e.data('source') === existingId);
+      if (!candidates.empty()) edge = candidates[0];
+    }
+    if (!edge.empty()) {
+      if (edge.data('target') !== parentId) {
+        const edgeId = edge.id();
+        cy.remove(edge);
+        cy.add({
+          group: 'edges',
+          data: {
+            id: edgeId,
+            source: existingId,
+            target: parentId,
+            label: edgeLabel,
+            wireless: wirelessFlag,
+            rfBand: rfBand,
+          },
+        });
+      } else {
+        edge.data('label', edgeLabel);
+        edge.data('wireless', wirelessFlag);
+        edge.data('rfBand', rfBand);
+      }
+    } else {
+      cy.add({
+        group: 'edges',
+        data: {
+          id: existingId + '-edge',
+          source: existingId,
+          target: parentId,
+          label: edgeLabel,
+          wireless: wirelessFlag,
+          rfBand: rfBand,
+        },
+      });
+    }
     return;
   }
 
@@ -697,7 +1140,9 @@ function addEndpointNode(info) {
       id: 'endpoint-edge',
       source: 'endpoint',
       target: parentId,
-      label: info.port || '',
+      label: edgeLabel,
+      wireless: wirelessFlag,
+      rfBand: rfBand,
     },
   });
 }
@@ -710,6 +1155,12 @@ const ROLE_OFFSET = {
   'dhcp-server':   { dx:  420, dy:    0 },
   'underlay-switch':  { dx: -260, dy:  -60 },
   'underlay-unknown': { dx: -260, dy:  -60 },
+  fabric:          { dx: -340, dy:  140 },
+  wlc:             { dx:    0, dy: -260 },
+  'access-point':  { dx: -180, dy: -160 },
+  // Spawned by WirelessFabricEdgeEtr when the wireless endpoint roamed off
+  // the user-supplied XTR — placed to the right of the original.
+  xtr:             { dx:  280, dy:    0 },
 };
 
 // Human-readable role tag added to a merged node when multiple checks land on
@@ -720,6 +1171,8 @@ const ROLE_TAG = {
   'underlay-switch': 'Next-Hop',
   'underlay-unknown': 'Next-Hop',
   'dhcp-server': 'DHCP',
+  wlc: 'WLC',
+  'access-point': 'AP',
 };
 
 function addNodes(nodes) {
@@ -736,11 +1189,28 @@ function addNodes(nodes) {
   nodes.forEach(spec => {
     if (!spec || !spec.id) return;
 
-    // Exact-id hit: just refresh the label, nothing else to do.
+    // Exact-id hit: refresh the label, and if connect_to is now provided
+    // (e.g. AP was added floating, then wired to XTR after FE discovery),
+    // create the parent edge now.
     const existing = cy.getElementById(spec.id);
     if (!existing.empty()) {
       if (spec.label) existing.data({ label: spec.label, baseLabel: spec.label });
       if (spec.ip && !existing.data('ip')) existing.data('ip', spec.ip);
+      if (spec.connect_to && !cy.getElementById(spec.connect_to).empty()) {
+        const edgeId = spec.id + '-edge';
+        if (cy.getElementById(edgeId).empty()) {
+          cy.add({
+            group: 'edges',
+            data: {
+              id: edgeId,
+              source: spec.id,
+              target: spec.connect_to,
+              label: spec.edge_label || '',
+              wireless: spec.edge_wireless ? 'true' : 'false',
+            },
+          });
+        }
+      }
       return;
     }
 
@@ -749,6 +1219,9 @@ function addNodes(nodes) {
     // new role, rather than drawing a duplicate node.
     if (spec.ip && ipIndex.has(spec.ip)) {
       const targetId = ipIndex.get(spec.ip);
+      // Register the alias so subsequent specs that reference spec.id (e.g.
+      // the next path-walk hop's connect_to) resolve to the merged node.
+      nodeIdAliases.set(spec.id, targetId);
       const target = cy.getElementById(targetId);
       const tag = ROLE_TAG[spec.role];
       if (tag) {
@@ -759,7 +1232,7 @@ function addNodes(nodes) {
           applyNodeLabel(targetId);
         }
       }
-      const parentId = spec.connect_to || 'xtr';
+      const parentId = resolveNodeId(spec.connect_to) || 'xtr';
       // Stable, collision-free edge id; merge-edge suffix so we can recognize
       // these later if we ever want to clean them up on Run Again.
       const edgeId = 'merge-' + spec.id + '-to-' + targetId;
@@ -777,8 +1250,10 @@ function addNodes(nodes) {
       return;
     }
 
-    const parentId = spec.connect_to || 'xtr';
+    const floating = spec.floating === true || !spec.connect_to;
+    const parentId = resolveNodeId(spec.connect_to) || 'xtr';
     const parent = cy.getElementById(parentId);
+    // Need *some* reference point for positioning; bail if XTR isn't there yet.
     if (parent.empty()) return;
     const role = spec.role || 'unknown';
     const offset = ROLE_OFFSET[role] || { dx: 200, dy: 0 };
@@ -798,21 +1273,55 @@ function addNodes(nodes) {
         label: spec.label || spec.id,
         baseLabel: spec.label || spec.id,
         ip: spec.ip || null,
+        mac: spec.mac || null,
+        vlan: spec.vlan != null ? spec.vlan : null,
         tags: [],
         checks: [],
       },
       position: { x: x, y: y },
     });
+    if (!floating) {
+      cy.add({
+        group: 'edges',
+        data: {
+          id: spec.id + '-edge',
+          source: spec.id,
+          target: parentId,
+          label: spec.edge_label || '',
+          wireless: spec.edge_wireless ? 'true' : 'false',
+        },
+      });
+    }
+    if (spec.ip) ipIndex.set(spec.ip, spec.id);
+  });
+}
+
+// Draw standalone edges between two existing nodes. Used for peer relationships
+// like border-to-border CDP links where neither endpoint is being created by
+// this message.
+function addEdges(edges) {
+  if (!cy || !Array.isArray(edges)) return;
+  edges.forEach(spec => {
+    if (!spec || !spec.source || !spec.target) return;
+    const sourceId = resolveNodeId(spec.source);
+    const targetId = resolveNodeId(spec.target);
+    const src = cy.getElementById(sourceId);
+    const dst = cy.getElementById(targetId);
+    if (src.empty() || dst.empty()) return;
+    // Stable id, order-independent so we don't double-draw the reciprocal CDP
+    // entry (border-1 sees border-2 AND border-2 sees border-1).
+    const ids = [sourceId, targetId].sort();
+    const edgeId = (spec.id_prefix || 'link') + '-' + ids[0] + '-' + ids[1];
+    if (!cy.getElementById(edgeId).empty()) return;
     cy.add({
       group: 'edges',
       data: {
-        id: spec.id + '-edge',
-        source: spec.id,
-        target: parentId,
-        label: spec.edge_label || '',
+        id: edgeId,
+        source: sourceId,
+        target: targetId,
+        label: spec.label || '',
       },
     });
-    if (spec.ip) ipIndex.set(spec.ip, spec.id);
   });
 }
 
@@ -909,6 +1418,13 @@ function mergeNodeInto(srcId, tgtId, edgeLabel) {
   const tags = (tgt.data('tags') || []).slice();
   (src.data('tags') || []).forEach(t => { if (!tags.includes(t)) tags.push(t); });
   tgt.data('tags', tags);
+
+  // Role promotion: a Border folded into a CDP-discovered underlay node should
+  // adopt the Border identity (and the same fabric-device icon as the Edge),
+  // not stay rendered as a generic underlay chassis.
+  if (src.data('role') === 'border' && tgt.data('role') !== 'border') {
+    tgt.data('role', 'border');
+  }
 
   // Checks: append src's checks to tgt (status badges then reflect the union).
   const checks = (tgt.data('checks') || []).slice();
@@ -1017,11 +1533,25 @@ function handleEvent(msg) {
         updateNode(nodeId, { rloc: msg.node_rloc });
         applyNodeLabel(nodeId);
       }
-      if (msg.add_endpoint) {
-        addEndpointNode(msg.add_endpoint);
+      if (Array.isArray(msg.relabel_nodes)) {
+        msg.relabel_nodes.forEach(spec => {
+          if (!spec || !spec.id) return;
+          const target = cy.getElementById(spec.id);
+          if (target.empty()) return;
+          if (spec.label != null) {
+            updateNode(spec.id, { baseLabel: spec.label });
+            applyNodeLabel(spec.id);
+          }
+        });
       }
       if (Array.isArray(msg.add_nodes)) {
         addNodes(msg.add_nodes);
+      }
+      if (Array.isArray(msg.add_edges)) {
+        addEdges(msg.add_edges);
+      }
+      if (msg.add_endpoint) {
+        addEndpointNode(msg.add_endpoint);
       }
       break;
     }

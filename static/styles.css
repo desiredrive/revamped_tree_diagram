@@ -175,24 +175,61 @@ button:hover { background: #1d4ed8; }
 #topologyTitle { font-size: 0.95rem; color: #e2e8f0; font-weight: 600; }
 #topologySub   { font-size: 0.8rem; color: #94a3b8; flex: 1; margin-left: 1rem; }
 #topologyRefresh {
-  margin: 0;
-  width: auto;
-  padding: 0.4rem 0.9rem;
-  font-size: 0.8rem;
-  background: #334155;
+  background: #334155 !important;
+  color: #e2e8f0 !important;
 }
-#topologyRefresh:hover { background: #475569; }
-#topologyRefresh:disabled { background: #1e293b; color: #64748b; cursor: not-allowed; }
+#topologyRefresh:hover { background: #475569 !important; }
+#topologyRefresh:disabled { background: #1e293b !important; color: #64748b !important; cursor: not-allowed; }
 #topologyDownloadLog,
-#topologyDownloadTopology {
-  margin: 0 0.5rem 0 0;
-  width: auto;
-  padding: 0.4rem 0.9rem;
-  font-size: 0.8rem;
-  background: #334155;
+#topologyDownloadTopology,
+#topologyDownloadChecks,
+#topologyResetView,
+#topologyRefresh,
+#topologyBackMenu {
+  margin: 0 0.5rem 0 0 !important;
+  width: 7rem !important;
+  height: 3.1rem !important;
+  padding: 0 0.5rem !important;
+  font-size: 0.8rem !important;
+  line-height: 1.1 !important;
+  white-space: normal !important;
+  font-weight: 500 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-align: center !important;
+}
+#topologyDownloadLog,
+#topologyDownloadTopology,
+#topologyDownloadChecks,
+#topologyResetView {
+  background: #334155 !important;
+  color: #e2e8f0 !important;
 }
 #topologyDownloadLog:hover,
-#topologyDownloadTopology:hover { background: #475569; }
+#topologyDownloadTopology:hover,
+#topologyDownloadChecks:hover,
+#topologyResetView:hover { background: #475569 !important; }
+
+#topologyBackMenu {
+  background: #b91c1c !important;
+  color: #fee2e2 !important;
+}
+#topologyBackMenu:hover { background: #dc2626 !important; }
+
+.app-version {
+  position: fixed;
+  top: 0.5rem;
+  right: 0.75rem;
+  z-index: 9999;
+  font-size: 0.7rem;
+  color: #94a3b8;
+  background: rgba(15, 23, 42, 0.7);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  pointer-events: none;
+}
 
 /* Slider toggle */
 .slider-toggle {

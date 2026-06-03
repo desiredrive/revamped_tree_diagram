@@ -123,7 +123,7 @@ def get_any_single_output(hostname,command: str,service):
     except ValueError:
         sys.exit("Error when getting the following command: {}".format(command))
     except KeyError as e:
-        sys.exit("Error: {} in RADKIT Inventory, Device: {} ".format(e, hostname))
+        sys.exit("Error: {} in RSA Inventory, Device: {} ".format(e, hostname))
     return output
 
 def get_single_output_genie(hostname, command: str, service):
@@ -143,7 +143,7 @@ def get_single_output_genie(hostname, command: str, service):
     except ValueError:
         sys.exit("Error when getting the following command: {}".format(command))
     except KeyError as e:
-        sys.exit("Error: {} in RADKIT Inventory, Device: {} ".format(e, hostname))
+        sys.exit("Error: {} in RSA Inventory, Device: {} ".format(e, hostname))
     return output
 
 # 1. Define the lock at the top of radkit_cli.py
@@ -207,7 +207,7 @@ def get_catc_name(service):
             return (hostname)
         #If the Device does not exist  
         except (IndexError, ValueError):
-            sys.exit("Catalyst Center {} not in RADKIT inventory!!") 
+            sys.exit("Catalyst Center {} not in RSA inventory!!") 
 
 def get_hostname_from_mgmtip(mgmtip,service):
         try:
@@ -219,4 +219,4 @@ def get_hostname_from_mgmtip(mgmtip,service):
 
         #Does not exist  
         except (IndexError, ValueError):
-            sys.exit("Device {} not in RADKIT inventory".format(mgmtip))  
+            sys.exit("Device {} not in RSA inventory".format(mgmtip))  

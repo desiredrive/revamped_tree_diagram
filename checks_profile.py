@@ -12,13 +12,167 @@ from checks_shared import _legacy_fail
 from radkit_cli import get_catc_api, get_any_single_output, get_single_output_genie
 
 
+def _format_authen_session(auth_details, hostname: str, port: str) -> str:
+    """Render the rich per-session detail captured by authen_session_for_interface."""
+    lines = [f"Authentication session validated on {hostname} {port}."]
+
+    acro = getattr(auth_details, "acrosessions", None)
+    if acro:
+        lines.append("")
+        lines.append("AcroSession (Access Tunnel — wireless AP-side):")
+        for s in acro:
+            vlan = s.get("vlan")
+            mac = s.get("mac_address")
+            sid = s.get("session_id")
+            authd = "YES" if s.get("authorized") else "NO"
+            lines.append(f"  • VLAN {vlan}  MAC {mac}  Authorized: {authd}  Session-ID: {sid}")
+        return "\n".join(lines)
+
+    intf_data = getattr(auth_details, "authsessionintf", None) or {}
+    interfaces = intf_data.get("interfaces") or {}
+    if interfaces:
+        lines.append("")
+        for intf, blob in interfaces.items():
+            for mac, e in (blob.get("mac_address") or {}).items():
+                lines.append(f"Session: {mac} on {intf}")
+                status = e.get("status")
+                authorized = "YES" if (status or "").lower().startswith("auth") else (
+                    "NO" if status else "?"
+                )
+                lines.append(f"  • Authorized:    {authorized}  ({status or 'unknown'})")
+                user = e.get("user_name")
+                lines.append(f"  • Username:      {user if user and user != 'Unknown' else '(none)'}")
+                lines.append(f"  • Domain:        {e.get('domain') or '(none)'}")
+                iifid = (
+                    e.get("iif_id")
+                    or e.get("iifid")
+                    or e.get("iif-id")
+                    or e.get("client_iif_id")
+                )
+                if iifid:
+                    lines.append(f"  • Client IIF-ID: {iifid}")
+                methods = e.get("method_status") or {}
+                if methods:
+                    parts = [f"{m}={ms.get('state')}" for m, ms in methods.items()]
+                    lines.append(f"  • Method:        {', '.join(parts)}")
+                else:
+                    lines.append("  • Method:        (none)")
+                # Session / re-auth timeouts surface as either timeout fields or
+                # under session_timeout. Genie key spelling varies by IOS-XE
+                # release; check several before falling through.
+                stimeout = (
+                    e.get("session_timeout")
+                    or e.get("timeout")
+                    or e.get("server_timeout")
+                )
+                if isinstance(stimeout, dict):
+                    parts = []
+                    for k in ("type", "timeout", "remaining"):
+                        if stimeout.get(k):
+                            parts.append(f"{k}={stimeout[k]}")
+                    stimeout = ", ".join(parts) if parts else None
+                lines.append(f"  • Session Timeout: {stimeout or '(not set)'}")
+                server_policies = e.get("server_policies") or {}
+                if server_policies:
+                    lines.append("  • Server Policies:")
+                    for _, sp in server_policies.items():
+                        nm = sp.get("name") or "?"
+                        pol = sp.get("policies") or sp.get("value") or ""
+                        lines.append(f"      - {nm}: {pol}")
+                else:
+                    lines.append("  • Server Policies: (none)")
+                ipv4 = e.get("ipv4_address")
+                if ipv4 and ipv4 != "Unknown":
+                    lines.append(f"  • IPv4:          {ipv4}")
+                dt = e.get("device_type")
+                if dt and dt != "Unknown":
+                    lines.append(f"  • Device-Type:   {dt}")
+                dn = e.get("device_name")
+                if dn and dn != "Unknown":
+                    lines.append(f"  • Device-Name:   {dn}")
+                hm = e.get("oper_host_mode")
+                if hm and hm != "Unknown":
+                    lines.append(f"  • Host Mode:     {hm}")
+                cd = e.get("oper_control_dir")
+                if cd and cd != "Unknown":
+                    lines.append(f"  • Control Dir:   {cd}")
+                cp = e.get("current_policy")
+                if cp and cp != "Unknown":
+                    lines.append(f"  • Policy:        {cp}")
+                local = e.get("local_policies") or {}
+                vlan_grp = local.get("vlan_group", {}).get("vlan") if isinstance(local.get("vlan_group"), dict) else None
+                if vlan_grp:
+                    lines.append(f"  • Local VLAN:    {vlan_grp}")
+                csid = e.get("common_session_id")
+                if csid and csid != "Unknown":
+                    lines.append(f"  • Common SID:    {csid}")
+
+    dot1x = getattr(auth_details, "dot1xinterfaceparameter", None) or {}
+    params = dot1x.get("parameters") or {}
+    if params:
+        lines.append("")
+        lines.append("Dot1x interface parameters:")
+        for k in ("PAE", "HostMode", "ControlDirection", "QuietPeriod", "ServerTimeout",
+                  "SuppTimeout", "ReAuthMax", "MaxReq", "TxPeriod"):
+            if k in params:
+                lines.append(f"  • {k}: {params[k]}")
+        for k, v in params.items():
+            if k not in {"PAE", "HostMode", "ControlDirection", "QuietPeriod", "ServerTimeout",
+                         "SuppTimeout", "ReAuthMax", "MaxReq", "TxPeriod"}:
+                lines.append(f"  • {k}: {v}")
+
+    if len(lines) == 1:
+        # No parsed sessions / dot1x. Distinguish wireless tunnels (Ac0…) —
+        # where per-client auth lives on the WLC, not the edge — from a real
+        # "no session on this port" outcome on a wired access port.
+        is_wireless_tunnel = (port or "").lower().startswith(("ac", "accesstunnel"))
+        if is_wireless_tunnel:
+            lines.append("")
+            lines.append("Fabric-Enabled Wireless tunnel — no per-client session on the")
+            lines.append("edge tunnel interface is expected. Per-client authentication is")
+            lines.append("anchored on the WLC; refer to the WLC client validation results.")
+            return "\n".join(lines)
+
+        # Wired access port with no parsed session: surface only the meaningful
+        # populated fields, formatted cleanly. Skip noisy structural fields
+        # like templateinterface and raw genie blobs.
+        SKIP_ATTRS = {
+            "hostname", "templateinterface", "authsessionintf",
+            "dot1xinterfaceparameter", "acrosessions",
+        }
+        raw_attrs = [
+            a for a in dir(auth_details)
+            if not a.startswith("_")
+            and not callable(getattr(auth_details, a, None))
+            and a not in SKIP_ATTRS
+        ]
+        populated = []
+        for a in raw_attrs:
+            v = getattr(auth_details, a, None)
+            if v in (None, "", {}, []):
+                continue
+            populated.append((a, v))
+
+        lines.append("")
+        lines.append(f"No active authentication session on {port}.")
+        if populated:
+            lines.append("")
+            lines.append("Additional attributes reported:")
+            for a, v in populated:
+                snippet = repr(v) if not isinstance(v, str) else v
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "…"
+                lines.append(f"  • {a}: {snippet}")
+    return "\n".join(lines)
+
+
 class ResolveCatcName(Check):
     """Phase 1 / Check 5 — Resolve the Catalyst Center hostname.
 
     Mirrors the radkit_cli.get_catc_name() call that dhcp_troubleshooting
     performs before any Catalyst Center API request. The form lets the user
-    override the auto-detected name (needed when RADKIT Standalone Server is
-    in use); if they leave it blank, we fall back to scanning the RADKIT
+    override the auto-detected name (needed when RSA Standalone Server is
+    in use); if they leave it blank, we fall back to scanning the RSA
     inventory for a device with device_type CENTER (or DNAC for older builds).
     """
 
@@ -28,7 +182,7 @@ class ResolveCatcName(Check):
     def run(self, ctx: RunContext) -> CheckResult:
         service = ctx.service
         if service is None:
-            return CheckResult(CheckStatus.FAIL, "No RADKIT service in run context.")
+            return CheckResult(CheckStatus.FAIL, "No RSA service in run context.")
 
         form_value = (ctx.payload.get("catc_name") or "").strip()
         if form_value:
@@ -37,12 +191,12 @@ class ResolveCatcName(Check):
                 if not list(inv.keys()):
                     return CheckResult(
                         CheckStatus.FAIL,
-                        f"Catalyst Center '{form_value}' is not in RADKIT inventory.",
+                        f"Catalyst Center '{form_value}' is not in RSA inventory.",
                     )
             except Exception as e:
                 return CheckResult(
                     CheckStatus.FAIL,
-                    f"RADKIT inventory lookup failed: {type(e).__name__}: {e}",
+                    f"RSA inventory lookup failed: {type(e).__name__}: {e}",
                 )
             ctx.state["catc_name"] = form_value
             return CheckResult(
@@ -60,14 +214,14 @@ class ResolveCatcName(Check):
         except Exception as e:
             return CheckResult(
                 CheckStatus.FAIL,
-                f"RADKIT inventory lookup failed: {type(e).__name__}: {e}",
+                f"RSA inventory lookup failed: {type(e).__name__}: {e}",
             )
 
         if not names:
             return CheckResult(
                 CheckStatus.FAIL,
-                "No Catalyst Center (device_type CENTER/DNAC) found in RADKIT inventory. "
-                "Supply the Catalyst Center name in the form if RADKIT Standalone is in use.",
+                "No Catalyst Center (device_type CENTER/DNAC) found in RSA inventory. "
+                "Supply the Catalyst Center name in the form if RSA Standalone is in use.",
             )
 
         catc_name = names[0]
@@ -95,7 +249,7 @@ class ProfileXtrNetworkDevice(Check):
     def run(self, ctx: RunContext) -> CheckResult:
         service = ctx.service
         if service is None:
-            return CheckResult(CheckStatus.SKIP, "RADKIT service missing in run context.")
+            return CheckResult(CheckStatus.SKIP, "RSA service missing in run context.")
         dnac = ctx.state.get("catc_name")
         mgmtip = ctx.state.get("xtr_mgmtip")
         if not dnac:
@@ -621,8 +775,7 @@ class MacLearning(Check):
         if isinstance(port, str) and port.startswith("Ac"):
             fewendpoint = True
             msg = (
-                f"MAC {mac} on VLAN {vlan} learned on {port} (AccessTunnel) of {hostname}. "
-                f"Fabric-Enabled Wireless interface — FEW-specific features will be bypassed."
+                f"MAC {mac} on VLAN {vlan} learned on {port} (AccessTunnel) of {hostname}."
             )
         else:
             msg = (
@@ -774,12 +927,11 @@ class AuthenticationSessionCheck(Check):
 
         ctx.state["authensessiondetails"] = auth_details
 
+        body = _format_authen_session(auth_details, hostname, port)
+
         return CheckResult(
             CheckStatus.OK,
-            (
-                f"Authentication session validated on {hostname} {port}.\n"
-                f"See collection_logfile.txt for the per-sub-validation breakdown."
-            ),
+            body,
             data={"is_ap": is_ap},
         )
 
@@ -807,6 +959,18 @@ class LocalSgt(Check):
         mac = ctx.payload.get("mac")
         vlan = ctx.payload.get("vlan")
 
+        # EW / underlay-multicast chains don't run CpLoopback/RlocDefinition,
+        # so xtr_loopback may not be set. Resolve it lazily from CatC if we
+        # have the uuid + service. Cache for any later check that needs it.
+        if not loopback and service and ctx.state.get("xtr_uuid") and ctx.state.get("catc_name"):
+            from checks_lisp import _query_loopback0
+            ip, mask, err = _query_loopback0(ctx)
+            if ip:
+                loopback = ip
+                ctx.state["xtr_loopback"] = ip
+                if mask:
+                    ctx.state["xtr_loopback_mask"] = mask
+
         if not (service and hostname and loopback):
             return CheckResult(
                 CheckStatus.SKIP,
@@ -826,8 +990,18 @@ class LocalSgt(Check):
 
         data = {"localsgt": lsgt}
         # Emit the endpoint visualization once MAC/VLAN/SGT are all known.
-        if mac and vlan:
+        # In FEW (wireless) runs, the wireless phase already drew the endpoint
+        # parented to the AP with the wireless edge style — don't redraw it
+        # parented to XTR here.
+        if mac and vlan and not ctx.payload.get("is_few"):
+            ep = ctx.state.get("ew_sourceep")
+            endpoint_ip = (
+                getattr(ep, "sourceip", None)
+                or ctx.payload.get("endpoint_ip")
+                or ctx.payload.get("client_ip")
+            )
             data["add_endpoint"] = {
+                "ip": endpoint_ip,
                 "mac": mac,
                 "vlan": vlan,
                 "sgt": lsgt,

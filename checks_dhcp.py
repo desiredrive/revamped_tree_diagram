@@ -91,6 +91,21 @@ class PoolIdentification(Check):
                 f"No pool details returned for VN '{vn_name}', pool '{vlan_name}'.",
             )
 
+        # DNAC signals an invalid VN / pool with a dict that looks like:
+        #   {"status": "failed", "description": "This Virtual Network does not exist..."}
+        # Treat that as a hard FAIL so a typo in the VRF field stops the chain
+        # right here instead of cascading into nonsense downstream checks.
+        if isinstance(pool_data, dict) and str(pool_data.get("status", "")).lower() == "failed":
+            desc = pool_data.get("description") or "Unknown reason."
+            hint = ""
+            if vn_name and vn_name.lower() != "default" and "default".startswith(vn_name.lower()[:3]):
+                hint = f" Did you mean 'default'?"
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Catalyst Center rejected the VN/pool lookup for VN '{vn_name}', pool "
+                f"'{vlan_name}': {desc}{hint}",
+            )
+
         ctx.state["pool_info"] = pool_data
         ctx.state["pool_vlan_name"] = vlan_name
 
@@ -414,6 +429,78 @@ class SviValidation(_DhcpGroup):
 
         return results
 
+
+
+class SviInterfaceCounters(Check):
+    """DHCP — inspect input-queue drops and error counters on the Edge SVI.
+
+    The SVI is the anycast gateway interface that receives the client's DHCP
+    Discover before relay. Non-zero input-queue drops or interface errors
+    indicate punt-path congestion or a bad cable/optics that will silently
+    swallow DHCP packets even when relay/snooping configuration is perfect.
+    """
+
+    name = "SVI Interface Counters"
+    target_node_id = "xtr"
+
+    def run(self, ctx: RunContext) -> CheckResult:
+        service = ctx.service
+        hostname = ctx.state.get("xtr_hostname")
+        info = ctx.state.get("dhcpparameters_info")
+        svi = getattr(info, "svi", None) if info else None
+        if not (service and hostname and svi):
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — requires service / xtr_hostname / SVI name.",
+            )
+        try:
+            from switchingmodules.interfaces import Interfaces
+            intf = Interfaces(svi, hostname)
+            intf.show_interface(service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Failed to collect counters for {svi} on {hostname}: {type(e).__name__}: {e}",
+            )
+
+        iqdrops = int(getattr(intf, "iiqdrops", 0) or 0)
+        outputdrops = int(getattr(intf, "outputdrops", 0) or 0)
+        crc = int(getattr(intf, "crcerrors", 0) or 0)
+        giants = int(getattr(intf, "giants", 0) or 0)
+        runts = int(getattr(intf, "runts", 0) or 0)
+
+        body = (
+            f"• Interface: {svi} on {hostname}\n"
+            f"    – Input Queue Drops: {iqdrops}\n"
+            f"    – Output Drops: {outputdrops}\n"
+            f"    – CRC Errors: {crc}\n"
+            f"    – Giants: {giants}\n"
+            f"    – Runts: {runts}"
+        )
+
+        problems = []
+        if iqdrops > 0:
+            problems.append(f"input queue drops={iqdrops}")
+        if outputdrops > 0:
+            problems.append(f"output drops={outputdrops}")
+        if crc > 0:
+            problems.append(f"CRC errors={crc}")
+        if giants > 0:
+            problems.append(f"giants={giants}")
+        if runts > 0:
+            problems.append(f"runts={runts}")
+
+        if problems:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"Non-zero counters on {svi}: {', '.join(problems)}. "
+                f"Input-queue drops on the anycast gateway SVI commonly cause "
+                f"silent DHCP Discover loss before relay.\n\n{body}",
+            )
+        return CheckResult(
+            CheckStatus.OK,
+            f"All input queue, output drop and error counters on {svi} are zero.\n\n{body}",
+        )
 
 
 class DhcpSnoopingClientStats(Check):

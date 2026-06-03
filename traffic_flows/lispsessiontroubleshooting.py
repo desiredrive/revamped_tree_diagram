@@ -178,7 +178,7 @@ class EIDIdentification:
                     error = "LISP - Parser Exception"
                     message = (
                         f"Finding: Unable to retrieve LISP database statistics for IID {iid} due to a parser exception. "
-                        f"Remediation: Verify device connectivity via RADKit and ensure the CLI output format matches the expected Genie parser version."
+                        f"Remediation: Verify device connectivity via RSA and ensure the CLI output format matches the expected Genie parser version."
                     )
                     exit_program(step, process, subprocess, device, error, message)
                 else:
@@ -1200,6 +1200,29 @@ def authentication_key_validation(step,cp_configuration,cp_hostname,etr_mapserve
         for map_server in map_server_configuration:
             if map_server['map_server_ip'] == cp_loopback:
                 etr_key = map_server['authentication_key'][1]
+                etr_decrypted = map_server.get('decrypted', True)
+                etr_key_type = map_server.get('key_type')
+                # Types 6/8/9 are AES-encrypted with a device-local primary
+                # key and cannot be decrypted off-box, so we cannot compare
+                # them. Skip the comparison rather than emit a false mismatch.
+                # NOTE: a wrong key does NOT bring the LISP session down — it
+                # causes per-registration authentication failures on the
+                # Map-Server (visible as "Authentication failures" in
+                # `show lisp instance-id <iid> ethernet statistics`). Session
+                # uptime is therefore not proof of matching keys; only the
+                # MS-side auth-failure counters are.
+                if not etr_decrypted:
+                    message = (
+                        "ETR-side map-server key on {} (type {}) cannot be "
+                        "decrypted off-box; skipping authentication-key "
+                        "comparison against Control Plane {}. If EID "
+                        "registration is failing, check Map-Register "
+                        "authentication-failure counters on the Map-Server "
+                        "to confirm whether the keys actually match.".format(
+                            hostname, etr_key_type, cp_hostname)
+                    )
+                    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+                    continue
                 if etr_key == cp_authenkey:
                     message = "Authentication keys are matching between Control Plane {} and {} ".format(cp_hostname,hostname)
                     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
@@ -1897,7 +1920,7 @@ def fabricEnabledWirelessSession(wlcinfo,fabric_id: None, step, catc_name, endpo
                 session_type = specific_lisp_session.session_type
                 session_state_time = specific_lisp_session.session_state_time
 
-                if session_state.lower() == "up":
+                if (session_state or "").lower() == "up":
                     msg1 = "Fabric Edge Wireless - LISP Session Up"
                     message = (
                         f"LISP session is up to peer {peer_addr}:{peer_port} "
@@ -1905,7 +1928,7 @@ def fabricEnabledWirelessSession(wlcinfo,fabric_id: None, step, catc_name, endpo
                         f"(type={session_type}, up_time={session_state_time})."
                     )
                     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
-            except KeyError:
+            except (KeyError, AttributeError):
                 error = "Fabric Edge Wireless - LISP Session Down"
                 message = (
                     f"LISP session is not up (state={session_state}, peer={peer_addr}:{peer_port}, "

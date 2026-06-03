@@ -2,15 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>SDA Fabric Troubleshooter</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <title>SDA Pathfinder</title>
+  <link rel="stylesheet" href="/static/styles.css?v=2">
   <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <!-- Step 1: RADKIT login -->
+  <div id="appVersion" class="app-version" title="App version / git commit"></div>
+  <!-- Step 1: RSA login -->
   <form id="loginForm">
-    <h1>RADKIT Login</h1>
+    <h1>RSA Login</h1>
 
     <label for="email">Email</label>
     <input id="email" name="email" type="email" required placeholder="you@cisco.com">
@@ -38,7 +40,7 @@
 
   <!-- Step 2: pick a service -->
   <form id="serviceForm" class="card" style="display:none; width:320px;">
-    <h1>Connect to RADKIT service</h1>
+    <h1>Connect to RSA service</h1>
     <div class="muted" id="serviceUser" style="margin-bottom:1rem;"></div>
     <label for="serial">Service serial</label>
     <input id="serial" name="serial" type="text" required placeholder="e.g. 7an6-bxvq-tkcs">
@@ -55,6 +57,7 @@
     <select id="scenario" name="scenario">
       <option value="dhcp" selected>DHCP Troubleshooting</option>
       <option value="east_west">East-West Trace</option>
+      <option value="underlay_multicast">Underlay Multicast</option>
     </select>
 
     <!-- DHCP inputs -->
@@ -64,7 +67,7 @@
 
       <label>Catalyst Center name <span style="color:#64748b;">(optional)</span></label>
       <input id="dhcp_catc_name" type="text" placeholder="172-31-126-6">
-      <div class="hint">Only required if RADKIT Standalone Server is in use.</div>
+      <div class="hint">Only required if RSA Standalone Server is in use.</div>
 
       <label>VLAN ID</label>
       <input id="dhcp_vlan" type="number" placeholder="1021">
@@ -101,6 +104,10 @@
         <input id="ew_l2only" type="checkbox" style="width:auto;"> L2 only pool
       </label>
 
+      <label style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:#e2e8f0; margin:0.9rem 0 0.25rem;">
+        <input id="ew_is_few" type="checkbox" style="width:auto;"> Fabric-Enabled Wireless (source endpoint)
+      </label>
+
       <div id="ewL2Inputs" style="display:none;">
         <label>Mask (prefix length)</label>
         <input id="ew_mask" type="number" placeholder="24">
@@ -108,6 +115,27 @@
         <label>Gateway IP</label>
         <input id="ew_gateway" type="text" placeholder="172.19.10.1">
       </div>
+    </div>
+
+    <!-- Underlay-Multicast inputs -->
+    <div id="umcastInputs" style="display:none;">
+      <label>Source XTR (FHR) management IP</label>
+      <input id="umcast_source_ip" type="text" placeholder="172.19.1.68">
+
+      <label>L2VNI instance ID (IID)</label>
+      <input id="umcast_l2vni_iid" type="number" placeholder="8189">
+
+      <label>VLAN</label>
+      <input id="umcast_vlan" type="number" placeholder="1021">
+
+      <label>Destination XTR (LHR) management IP <span class="muted" style="font-weight:normal;">— optional</span></label>
+      <input id="umcast_dest_ip" type="text" placeholder="172.19.1.69">
+
+      <label>Underlay VRF <span class="muted" style="font-weight:normal;">— optional, blank = global</span></label>
+      <input id="umcast_vrf" type="text" placeholder="">
+
+      <label>Broadcast-underlay group override <span class="muted" style="font-weight:normal;">— optional</span></label>
+      <input id="umcast_group" type="text" placeholder="232.0.0.1">
     </div>
 
     <button type="submit">Run</button>
@@ -126,7 +154,10 @@
       </label>
       <button id="topologyDownloadLog" type="button" title="Download collection_logfile.txt">Download Log</button>
       <button id="topologyDownloadTopology" type="button" title="Download current topology snapshot (JSON)">Download Topology</button>
+      <button id="topologyDownloadChecks" type="button" title="Download all check results as a PDF">Download Checks</button>
+      <button id="topologyResetView" type="button" title="Recenter and fit the topology in the viewport">Reset View</button>
       <button id="topologyRefresh" type="button" title="Run the whole flow again">Run Again</button>
+      <button id="topologyBackMenu" type="button" onclick="backToMenu(); return false;" title="Abort the running collection and return to the main menu">Stop</button>
     </div>
     <div class="topology-body">
       <div id="cy"></div>

@@ -171,11 +171,20 @@ class cts_endpoint_info():
             #Parser for LOCAL mode (CTS Manual or RADIUS)
             ctssgtmap_cmd = "show cts interface {}".format(interface)
             ctssgtmap_op = radkit_cli.get_single_output_genie(self.hostname, ctssgtmap_cmd, service)
-            cts_interface_states = cts_interface_parser(ctssgtmap_op)
-            self.ctsintf_state = cts_interface_states[0]
-            self.sgt_classificaiton = cts_interface_states[1]
-            self.propagation = cts_interface_states[2]
-            self.trust = cts_interface_states[3]
+            # Genie returns None for virtual interfaces like AccessTunnel (Ac0)
+            # used by Fabric-Enabled Wireless — `show cts interface Ac0` has no
+            # parseable schema. Treat as CTS-not-applicable on this port.
+            if ctssgtmap_op is None or not isinstance(ctssgtmap_op, dict) or not ctssgtmap_op.get("interfaces"):
+                self.ctsintf_state = False
+                self.sgt_classificaiton = "DYNAMIC"
+                self.propagation = False
+                self.trust = False
+            else:
+                cts_interface_states = cts_interface_parser(ctssgtmap_op)
+                self.ctsintf_state = cts_interface_states[0]
+                self.sgt_classificaiton = cts_interface_states[1]
+                self.propagation = cts_interface_states[2]
+                self.trust = cts_interface_states[3]
 
     def cts_enforcement(self, vlan, interface, service):
         if vlan is None:

@@ -1975,8 +1975,13 @@ class L2LISPControlPlane:
                         self.decrypted = True
                         self.authentication_key = encrypted_key
                     elif password_type == 7:
-                        self.decrypted = True
-                        self.authentication_key = decrypt_password(encrypted_key)
+                        decrypt_result = decrypt_password(encrypted_key)
+                        ok = bool(decrypt_result[0])
+                        self.decrypted = ok
+                        if ok:
+                            self.authentication_key = decrypt_result
+                        else:
+                            self.authentication_key = (False, encrypted_key)
                     else:
                         self.decrypted = False
                         self.authentication_key = encrypted_key
@@ -2293,6 +2298,28 @@ class LISPSession:
 
     def __init__(self,device):
         self.device = device
+        # Defensive defaults so callers can safely read attributes even if the
+        # device returns no output and neither the Genie nor the fallback
+        # parser populates them. Without these defaults, downstream
+        # `self.session_state` access raises AttributeError.
+        self.peer_addr = None
+        self.peer_port = None
+        self.local_address = None
+        self.local_port = None
+        self.session_type = None
+        self.session_state = None
+        self.session_state_time = None
+        self.messages_in = None
+        self.messages_out = None
+        self.fatal_errors = None
+        self.rcvd_unsupported = None
+        self.rcvd_invalid_vrf = None
+        self.rcvd_override = None
+        self.rcvd_malformed = None
+        self.sent_defferred = None
+        self.totalsessions = 0
+        self.establishedsessions = 0
+        self.peers = {}
 
     def globallispsession(self,service):
         device = self.device
@@ -2557,7 +2584,7 @@ class L3Device:
                         self.iid = int(parsed_iid)
                     except (ValueError, TypeError):
                         self.iid = None
-        # Branch 2: Non-Default VRF (Genie Parser)
+        # Branch 2: Non-Default VRF (Genie Parser, regex fallback)
         else:
             lispvrfop = get_single_output_genie(hostname, lispvrfcmd, service)
             if isinstance(lispvrfop, dict):
@@ -2569,6 +2596,24 @@ class L3Device:
                         raw_iid = next(iter(iids_dict))
                         try:
                             self.iid = int(raw_iid)
+                        except (ValueError, TypeError):
+                            self.iid = None
+
+            # Genie's ShowLispVrf schema tightened over releases (v6_topoid,
+            # v4_topoid, iid all became mandatory in 26.x), so a slightly
+            # different device wording invalidates the whole parse and we get
+            # None back. The regex parser handles the raw text regardless of
+            # VRF name, so use it as a fallback whenever Genie didn't yield
+            # an IID.
+            if self.iid is None:
+                raw_op = get_any_single_output(hostname, lispvrfcmd, service)
+                if raw_op:
+                    parsed_vrfid, parsed_iid = parse_lisp_vrf_output(raw_op)
+                    if self.vrfid is None:
+                        self.vrfid = parsed_vrfid
+                    if parsed_iid is not None:
+                        try:
+                            self.iid = int(parsed_iid)
                         except (ValueError, TypeError):
                             self.iid = None
 
@@ -2655,7 +2700,8 @@ class CEFForwardingState:
             for port in total_ports:
                 physical_interfaces.append(port)
         flat_list = [item for sublist in physical_interfaces for item in sublist]
-        self.physical_interfaces = flat_list
+        seen = set()
+        self.physical_interfaces = [p for p in flat_list if not (p in seen or seen.add(p))]
 
 
 

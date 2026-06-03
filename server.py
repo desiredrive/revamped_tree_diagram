@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from radkit_client.sync import create_context, Client
+from radkit_client.sync import Client
 
 from checks import Check, CheckResult, CheckStatus, RunContext
 from check_registry import build_check_chain
@@ -32,7 +32,7 @@ class Session:
     sso_url: Optional[str] = None
     status: str = "starting"  # starting | waiting | ready | error
     error: Optional[str] = None
-    # Service (RADKIT service_cloud) state
+    # Service (RSA service_cloud) state
     service: object = None
     service_serial: Optional[str] = None
     service_name: Optional[str] = None
@@ -47,6 +47,7 @@ class Session:
     event_log: list = field(default_factory=list)
     event_log_cond: threading.Condition = field(default_factory=threading.Condition)
     event_counter: int = 0
+    cancel_run: threading.Event = field(default_factory=threading.Event)
 
 
 def _do_login(sess: Session) -> None:
@@ -69,7 +70,7 @@ def _do_login(sess: Session) -> None:
         from radkit_client.sync import PromptInterrupted
         if isinstance(result, PromptInterrupted):
             raise RuntimeError(
-                "Certificate login was interrupted — RADKIT prompted for input "
+                "Certificate login was interrupted — RSA prompted for input "
                 "(likely a missing or wrong private-key password)."
             )
         with sess.lock:
@@ -78,7 +79,7 @@ def _do_login(sess: Session) -> None:
 
     resp = c.oauth_connect_only(identity=sess.email, domain=sess.domain)
     if resp is None:
-        raise RuntimeError("RADKIT returned no OAuth response.")
+        raise RuntimeError("RSA returned no OAuth response.")
 
     with sess.lock:
         sess.sso_url = str(resp.sso_url)
@@ -133,6 +134,7 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
     """
 
     _emit(sess, {"type": "run_started", "scenario": payload.get("scenario")})
+    sess.cancel_run.clear()
 
     # Reset the per-run collection log so each invocation starts with a clean
     # file (downloadable via /logfile). Failures here are non-fatal — the run
@@ -160,11 +162,30 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
     chain = list(chain)
     i = 0
     while i < len(chain):
+        if sess.cancel_run.is_set():
+            _emit(sess, {
+                "type": "run_complete",
+                "ok": False,
+                "cancelled": True,
+                "message": "Collection cancelled by user.",
+            })
+            return
         check = chain[i]
+        # Allow a previous check to remap subsequent target node ids — used by
+        # WirelessFabricEdgeRedirect to redirect the wired chain to a newly-spawned
+        # XTR node when the wireless endpoint roamed away from the user's
+        # original input. Captured once and reused for check_finished so a
+        # check that mutates the remap inside its own run() still completes on
+        # the old node; only the NEXT iteration sees the new mapping.
+        remap = ctx.state.get("node_remap") or {}
+        if getattr(check, "bypass_remap", False):
+            target = check.target_node_id
+        else:
+            target = remap.get(check.target_node_id, check.target_node_id)
         _emit(sess, {
             "type": "check_started",
             "name": check.name,
-            "target_node_id": check.target_node_id,
+            "target_node_id": target,
         })
         try:
             result = check.run(ctx)
@@ -180,19 +201,23 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
         event = {
             "type": "check_finished",
             "name": check.name,
-            "target_node_id": check.target_node_id,
+            "target_node_id": target,
             "status": result.status.value,
             "message": result.message,
         }
         # Pass through any data the check wanted the UI to act on.
         if result.data.get("node_relabel"):
             event["node_relabel"] = result.data["node_relabel"]
+        if result.data.get("relabel_nodes"):
+            event["relabel_nodes"] = result.data["relabel_nodes"]
         if result.data.get("node_tags") is not None:
             event["node_tags"] = result.data["node_tags"]
         if result.data.get("add_endpoint"):
             event["add_endpoint"] = result.data["add_endpoint"]
         if result.data.get("add_nodes"):
             event["add_nodes"] = result.data["add_nodes"]
+        if result.data.get("add_edges"):
+            event["add_edges"] = result.data["add_edges"]
         if result.data.get("node_rloc"):
             event["node_rloc"] = result.data["node_rloc"]
         if result.data.get("merge_into"):
@@ -229,6 +254,32 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+def _read_version() -> dict:
+    """Return version + short git commit if available."""
+    info = {"version": "dev", "commit": None}
+    try:
+        with open("VERSION", "r") as f:
+            info["version"] = f.read().strip() or "dev"
+    except OSError:
+        pass
+    try:
+        import subprocess
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=2,
+        ).decode().strip()
+        if sha:
+            info["commit"] = sha
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ImportError):
+        pass
+    return info
+
+
+@app.get("/version")
+def get_version():
+    return _read_version()
+
+
 class LoginRequest(BaseModel):
     email: str
     domain: str
@@ -238,7 +289,19 @@ class LoginRequest(BaseModel):
 
 @app.get("/")
 def index():
-    return FileResponse("static/index.html")
+    # Inject the current commit SHA as a cache-buster on the static assets so
+    # browsers don't keep serving a stale app.js / styles.css after an update.
+    info = _read_version()
+    v = info.get("commit") or info.get("version") or "dev"
+    try:
+        with open("static/index.html", "r") as f:
+            html = f.read()
+    except OSError:
+        return FileResponse("static/index.html")
+    html = html.replace("/static/styles.css", f"/static/styles.css?v={v}")
+    html = html.replace("/static/app.js", f"/static/app.js?v={v}")
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(html)
 
 
 @app.get("/logfile")
@@ -251,8 +314,8 @@ def download_logfile():
 
 
 def _session_worker(sess: Session) -> None:
-    """Long-lived per-session thread. RADKIT's sync API binds to this thread,
-    so every RADKIT call for this session must come through here."""
+    """Long-lived per-session thread. RSA's sync API binds to this thread,
+    so every RSA call for this session must come through here."""
     try:
         while True:
             cmd = sess.commands.get()
@@ -358,6 +421,15 @@ def run_scenario(req: RunRequest):
         raise HTTPException(status_code=400, detail="Service not connected.")
     sess.commands.put(("run_scenario", req.payload))
     return {"status": "queued"}
+
+
+@app.post("/run/stop/{sid}")
+def stop_run(sid: str):
+    sess = sessions.get(sid)
+    if sess is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    sess.cancel_run.set()
+    return {"status": "cancelling"}
 
 
 @app.get("/run/events/{sid}")

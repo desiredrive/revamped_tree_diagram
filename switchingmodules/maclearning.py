@@ -6,7 +6,12 @@ class mac_learning:
         self.hostname = device
 
     def mac_learning_mac(self, mac, vlan, service):
-        mac_cmd = "show mac address-table address {} vlan {}".format(mac, vlan)
+        # When vlan is unknown (e.g. FEW WLC LISP DB omits vlan_id), drop the
+        # `vlan` qualifier entirely — the IOS CLI rejects `vlan None` literally.
+        if vlan is None or str(vlan).strip().lower() in ("", "none"):
+            mac_cmd = "show mac address-table address {}".format(mac)
+        else:
+            mac_cmd = "show mac address-table address {} vlan {}".format(mac, vlan)
         mac_op = radkit_cli.get_single_output_genie(self.hostname, mac_cmd, service)
         self.type = None
         self.port = None

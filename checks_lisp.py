@@ -233,13 +233,16 @@ class PitrValidation(Check):
 
         if pitr != loopback:
             return CheckResult(
-                CheckStatus.FAIL,
-                f"PITR address {pitr} does not match Loopback0 {loopback}. "
-                f"Correct with `proxy-itr <Loopback0-ip>` under `router lisp, service ipv4`.",
+                CheckStatus.WARN,
+                f"PITR (proxy-itr RLOC) is {pitr}; Loopback0 on this device is {loopback}. "
+                f"Cisco SD-Access automation typically aligns these — verify this was intentional "
+                f"(e.g. a custom RLOC design). If unintended, set `proxy-itr <Loopback0-ip>` under "
+                f"`router lisp, service ipv4`.",
+                data={"pitr": pitr, "loopback0": loopback},
             )
         return CheckResult(
             CheckStatus.OK,
-            f"PITR matches Loopback0 ({loopback}).",
+            f"PITR aligns with Loopback0 ({loopback}).",
             data={"pitr": pitr},
         )
 
@@ -314,9 +317,12 @@ class LispParameters(Check):
             if not is_infravn:
                 lisp_info.map_cache(list(eids), service)
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(tb)
             return CheckResult(
                 CheckStatus.FAIL,
-                f"LISP parameter collection failed: {type(e).__name__}: {e}",
+                f"LISP parameter collection failed: {type(e).__name__}: {e}\n{tb}",
             )
 
         ctx.state["lispparameters_info"] = lisp_info

@@ -1,0 +1,7 @@
+collection_logfile.txt
+*.whl
+!vendor/**/*.whl
+*.deb
+__pycache__/
+*.pyc
+.venv/

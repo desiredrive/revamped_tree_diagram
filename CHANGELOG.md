@@ -1,0 +1,85 @@
+# Changelog
+
+All notable changes to SDA Pathfinder are documented in this file.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versions follow [Semantic Versioning](https://semver.org/).
+
+## [1.0.0-beta.1] — 2026-06-02
+
+First public beta. Web-based SDA fabric troubleshooter built on FastAPI +
+Cytoscape, driven by RADKit (RSA) for live device access and Catalyst Center
+APIs for fabric metadata.
+
+### Added
+
+#### Scenarios
+- **DHCP Troubleshooting** — end-to-end DHCP path validation: pool
+  identification, DHCP parameters / SVI counters, DHCP-snooping client stats,
+  PACL / VACL / RACL evaluation, fabric-wide DHCP server compatibility
+  (Option-82 / DORA), Edge → Border → DHCP-server forwarding.
+- **East-West Trace** — source / destination XTR profiling, source endpoint
+  onboarding, L2-LISP map-cache + ETR registration, AR resolution on both
+  sides, intra-vs-inter-XTR election, remote map-cache validation, fabric-site
+  comparison, dynamic underlay multicast follow-up when the L2VNI is in
+  flooding mode.
+- **Underlay Multicast Validation** — standalone scenario covering FHR / LHR /
+  per-RP profiling, SSM / multicast-range gating, register tunnel state, RPF
+  to RP, IGMP, S,G + (\*,G) state, MSDP cross-domain peer / SA cache, full
+  RPF-discovered path traversal, cross-device correlation (RP / group / SSM /
+  ACL consistency).
+
+#### Validation framework
+- Structured `Check` chain with per-check status (OK / WARN / FAIL / SKIP /
+  RUNNING) and human-readable bodies anchored on topology nodes.
+- Dynamic check queueing — checks can append follow-up checks at runtime
+  (used by EW → multicast handoff).
+- PIM gating checks (BiDir, `spt-threshold infinity`) applied uniformly to
+  FHR, LHR, and every discovered RP, default RIB only.
+- East-West PACL + VACL bidirectional evaluation on both source and
+  destination XTRs (RACL excluded — host-to-host intra-VRF only).
+
+#### Topology + UI
+- Live Cytoscape topology with role-aware icons (XTR, Border, Control Plane,
+  WLC, AP, Underlay Switch, DHCP Server, Fabric cloud, Endpoint).
+- CDP-discovered Border merging via IP de-duplication (no duplicate nodes
+  when two roles share a hostname / mgmt IP).
+- CEF-discovered RPF path rendering — each hop chained via `connect_to`
+  with the resolved physical egress port as the edge label; terminal hops
+  merge into FHR / RP without spawning a stray node.
+- Per-node check panel, click-through expand, status badges, and live
+  re-status as checks complete.
+- Wireless onboarding flow (FEW): WLC discovery, endpoint profile,
+  AccessTunnel resolve, fabric-edge MAC / roaming history / L2LISP stats,
+  optional "treat as wired" override.
+
+#### Server / runtime
+- FastAPI app with SSE event stream for live check results.
+- RSA login (SSO + certificate), service-serial selection, scenario picker.
+- Session-scoped run manager with `Stop` / `Run Again` semantics.
+- Downloadable artifacts: collection logfile, topology JPEG, **Checks PDF**
+  (client-side jsPDF) with color-coded status tags.
+
+#### Reliability
+- CEF→CDP hop resolution order (CEF recursion first, CDP after to confirm
+  egress) — prevents misrouted topology when CDP and CEF disagree.
+- IP-based node de-duplication everywhere; alias map keeps subsequent
+  `connect_to` references valid after a merge.
+- Wireless-roam awareness: "Device-Tracking Missing Endpoint" / "VLAN None"
+  on the original Edge after a roam is treated as expected, not a failure.
+- Auth-session renderer distinguishes wireless tunnels (per-client state on
+  WLC) from wired access ports with no active session, instead of dumping
+  raw genie attributes.
+- LISP auth-key / Pubsub source-of-truth handling aligned with field rules:
+  Map-Register failures surface as auth errors (not session-down), DNAC
+  `isPubSubEnabled` is treated as authoritative.
+
+### Known limitations
+
+- LHR-side underlay multicast (Stage 3) is structurally complete, but full
+  cross-device S,G traversal across transit nodes (Stage 5) is not yet
+  wired in.
+- Standalone underlay-multicast UX entry (Stage 6) reuses the EW form — a
+  dedicated picker form is planned.
+- `traffic_flows/underlay_multicast.py:single_device_underlay_profiling`
+  still uses `sys.exit` style flow control; wrappers catch `BaseException`,
+  but a refactor is pending.

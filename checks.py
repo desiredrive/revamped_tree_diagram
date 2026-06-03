@@ -7,7 +7,7 @@ the fabric. Each Check:
   - Returns a CheckResult describing pass/warn/fail + a human-readable message.
   - May read/write the shared run context to share findings with later checks.
 
-This module deliberately holds no RADKIT or fabric-specific logic; concrete
+This module deliberately holds no RSA or fabric-specific logic; concrete
 checks live in their own modules and subclass `Check`.
 """
 
@@ -52,7 +52,7 @@ class Check:
 class RunContext:
     """Mutable state carried through one troubleshooting run.
 
-    Holds the input payload (form values), the RADKIT service handle, and a
+    Holds the input payload (form values), the RSA service handle, and a
     free-form `state` dict that checks read from / write to. Earlier checks
     publish their findings into `state`; later checks pull them out.
     """

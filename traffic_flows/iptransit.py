@@ -1756,6 +1756,61 @@ def validate_petr_settings(border, step, hostname):
     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     return step + 1
 
+
+def validate_local_route_bgp_origin(border, step, hostname):
+    """Extract the BGP origin attribute from the best path of the locally
+    originated route (the fabric pool prefix advertised by this border) and
+    record it on the border object so the multi-border comparison can flag
+    inter-border origin mismatches that may cause upstream RPF failures.
+    """
+    process = "externalConnectivity"
+    subprocess = "localRouteBgpOrigin"
+    vrf_name = getattr(border, "vrf", None)
+    local_route = getattr(border, "local_route", None) or {}
+    af_block = (
+        ((((local_route.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {})
+         .get(vrf_name, {}) or {}).get("address_family", {}) or {}
+    )
+
+    best_origin = None
+    best_prefix = None
+    best_nexthop = None
+    for af_name, af_data in (af_block or {}).items():
+        prefixes = (af_data.get("prefixes", {}) or {}) if isinstance(af_data, dict) else {}
+        for pfx, pfx_data in prefixes.items():
+            idx_map = (pfx_data.get("index", {}) or {}) if isinstance(pfx_data, dict) else {}
+            for _, idx in idx_map.items():
+                if not isinstance(idx, dict):
+                    continue
+                status = str(idx.get("status_codes") or "")
+                if ">" not in status:
+                    continue
+                best_prefix = pfx
+                best_origin = (idx.get("origin_codes") or "").strip() or None
+                best_nexthop = idx.get("next_hop") or None
+                break
+            if best_origin is not None:
+                break
+        if best_origin is not None:
+            break
+
+    border.local_route_best_origin = best_origin
+    border.local_route_best_prefix = best_prefix
+    border.local_route_best_nexthop = best_nexthop
+
+    msg1 = "External Connectivity - Local Route BGP Origin"
+    if best_origin:
+        message = (
+            f"Border {hostname}: locally originated prefix {best_prefix} has best-path "
+            f"origin '{best_origin}' (next-hop {best_nexthop or '—'}) in VRF {vrf_name}."
+        )
+    else:
+        message = (
+            f"Border {hostname}: no best path was found for the locally originated prefix in VRF {vrf_name}."
+        )
+    logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+    return step + 1
+
 def validate_default_route_and_default_etr(border, step, hostname):
     process = "externalConnectivity"
     subprocess = "defaultRouteValidation"
@@ -1795,17 +1850,31 @@ def validate_default_route_and_default_etr(border, step, hostname):
         return step + 1
 
     # Default route exists: verify LISP DB has 0.0.0.0/0
+    # Only mandatory in pubsub mode. In non-pubsub (LISP/BGP) mode, the
+    # default route is advertised into the fabric via BGP/LISP route-import
+    # — no 0.0.0.0/0 entry in the LISP database is required.
+    ispubsub = bool(getattr(border, "ispubsub", False))
     lispdb = getattr(border, "lispdbroute", None) or {}
     eid = getattr(lispdb, "eid", None) or {}
 
     if eid != "0.0.0.0/0" and vrf_name.lower() != "default":
-        error = "External Connectivity - Default ETR Missing"
-        message = (
-            f"Border {hostname} has a BGP default route in VRF {vrf_name}, but 0.0.0.0/0 is not present in the LISP database. "
-            f"Remediation: configure `database-mapping 0.0.0.0/0 locator-set DEFAULT_ETR_LOCATOR default-etr` "
-            f"under the appropriate LISP instance-id."
-        )
-        exit_program(step, process, subprocess, hostname, error, message)
+        if ispubsub:
+            error = "External Connectivity - Default ETR Missing"
+            message = (
+                f"Border {hostname} has a BGP default route in VRF {vrf_name}, but 0.0.0.0/0 is not present in the LISP database. "
+                f"Pub/Sub mode requires the default-ETR to be registered in the LISP database. "
+                f"Remediation: configure `database-mapping 0.0.0.0/0 locator-set DEFAULT_ETR_LOCATOR default-etr` "
+                f"under the appropriate LISP instance-id."
+            )
+            exit_program(step, process, subprocess, hostname, error, message)
+        else:
+            msg1 = "External Connectivity - Default Route and Default ETR"
+            message = (
+                f"Border {hostname} has a BGP default route in VRF {vrf_name}; 0.0.0.0/0 is not in the LISP database. "
+                f"This is acceptable in non-Pub/Sub (LISP/BGP) mode — the default is propagated via BGP/route-import."
+            )
+            logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
+            return step + 1
     if vrf_name.lower() != "default":
         msg1 = "External Connectivity - Default Route and Default ETR"
         message = (
@@ -2403,6 +2472,41 @@ def multi_border_validation(borders, step, service):
             logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
             step += 1
 
+    # --- CROSS-BORDER LOCAL ROUTE ORIGIN COMPARISON ---
+    # Compare the best-path BGP origin of each border's locally originated
+    # fabric prefix. If the origins diverge between borders, upstream devices
+    # running ECMP or BGP Maximum-Paths may select inconsistent next-hops and
+    # cause RPF failures or traffic blackholing.
+    origin_records = []
+    for b in borders:
+        origin = getattr(b, "local_route_best_origin", None)
+        if origin:
+            origin_records.append((b.hostname, origin, getattr(b, "local_route_best_prefix", None)))
+
+    if len(origin_records) >= 2:
+        distinct_origins = {rec[1] for rec in origin_records}
+        if len(distinct_origins) > 1:
+            details = ", ".join(f"{h} reports '{o}' for {p or 'local prefix'}" for h, o, p in origin_records)
+            msg1 = "Multi-Border - Local Route Origin Mismatch"
+            message = (
+                f"The locally originated route has a different BGP origin attribute on each border ({details}). "
+                "If the upstream firewall or router is using ECMP or BGP Maximum-Paths, this inconsistency can cause "
+                "RPF failures and traffic blackholing. Remediation: align the origins by raising the BGP "
+                "administrative distance for locally originated routes to 254 on each border with the per-VRF "
+                "command 'distance bgp 20 20 254', then run 'clear ip bgp <neighbor> soft out' to refresh the "
+                "advertised attributes upstream."
+            )
+            logging_warning(step, process, subprocess, "Fabric-Wide", msg1 + " | " + message)
+            step += 1
+        else:
+            msg1 = "Multi-Border - Local Route Origin Consistency"
+            message = (
+                f"All profiled borders advertise the locally originated route with the same BGP origin "
+                f"('{next(iter(distinct_origins))}')."
+            )
+            logging_info(step, process, subprocess, "Fabric-Wide", msg1 + " | " + message)
+            step += 1
+
     return step
 
 #Concurrent Border Collection
@@ -2452,26 +2556,75 @@ def _fetch_single_border_data(border, fabric_id, vrf, vlanid, srcip, dstip, serv
 
     border_object.vrf_information(vrf, gateway_ip, service, step)
     border_object.bgp_information(dstip, service)
+
+    # If BOTH the destination-specific lookup AND the default-route lookup came
+    # back empty on this border, the border has no usable BGP path upstream for
+    # this VRF. Mark it and skip every destination-anchored collection step —
+    # forwarding_to_destination, lisp_parameters, and ping would either crash
+    # or produce noise that the operator can't act on. Source-side, BGP local,
+    # ACL/CTS/interface counters still run.
+    no_upstream = (
+        border_object.bgpinfo.route is None
+        and border_object.bgpinfo.defroute is None
+    )
+    border_object.no_bgp_upstream = no_upstream
+    if no_upstream:
+        # Pre-init the destination-derived attrs so later code / per-border
+        # checks reading them don't AttributeError.
+        border_object.dstip = dstip
+        border_object.destcefinformation = None
+        border_object.destoutgoingports = []
+        border_object.destlispmapcache = None
+        border_object.destlispfwding = None
+        border_object.lispfwdinglocaleid = None
+        border_object.remote_iid_locators = None
+        border_object.destrouteimport = None
+        border_object.lispdbroute = None
+        border_object.lispstatus = None
+        border_object.ping_results = None
+
+        # PETR validation is a per-instance CONFIG check (does this border act
+        # as a Proxy-ETR for the user VRF's IID?), not a destination-forwarding
+        # check. Collect lispstatus standalone here so validate_petr_settings
+        # has real per-IID data even when no_bgp_upstream skipped the rest of
+        # lisp_parameters.
+        try:
+            iid = border_object.lispiid
+            hostname = border_object.profiled_device.hostname
+            ls = LISPInstanceStatus(hostname, iid)
+            ls.eidstatus("ipv4", service)
+            border_object.lispstatus = ls
+        except Exception:
+            border_object.lispstatus = None
+
     border_object.bgp_local_route(prefixandslash, service)
     border_object.bgp_vpnv4(service)
     if border_type in ["isexternal", "isanywhere"]:
         border_object.defaultetrlocator(border_type, service, step)
     # CEF Recursion (The most time-consuming part)
-    border_object.forwarding_to_destination(dstip, service, step)
+    if not no_upstream:
+        border_object.forwarding_to_destination(dstip, service, step)
     border_object.forwarding_to_source(srcip, isdhcp, service, step)
 
-    # LISP Parameters
-    destroute = border_object.bgpinfo.route
-    prefixes = (
-                       (((destroute.get("instance", {}) or {}).get("default", {}) or {}).get("vrf", {}) or {})
-                       .get(vrf, {}) or {}
-               ).get("address_family", {}).get("vpnv4 unicast", {}).get("prefixes", {}) or {}
-    prefix = next(iter(prefixes.keys()), None)
+    if not no_upstream:
+        # LISP Parameters
+        destroute = border_object.bgpinfo.route or {}
+        vrf_entry = (
+            (((destroute.get("instance", {}) or {}).get("default", {}) or {})
+             .get("vrf", {}) or {})
+            .get(vrf, {}) or {}
+        )
+        prefixes = (
+            ((vrf_entry.get("address_family", {}) or {})
+             .get("vpnv4 unicast", {}) or {})
+            .get("prefixes", {}) or {}
+        )
+        prefix = next(iter(prefixes.keys()), None)
 
-    border_object.lisp_parameters(prefix, service, step)
+        border_object.lisp_parameters(prefix, service, step)
 
-    # Final checks
-    border_object.ping(service, step)
+        # Final checks
+        border_object.ping(service, step)
     border_object.interface_counters(service)
     border_object.acl_information(service)
     border_object.cts_information(service, step)

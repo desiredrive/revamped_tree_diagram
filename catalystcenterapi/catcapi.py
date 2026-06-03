@@ -131,20 +131,50 @@ def validate_cp_infabric(cpmgmtip,sitehierarchy,catc,service,step):
         cp_name = api_response['deviceName']
         cp_location = api_response['siteNameHierarchy']
     
-    #Validating if the device is inside the fabric site: 
-    split_string = cp_location.split(sitehierarchy)
-    if len(split_string) > 1:
-        logging_info(step, process,subprocess, catc,
-                      "Device {} located in {} is part of the fabric site {}".format(cp_name,cp_location,sitehierarchy))
-        #print ("Device {} located in {} is part of the fabric site {}".format(cp_name,cp_location,sitehierarchy))
+    #Validating if the device is inside the fabric site by resolving the
+    #fabric-site root for both the CP and the reference site via the SDA
+    #fabricSites API, then comparing fabric_id. Substring matching on
+    #siteNameHierarchy was wrong: a CP at "Building/Floor 17" is a sibling of
+    #an XTR at "Building/Floor 14", but both can still belong to the same
+    #fabric site rooted at "Building".
+    from device_profiler import fabric_sites
+    try:
+        _, cp_fabric_id, _, _ = fabric_sites(cp_location, catc, service, step)
+    except BaseException as e:
+        error = "Catalyst Center API - Unable to Collect"
+        message = ("Could not resolve fabric site for CP {} located in {}: "
+                   "{}. Review the latest API retrieved in Catalyst Center in "
+                   "the GPS_SDA Collection").format(cp_name, cp_location, e)
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        sys.exit("Error: {} | {}".format(error, message))
+    try:
+        _, ref_fabric_id, _, _ = fabric_sites(sitehierarchy, catc, service, step)
+    except BaseException as e:
+        error = "Catalyst Center API - Unable to Collect"
+        message = ("Could not resolve fabric site for reference site {}: "
+                   "{}. Review the latest API retrieved in Catalyst Center in "
+                   "the GPS_SDA Collection").format(sitehierarchy, e)
+        logging_error(step, process, subprocess, catc, error)
+        logging_info(step, process, subprocess, catc, message)
+        sys.exit("Error: {} | {}".format(error, message))
+
+    if cp_fabric_id and ref_fabric_id and cp_fabric_id == ref_fabric_id:
+        logging_info(step, process, subprocess, catc,
+                     "Device {} located in {} is part of the same fabric "
+                     "site (fabric_id={}) as reference {}".format(
+                         cp_name, cp_location, cp_fabric_id, sitehierarchy))
         return True
     else:
         error = "Catalyst Center API - Unable to Collect"
-        message = "Could not determine if device {} located in {} is part of the fabric site {}. Review the latest API retrieved in Catalyst Center in the GPS_SDA Collection".format(
-            cp_name, cp_location, sitehierarchy)
+        message = ("Device {} located in {} (fabric_id={}) is NOT in the "
+                   "same fabric site as reference {} (fabric_id={}). Review "
+                   "the latest API retrieved in Catalyst Center in the "
+                   "GPS_SDA Collection").format(
+                       cp_name, cp_location, cp_fabric_id,
+                       sitehierarchy, ref_fabric_id)
         logging_error(step, process, subprocess, catc, error)
         logging_info(step, process, subprocess, catc, message)
-        #raise BDBTaskError("Error: {} | {}".format(error, message))
         sys.exit("Error: {} | {}".format(error, message))
 
 def find_control_plane(cp,dnac,service,step, process,subprocess):

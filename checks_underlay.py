@@ -108,10 +108,15 @@ class EdgeForwarding(Check):
                 def _fmt_list(items):
                     return ", ".join(str(i) for i in items) if items else "(none)"
 
+                def _hop_rloc(h):
+                    nh = getattr(h, "nexthopip", None) or getattr(h, "ip", None)
+                    return nh if nh else str(h)
+
                 msg = (
-                    f"• Prefixes: {_fmt_list(helpers)}\n"
-                    f"• RLOCs: {_fmt_list([getattr(h, 'nexthop', h) for h in cefhops])}\n"
-                    f"• Underlay Ports: {_fmt_list(total_phys)}"
+                    f"• Helpers: {_fmt_list(helpers)}\n"
+                    f"• Next-hops: {_fmt_list([_hop_rloc(h) for h in cefhops])}\n"
+                    f"• Underlay Ports: {_fmt_list(total_phys)}\n"
+                    f"(INFRA_VN forwards natively in the underlay — no LISP/RLOC encap.)"
                 )
         except BaseException as e:
             return _legacy_fail(e, "CEF Forwarding")
@@ -172,9 +177,14 @@ class UnderlayReachability(Check):
 
         ctx.state["dhcp_srcip"] = srcip
         ctx.state["dhcp_dstip"] = dstip
+        label = (
+            f"Loopback {srcip} → DHCP Server {dstip} (native underlay, no RLOC)"
+            if is_infravn
+            else f"RLOC {srcip} → DHCP Server {dstip}"
+        )
         return CheckResult(
             CheckStatus.OK,
-            f"RLOC {srcip} → DHCP Server {dstip}",
+            label,
             data={
                 "srcip": srcip,
                 "dstip": dstip,
@@ -183,8 +193,7 @@ class UnderlayReachability(Check):
                     "role": "dhcp-server",
                     "label": "DHCP " + dstip,
                     "ip": dstip,
-                    "connect_to": "xtr",
-                    "edge_label": "helper",
+                    "floating": True,
                 }],
             },
         )
@@ -232,9 +241,13 @@ class UnderlayCdpDiscovery(Check):
 
         from traffic_flows.dhcp_troubleshooting import abbrev_port
 
+        # Resolve actual source node id (may have been remapped by a prior check,
+        # e.g. wireless XTR roam). target_node_id is the logical "xtr" handle.
+        remap = ctx.state.get("node_remap") or {}
+        source_node_id = remap.get(self.target_node_id, self.target_node_id)
+
         add_nodes = []
-        found = 0
-        unknown = 0
+        unresolved_ports = []
         for idx, port in enumerate(ports):
             neighbors = []
             try:
@@ -244,7 +257,6 @@ class UnderlayCdpDiscovery(Check):
             except Exception:
                 neighbors = []
 
-            node_id = f"underlay-{idx+1}"
             if neighbors:
                 n = neighbors[0]
                 device_id = n.get("device_id") or f"neighbor-{idx+1}"
@@ -263,40 +275,215 @@ class UnderlayCdpDiscovery(Check):
                 if mgmt_ip:
                     label_lines.append(mgmt_ip)
                 add_nodes.append({
-                    "id": node_id,
+                    "id": f"underlay-{idx+1}",
                     "role": "underlay-switch",
                     "label": "\n".join(label_lines),
                     "ip": mgmt_ip or None,
                     "cdp_device_id": device_id or None,
-                    "connect_to": "xtr",
+                    "connect_to": source_node_id,
                     "edge_label": f"{abbrev_port(port)} ↔ {abbrev_port(remote)}" if remote else abbrev_port(port),
                 })
-                found += 1
             else:
-                add_nodes.append({
-                    "id": node_id,
-                    "role": "underlay-unknown",
-                    "label": f"unknown\n({abbrev_port(port)})",
-                    "connect_to": "xtr",
-                    "edge_label": abbrev_port(port),
-                })
-                unknown += 1
+                # CDP miss — fold into the shared "Fabric" cloud (singleton node)
+                # so every source that can't resolve a next-hop ends at the same
+                # icon instead of cluttering the graph with one node per port.
+                unresolved_ports.append(port)
+
+        # Emit the Fabric cloud once if any port went unresolved. The node id is
+        # a fixed singleton so repeated emissions from other source checks land
+        # on the same node; the per-source edge carries that source's port list.
+        if unresolved_ports:
+            edge_label = ", ".join(abbrev_port(p) for p in unresolved_ports)
+            add_nodes.append({
+                "id": "fabric-cloud",
+                "role": "fabric",
+                "label": "Fabric",
+                "connect_to": source_node_id,
+                "edge_label": edge_label,
+            })
 
         ctx.state["underlay_nodes"] = add_nodes
+        # Per-source mirror so the border merge can find matches across multiple
+        # Edges (e.g. wireless roam queues a second discovery against the
+        # original Edge, and a Border that CDP-neighbors both should connect to
+        # both underlay-switch nodes).
+        by_source = ctx.state.setdefault("underlay_nodes_by_source", {})
+        by_source[source_node_id] = add_nodes
 
         from traffic_flows.dhcp_troubleshooting import abbrev_port as _ap
         bullet_lines = []
-        for n, port in zip(add_nodes, ports):
+        for n in add_nodes:
             if n.get("role") == "underlay-switch":
                 dev = (n.get("label") or "").split("\n", 1)[0]
                 mgmt = n.get("ip") or "?"
-                bullet_lines.append(f"• {dev} ({mgmt}) via {_ap(port)}")
-            else:
-                bullet_lines.append(f"• unknown neighbor via {_ap(port)}")
+                bullet_lines.append(f"• {dev} ({mgmt}) via {n.get('edge_label')}")
+        if unresolved_ports:
+            bullet_lines.append(
+                f"• Fabric (no CDP neighbor) via {', '.join(_ap(p) for p in unresolved_ports)}"
+            )
         body = "\n".join(bullet_lines) if bullet_lines else "(no underlay ports)"
         return CheckResult(
             CheckStatus.OK,
             body,
+            data={"add_nodes": add_nodes},
+        )
+
+
+class OriginalEdgeUnderlayDiscovery(Check):
+    """Wireless roam — shadow CDP discovery against the user-supplied Edge.
+
+    When the wireless client has roamed off the elected Edge, the main chain
+    is remapped to the discovered Edge and the original Edge is left visually
+    orphaned. This check runs `show cdp neighbors detail` on the original
+    Edge and wires up its underlay neighbors so both Edges show their fabric
+    topology.
+
+    SKIPs cleanly when no roam happened (state key not set).
+    """
+
+    name = "Underlay CDP Discovery (Original Edge)"
+    target_node_id = "xtr"
+    bypass_remap = True  # always anchor on the original "xtr" node
+
+    def run(self, ctx: RunContext) -> CheckResult:
+        service = ctx.service
+        orig_hostname = ctx.state.get("original_xtr_hostname")
+        if not (service and orig_hostname):
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no wireless roam detected (original Edge identity not set).",
+            )
+
+        # Restrict the discovery to CEF underlay next-hops, not every CDP
+        # neighbor on the box (which would drag in APs and unrelated access-
+        # side switches). Reuse final_rlocs from the main run — the original
+        # Edge reaches the same destination RLOCs via its own underlay, so its
+        # CEF resolution of those RLOCs gives us the right port set.
+        rlocs = ctx.state.get("final_rlocs") or []
+        # INFRA_VN fallback: helpers are the underlay-routed destinations.
+        if not rlocs:
+            dhcp_info = ctx.state.get("dhcpparameters_info")
+            helpers = getattr(dhcp_info, "helper_address", None) or []
+            rlocs = list(helpers)
+        if not rlocs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no final_rlocs / helpers available to resolve original Edge underlay ports.",
+            )
+
+        try:
+            from routingmodules.lisp import CEFForwardingState
+        except Exception as e:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not import CEFForwardingState: {type(e).__name__}: {e}",
+            )
+
+        try:
+            cef = CEFForwardingState(None, orig_hostname)
+            cef.cef_underlay(rlocs, service)
+            cef.underlay_phy(service)
+            ports = list(cef.physical_interfaces or [])
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"CEF underlay resolution failed on original Edge {orig_hostname}: "
+                f"{type(e).__name__}: {e}",
+            )
+
+        if not ports:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"No underlay next-hop ports resolved on original Edge {orig_hostname}.",
+            )
+
+        try:
+            from switchingmodules.cdp import CDPinfo
+        except Exception as e:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not import CDPinfo: {type(e).__name__}: {e}",
+            )
+
+        from traffic_flows.dhcp_troubleshooting import abbrev_port
+
+        source_node_id = "xtr"  # bypass_remap is True
+        add_nodes = []
+        unresolved_ports = []
+        for idx, port in enumerate(ports):
+            neighbors = []
+            try:
+                cdp = CDPinfo(orig_hostname)
+                cdp.cdpneighborinterface(port, service)
+                neighbors = getattr(cdp, "cdpneighbors", []) or []
+            except BaseException:
+                neighbors = []
+
+            if neighbors:
+                n = neighbors[0]
+                device_id = n.get("device_id") or f"neighbor-{idx+1}"
+                platform = n.get("platform") or ""
+                remote = n.get("remoteinterface") or ""
+                mgmt = n.get("management_addresses") or ""
+                if isinstance(mgmt, dict):
+                    mgmt_ip = next(iter(mgmt.keys()), "") if mgmt else ""
+                elif isinstance(mgmt, list):
+                    mgmt_ip = mgmt[0] if mgmt else ""
+                else:
+                    mgmt_ip = str(mgmt)
+                label_lines = [device_id]
+                if platform:
+                    label_lines.append(platform)
+                if mgmt_ip:
+                    label_lines.append(mgmt_ip)
+                add_nodes.append({
+                    "id": f"underlay-orig-{idx+1}",
+                    "role": "underlay-switch",
+                    "label": "\n".join(label_lines),
+                    "ip": mgmt_ip or None,
+                    "cdp_device_id": device_id or None,
+                    "connect_to": source_node_id,
+                    "edge_label": (
+                        f"{abbrev_port(port)} ↔ {abbrev_port(remote)}"
+                        if remote else abbrev_port(port)
+                    ),
+                })
+            else:
+                unresolved_ports.append(port)
+
+        if unresolved_ports:
+            edge_label = ", ".join(abbrev_port(p) for p in unresolved_ports)
+            add_nodes.append({
+                "id": "fabric-cloud",
+                "role": "fabric",
+                "label": "Fabric",
+                "connect_to": source_node_id,
+                "edge_label": edge_label,
+            })
+
+        if not add_nodes:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"No usable underlay neighbors on original Edge {orig_hostname}.",
+            )
+
+        ctx.state["underlay_nodes_orig"] = add_nodes
+        by_source = ctx.state.setdefault("underlay_nodes_by_source", {})
+        by_source[source_node_id] = add_nodes
+
+        body_lines = []
+        for n in add_nodes:
+            if n.get("role") == "underlay-switch":
+                dev = (n.get("label") or "").split("\n", 1)[0]
+                mgmt = n.get("ip") or "?"
+                body_lines.append(f"• {dev} ({mgmt}) via {n.get('edge_label')}")
+        if unresolved_ports:
+            body_lines.append(
+                f"• Fabric (no CDP neighbor) via {', '.join(abbrev_port(p) for p in unresolved_ports)}"
+            )
+        return CheckResult(
+            CheckStatus.OK,
+            "Original Edge underlay neighbors (CEF next-hops):\n" + "\n".join(body_lines),
             data={"add_nodes": add_nodes},
         )
 

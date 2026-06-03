@@ -48,6 +48,14 @@ def exit_program(step, process, subprocess, hostname, error, message):
     logging_info(step, process, subprocess, hostname, message)
     sys.exit("Error: {} | {}".format(error, message))
 
+
+class WirelessRoamWarning(Exception):
+    """Raised when a wireless validation came back empty in a way that's
+    explainable by client roaming (e.g. device-tracking has no entry for the
+    MAC on the original Edge). The Check wrapper translates this into WARN
+    rather than FAIL so the chain keeps going and the badge reflects that
+    this is expected behavior, not a real failure."""
+
 def is_ipv4(s: str) -> bool:
     try:
         return isinstance(ipaddress.ip_address(s), ipaddress.IPv4Address)
@@ -982,30 +990,48 @@ def fabric_edge_mac_validation(step, mac, vnid, rloc, sourcextr, service):
 
     target_mac = mac.lower()
     target_vlan = vlan
+    # The FEW WLC LISP DB output omits vlan_id (see wireless_endpoint_lispinfo
+    # above), so target_vlan may be None for wireless clients. We backfill it
+    # from the matched SISF row below and reuse the resolved value for the
+    # subsequent `show mac address-table` lookup — otherwise the command goes
+    # out as literal `vlan None` and the switch rejects it.
+    resolved_vlan = target_vlan
 
     rows = device_tracking_entry.dbentries
-    matches = [r for r in rows if r.get("mac") == target_mac and r.get("vlan_id") == target_vlan]
+    # The FEW WLC LISP DB output omits `vlan_id`, so target_vlan is often
+    # None for wireless clients. Match on MAC and accept any VLAN; if the
+    # caller supplied a vlan, narrow to it.
+    matches = [r for r in rows if r.get("mac") == target_mac]
+    if target_vlan is not None:
+        matches = [r for r in matches if r.get("vlan_id") == target_vlan]
 
     if len(matches) == 1:
         intf = matches[0].get("interface")
+        matched_vlan = matches[0].get("vlan_id", target_vlan)
+        resolved_vlan = matched_vlan if matched_vlan is not None else target_vlan
         msg1 = "Fabric Edge - Device-Tracking Match"
         message = (
-            f"Device-tracking captured endpoint {target_mac} on VLAN {target_vlan} via interface {intf}."
+            f"Device-tracking captured endpoint {target_mac} on VLAN {matched_vlan} via interface {intf}."
         )
         logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
         step += 1
     elif len(matches) == 0:
-        error = "Fabric Edge - Device-Tracking Missing Endpoint"
+        warn_title = "Fabric Edge - Device-Tracking Missing Endpoint"
+        vlan_phrase = f" on VLAN {target_vlan}" if target_vlan is not None else ""
         message = (
-            f"Device-tracking did not capture endpoint {target_mac} on VLAN {target_vlan}. "
-            f"Remediation: verify the endpoint is active, confirm the correct VLAN, and check device-tracking "
-            f"and access-tunnel learning on the fabric edge."
+            f"Device-tracking did not capture endpoint {target_mac}{vlan_phrase} on "
+            f"{hostname}. This is commonly caused by the wireless client having roamed off this "
+            f"Edge — the validation is being run against the originally-supplied Edge, not the "
+            f"Edge currently hosting the client. Verify the endpoint's current location before "
+            f"treating this as a real failure."
         )
-        exit_program(step, process, subprocess, hostname, error, message)
+        logging_warning(step, process, subprocess, hostname, warn_title + " | " + message)
+        raise WirelessRoamWarning(warn_title + " | " + message)
     else:
         error = "Fabric Edge - Device-Tracking Duplicate Matches"
+        vlan_phrase = f" on VLAN {target_vlan}" if target_vlan is not None else ""
         message = (
-            f"Multiple device-tracking entries were found for endpoint {target_mac} on VLAN {target_vlan}: "
+            f"Multiple device-tracking entries were found for endpoint {target_mac}{vlan_phrase}: "
             f"{[m.get('interface') for m in matches]}. Remediation: investigate duplicate learns or multi-interface "
             f"conditions on the fabric edge."
         )
@@ -1042,7 +1068,7 @@ def fabric_edge_mac_validation(step, mac, vnid, rloc, sourcextr, service):
     logging_info(step, process, subprocess, hostname, msg1 + " | " + message)
     # CTS Binding Entry (If IP is available)
     mac_table = mac_learning(hostname)
-    mac_table.mac_learning_mac(mac,vlan,service)
+    mac_table.mac_learning_mac(mac, resolved_vlan, service)
 
     port = mac_table.port
     type = mac_table.type

@@ -27,7 +27,7 @@ from switchingmodules.interfaces import Interfaces
 LHR Validations:
 
 -) Identification of potential CDP neighbor (optional); mapping nexthop interface with L3 information
--) Identification of RPF neighbor (Lo0 to Device name to Radkit Inventory)
+-) Identification of RPF neighbor (Lo0 to Device name to RSA Inventory)
 -) Identification of RPF upstream interface (CDP and L3)
 -) Carrying RP information, how many RPs do exist? Are there more than 1? How can we tell.?
 -) DO intermediate nodes exist?

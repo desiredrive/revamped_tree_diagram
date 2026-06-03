@@ -148,7 +148,7 @@ def fabric_sites(siteNameHierarchy, dnac, service,step):
 
     process = 'deviceProfiler'
     subprocess = '[fabricSites]'
-    isv1 = True  #Support for non v2 capable RADKIT Services
+    isv1 = True  #Support for non v2 capable RSA Services
     #sitev2_api = "/dna/intent/api/v2/site?groupNameHierarchy={}".format(siteNameHierarchy)
     fabricsite_api = "/dna/intent/api/v1/sda/fabricSites"
     #sitev2_response = get_catc_api(dnac,sitev2_api,service)
@@ -211,8 +211,8 @@ class Device:
 
             #If the Device does not exist
             except (IndexError, ValueError):
-                error = "RADKIT Error, Finding Device"
-                message = "Device {} not in RADKIT inventory, make sure this device is added as part of RADKIT Inventory".format(
+                error = "RSA Error, Finding Device"
+                message = "Device {} not in RSA inventory, make sure this device is added as part of RSA Inventory".format(
                     self.mgmtip)
                 logging_error(self.step, process, subprocess, self.mgmtip, error)
                 logging_info(self.step, process, subprocess, self.mgmtip, message)
@@ -270,7 +270,7 @@ class Device:
             self.reachabilitystatus = netdevice_response['reachabilityStatus']
             # CatC stores the device's actual configured hostname (FQDN as
             # advertised in CDP), distinct from self.hostname which is the
-            # RADKIT inventory key. Used to match CDP neighbors back to a
+            # RSA inventory key. Used to match CDP neighbors back to a
             # profiled device.
             self.catc_hostname = netdevice_response.get('hostname')
         except KeyError:
