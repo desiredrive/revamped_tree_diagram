@@ -8,7 +8,7 @@ fields those later checks depend on.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_shared import _legacy_fail
+from checks.shared import _legacy_fail
 from radkit_cli import get_catc_api, get_any_single_output, get_single_output_genie
 
 
@@ -963,7 +963,7 @@ class LocalSgt(Check):
         # so xtr_loopback may not be set. Resolve it lazily from CatC if we
         # have the uuid + service. Cache for any later check that needs it.
         if not loopback and service and ctx.state.get("xtr_uuid") and ctx.state.get("catc_name"):
-            from checks_lisp import _query_loopback0
+            from checks.lisp import _query_loopback0
             ip, mask, err = _query_loopback0(ctx)
             if ip:
                 loopback = ip

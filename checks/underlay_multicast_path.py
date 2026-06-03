@@ -34,7 +34,7 @@ def _wrap_fail(name: str, exc: BaseException) -> CheckResult:
 
 def _safe_mroute(host, vrf, group, source, service):
     """Reuse the safe-mroute helper from the RP module (handles Genie KeyError)."""
-    from checks_underlay_multicast_rp import _safe_mroute_entries
+    from checks.underlay_multicast_rp import _safe_mroute_entries
     return _safe_mroute_entries(host, vrf, group, source, service)
 
 

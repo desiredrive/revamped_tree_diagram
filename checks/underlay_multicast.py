@@ -135,7 +135,7 @@ class _UmcastBase(Check):
 
 def build_underlay_multicast_chain(side: str = "fhr") -> list:
     """Return the ordered list of multicast checks for the given side."""
-    from checks_underlay_multicast_gates import build_pim_gates_for_side
+    from checks.underlay_multicast_gates import build_pim_gates_for_side
     return [
         UmcastDeviceProfile(side),
         *build_pim_gates_for_side(side),

@@ -14,7 +14,7 @@ when no VACL is configured. Wireless (FEW) source ports always SKIP PACL.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_ew_shared import _legacy_fail, _need, _skip_if_l3
+from checks.ew_shared import _legacy_fail, _need, _skip_if_l3
 
 
 _VIRTUAL_PORT_PREFIXES = ("AccessTunnel", "Ac", "LISP", "Tunnel")

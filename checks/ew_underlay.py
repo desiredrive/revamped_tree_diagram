@@ -5,7 +5,7 @@ on intra-XTR (same Edge) and on L3 east-west.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_ew_shared import (
+from checks.ew_shared import (
     _legacy_fail,
     _need,
     _skip_if_l3,

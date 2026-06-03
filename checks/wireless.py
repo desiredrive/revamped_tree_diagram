@@ -17,7 +17,7 @@ State produced by the phase (consumed by downstream wired checks):
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_shared import _legacy_fail
+from checks.shared import _legacy_fail
 from radkit_cli import get_catc_api
 
 
@@ -897,7 +897,7 @@ class WirelessFabricEdgeRedirect(Check):
         remap = ctx.state.setdefault("node_remap", {})
         remap["xtr"] = new_id
 
-        from checks_underlay import OriginalEdgeUnderlayDiscovery
+        from checks.underlay import OriginalEdgeUnderlayDiscovery
         return CheckResult(
             CheckStatus.OK,
             f"Wireless endpoint roamed: {prior} → {new_xtr}. Remaining wired "

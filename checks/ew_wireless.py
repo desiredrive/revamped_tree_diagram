@@ -52,7 +52,7 @@ class EwDestWirelessWlcDiscovery(Check):
         from wirelessmodules.wirelesscore import (
             WirelessControllerInfo, WirelessEndpointMac,
         )
-        from checks_ew_shared import _legacy_fail
+        from checks.ew_shared import _legacy_fail
 
         service = ctx.service
         catc = ctx.state.get("catc_name")
@@ -425,7 +425,7 @@ class EwDestWirelessFabricEdgeMac(Check):
         except WirelessRoamWarning as w:
             return CheckResult(CheckStatus.WARN, str(w))
         except BaseException as e:
-            from checks_ew_shared import _legacy_fail
+            from checks.ew_shared import _legacy_fail
             return _legacy_fail(e, "fabric_edge_mac_validation (dest)")
         return CheckResult(
             CheckStatus.OK,
@@ -454,7 +454,7 @@ class EwDestWirelessRoamingHistory(Check):
             hist = WirelessEndpointMac(wlc, mac)
             hist.fabric_roamming(ctx.service)
         except BaseException as e:
-            from checks_ew_shared import _legacy_fail
+            from checks.ew_shared import _legacy_fail
             return _legacy_fail(e, "WirelessEndpointMac.fabric_roamming (dest)")
         events = (getattr(hist, "roaminghistory", {}) or {}).get("events") or []
         if not events:

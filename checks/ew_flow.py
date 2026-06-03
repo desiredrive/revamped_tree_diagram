@@ -7,7 +7,7 @@ check trips the _skip_if_l3 gate cleanly.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_ew_shared import (
+from checks.ew_shared import (
     _legacy_fail,
     _need,
     _build_src_xtr_shim,

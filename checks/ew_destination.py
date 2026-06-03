@@ -6,7 +6,7 @@ unless the check still makes sense locally (dest endpoint onboarding does).
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_ew_shared import (
+from checks.ew_shared import (
     _legacy_fail,
     _need,
     _skip_if_l3,
@@ -254,7 +254,7 @@ class EwRemoteMapCache(Check):
                 # via RSA (which fails when the hostname isn't in the inventory).
                 ctx.state["umcast_existing_device"] = srcxtr
                 try:
-                    from checks_underlay_multicast import build_underlay_multicast_chain
+                    from checks.underlay_multicast import build_underlay_multicast_chain
                     queued = list(build_underlay_multicast_chain("fhr"))
                     # LHR side: only when we have a distinct destination XTR.
                     dstxtr = ctx.state.get("ew_dstxtr")
@@ -272,28 +272,28 @@ class EwRemoteMapCache(Check):
                         ctx.state["umcast_dst_existing_device"] = dstxtr
                         queued.extend(build_underlay_multicast_chain("lhr"))
                         try:
-                            from checks_underlay_multicast_correlation import (
+                            from checks.underlay_multicast_correlation import (
                                 build_underlay_multicast_correlation_chain,
                             )
                             queued.extend(build_underlay_multicast_correlation_chain())
                         except Exception:
                             pass
                         try:
-                            from checks_underlay_multicast_rp import (
+                            from checks.underlay_multicast_rp import (
                                 build_underlay_multicast_rp_chain,
                             )
                             queued.extend(build_underlay_multicast_rp_chain())
                         except Exception:
                             pass
                         try:
-                            from checks_underlay_multicast_sg import (
+                            from checks.underlay_multicast_sg import (
                                 build_underlay_multicast_sg_chain,
                             )
                             queued.extend(build_underlay_multicast_sg_chain())
                         except Exception:
                             pass
                         try:
-                            from checks_underlay_multicast_path import (
+                            from checks.underlay_multicast_path import (
                                 build_underlay_multicast_path_chain,
                             )
                             queued.extend(build_underlay_multicast_path_chain())
@@ -363,7 +363,7 @@ class EwDestEndpointOnboarding(Check):
         # source-side wireless chain (WirelessFabricEdgeMac etc.) already
         # covers the same MAC on the same Edge.
         result_data = {"add_nodes": [node]}
-        from checks_ew_wireless import is_access_tunnel_port, build_ew_dest_wireless_chain
+        from checks.ew_wireless import is_access_tunnel_port, build_ew_dest_wireless_chain
         if (
             not ctx.state.get("ew_is_intra_xtr")
             and is_access_tunnel_port(getattr(dstep, "sourceport", None))
@@ -396,7 +396,7 @@ class EwDestSisf(Check):
                 CheckStatus.SKIP,
                 "Skipped — destination XTR / endpoint not available.",
             )
-        from checks_ew_flow import _render_endpoint_sisf
+        from checks.ew_flow import _render_endpoint_sisf
         return _render_endpoint_sisf(
             dstep, getattr(dstxtr, "hostname", None), ctx.service, side="destination"
         )
@@ -438,6 +438,6 @@ class EwDestAuthenticationSession(Check):
                 f"authen_session_for_interface raised {type(e).__name__}: {e}",
             )
         ctx.state["ew_dst_authensessiondetails"] = auth_details
-        from checks_profile import _format_authen_session
+        from checks.profile import _format_authen_session
         body = _format_authen_session(auth_details, hostname, port)
         return CheckResult(CheckStatus.OK, body)

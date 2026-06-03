@@ -10,7 +10,7 @@ shared profile / fabric / role checks.
 from types import SimpleNamespace
 
 from checks import CheckResult, CheckStatus, RunContext
-from checks_shared import _legacy_fail  # re-exported
+from checks.shared import _legacy_fail  # re-exported
 
 __all__ = [
     "_legacy_fail",

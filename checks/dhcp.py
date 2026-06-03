@@ -8,7 +8,7 @@ checks_underlay / checks_border.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_shared import _legacy_fail, _build_edge_shim
+from checks.shared import _legacy_fail, _build_edge_shim
 from radkit_cli import get_catc_api, get_any_single_output, get_single_output_genie
 
 

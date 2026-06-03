@@ -5,7 +5,7 @@ selected destination, and underlay CDP discovery for next-hops.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_shared import _legacy_fail, _build_edge_shim
+from checks.shared import _legacy_fail, _build_edge_shim
 
 
 class EdgeForwarding(Check):

@@ -12,12 +12,12 @@ This module just imports them and orders them per scenario.
 """
 
 from checks import Check
-from checks_common import (
+from checks.common import (
     ValidateVrfParam,
     DetectInfraVn,
     ProfileXtrHostname,
 )
-from checks_profile import (
+from checks.profile import (
     ResolveCatcName,
     ProfileXtrNetworkDevice,
     ProfileXtrFabricDevice,
@@ -28,7 +28,7 @@ from checks_profile import (
     AuthenticationSessionCheck,
     LocalSgt,
 )
-from checks_lisp import (
+from checks.lisp import (
     CpLoopback,
     RlocDefinition,
     PitrValidation,
@@ -36,7 +36,7 @@ from checks_lisp import (
     LispParameters,
     SisfDeviceTracking,
 )
-from checks_dhcp import (
+from checks.dhcp import (
     PoolIdentification,
     DhcpParameters,
     DhcpSnoopingValidation,
@@ -46,13 +46,13 @@ from checks_dhcp import (
     DhcpSnoopingClientStats,
     LocalPolicies,
 )
-from checks_underlay import (
+from checks.underlay import (
     EdgeForwarding,
     UnderlayReachability,
     UnderlayCdpDiscovery,
 )
-from checks_border import BorderDiscovery
-from checks_wireless import (
+from checks.border import BorderDiscovery
+from checks.wireless import (
     WirelessWlcDiscovery,
     WirelessEndpointProfile,
     WirelessEndpointSsid,
@@ -76,8 +76,8 @@ from checks_wireless import (
     WirelessRoamingHistory,
     WirelessL2LispStats,
 )
-from checks_ew_flow import EwSourceEndpointOnboarding, EwFlowElection, EwSourceSisf
-from checks_ew_l2lisp import (
+from checks.ew_flow import EwSourceEndpointOnboarding, EwFlowElection, EwSourceSisf
+from checks.ew_l2lisp import (
     EwSourceL2LispParameters,
     EwSourceEtrRegistration,
     EwL2LispAclEvaluation,
@@ -85,7 +85,7 @@ from checks_ew_l2lisp import (
     EwDestArResolution,
     EwIntraVsInter,
 )
-from checks_ew_destination import (
+from checks.ew_destination import (
     EwDestXtrLookup,
     EwDestXtrProfiling,
     EwFabricSiteComparison,
@@ -94,7 +94,7 @@ from checks_ew_destination import (
     EwDestSisf,
     EwDestAuthenticationSession,
 )
-from checks_ew_underlay import (
+from checks.ew_underlay import (
     EwUnderlayRibLookup,
     EwUnderlayCef,
     EwUnderlayPhysical,
@@ -102,8 +102,8 @@ from checks_ew_underlay import (
     EwUnderlayPingNoMtu,
     EwUnderlayPingMtu,
 )
-from checks_ew_security import EwSourceCts, EwDestCts, EwCtsRules
-from checks_ew_acl import EwSourcePacl, EwSourceVacl, EwDestPacl, EwDestVacl
+from checks.ew_security import EwSourceCts, EwDestCts, EwCtsRules
+from checks.ew_acl import EwSourcePacl, EwSourceVacl, EwDestPacl, EwDestVacl
 
 
 def _normalize_payload(payload: dict) -> None:
@@ -269,16 +269,16 @@ def build_check_chain(payload: dict) -> list[Check]:
             EwCtsRules(),
         ]
     if scenario == "underlay_multicast":
-        from checks_underlay_multicast_seed import UmcastSeed, UmcastDstXtrProfile
-        from checks_underlay_multicast import build_underlay_multicast_chain
-        from checks_underlay_multicast_correlation import (
+        from checks.underlay_multicast_seed import UmcastSeed, UmcastDstXtrProfile
+        from checks.underlay_multicast import build_underlay_multicast_chain
+        from checks.underlay_multicast_correlation import (
             build_underlay_multicast_correlation_chain,
         )
-        from checks_underlay_multicast_rp import (
+        from checks.underlay_multicast_rp import (
             build_underlay_multicast_rp_chain,
         )
-        from checks_underlay_multicast_sg import build_underlay_multicast_sg_chain
-        from checks_underlay_multicast_path import build_underlay_multicast_path_chain
+        from checks.underlay_multicast_sg import build_underlay_multicast_sg_chain
+        from checks.underlay_multicast_path import build_underlay_multicast_path_chain
         chain = [
             ValidateVrfParam(),
             ProfileXtrHostname(),

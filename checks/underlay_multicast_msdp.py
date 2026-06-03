@@ -14,7 +14,7 @@ Per-RP state keys (idx 1, 2, ...):
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_underlay_multicast_rp import (
+from checks.underlay_multicast_rp import (
     _node_id,
     _key,
     _disabled_flag,

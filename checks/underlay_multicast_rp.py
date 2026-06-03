@@ -172,7 +172,7 @@ class UmcastRpDiscovery(Check):
             queued.extend(_per_rp_chain(idx))
         if len(profiled) >= 2:
             # Anycast-RP set — validate MSDP synchronization between replicas.
-            from checks_underlay_multicast_msdp import build_msdp_chain_for_rp
+            from checks.underlay_multicast_msdp import build_msdp_chain_for_rp
             for idx, _pd in enumerate(profiled, start=1):
                 queued.extend(build_msdp_chain_for_rp(idx))
             queued.append(UmcastRpAnycastConsistency())
@@ -194,7 +194,7 @@ class UmcastRpDiscovery(Check):
 
 
 def _per_rp_chain(idx: int) -> list:
-    from checks_underlay_multicast_gates import build_pim_gates_for_rp
+    from checks.underlay_multicast_gates import build_pim_gates_for_rp
     return [
         UmcastRpProfile(idx),
         *build_pim_gates_for_rp(idx),

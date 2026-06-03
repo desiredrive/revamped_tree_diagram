@@ -5,7 +5,7 @@ collection, the 16 split BorderValidate steps, and ACL/multi-border checks.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_shared import _legacy_fail
+from checks.shared import _legacy_fail
 
 
 def _border_label(b, idx):
@@ -87,7 +87,7 @@ class BorderDiscovery(Check):
         # After all per-border work, run the fabric-wide steps.
         followups.append(MultiBorderValidation())
         followups.append(BorderInterconnect())
-        from checks_dhcp import DhcpServerCompatibility
+        from checks.dhcp import DhcpServerCompatibility
         followups.append(DhcpServerCompatibility())
 
         reachable = sum(

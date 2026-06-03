@@ -6,7 +6,7 @@ matter locally too). On intra-XTR the destination XTR == source XTR.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from checks_ew_shared import (
+from checks.ew_shared import (
     _legacy_fail,
     _need,
     _skip_if_l3,
