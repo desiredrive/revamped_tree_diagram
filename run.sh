@@ -67,12 +67,16 @@ if [ "$NEED_INSTALL" = "1" ]; then
   echo "Installing dependencies ..."
   pip install --upgrade pip
   pip install -r requirements.txt
-  # --find-links (no --no-index): cisco-radkit-* resolve from the local
-  # folder (they don't exist on pypi), and transitive deps like tabulate
-  # come from pypi.
-  pip install --upgrade --find-links "$WHEEL_DIR" \
-    cisco-radkit-client cisco-radkit-common \
-    cisco-radkit-genie cisco-radkit-service
+  # Resolution order:
+  #   1. local radkit-wheels/ (offline / air-gapped engineers)
+  #   2. https://radkit.cisco.com/pip (Cisco's official index — avoids the
+  #      PyPI stub package that errors out with "package has been relocated")
+  #   3. PyPI for transitive deps (tabulate, pyats, etc.)
+  pip install --upgrade \
+    --find-links "$WHEEL_DIR" \
+    --extra-index-url https://radkit.cisco.com/pip \
+    cisco-radkit-client==1.9.9 cisco-radkit-common==1.9.9 \
+    cisco-radkit-genie==1.9.9 cisco-radkit-service==1.9.9
   touch "$STAMP"
 fi
 

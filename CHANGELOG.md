@@ -4,6 +4,20 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.7] — 2026-06-03
+
+### Fixed
+- **PyPI stub broke first-run install** — Cisco's RADKit packages on
+  PyPI are now relocation stubs that error with *"This package has been
+  relocated!"* and point at `https://radkit.cisco.com/pip`. beta.5/.6
+  let pip see PyPI and tripped over the stub. Launchers now pass
+  `--extra-index-url https://radkit.cisco.com/pip` so pip resolves
+  RADKit from Cisco's official index (or the local `radkit-wheels/`
+  folder for air-gapped installs), with PyPI still available for
+  transitive deps.
+- **Pinned to RADKit 1.9.9** explicitly so engineers always land on the
+  same version regardless of what pip's index lists.
+
 ## [1.0.0-beta.6] — 2026-06-03
 
 ### Changed

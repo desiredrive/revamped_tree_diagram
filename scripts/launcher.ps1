@@ -84,11 +84,12 @@ if ($needInstall) {
     & $pyExe -m pip install --quiet --upgrade pip
     & $pyExe @($pipInstall + @("-r", "requirements.txt"))
     if ($LASTEXITCODE -ne 0) { Die "pip install -r requirements.txt failed." }
-    # --find-links without --no-index: cisco-radkit-* from the local folder,
-    # transitive deps (tabulate, etc.) from pypi.
-    & $pyExe @($pipInstall + @("--upgrade", "--find-links", $wheelDir,
-        "cisco-radkit-client", "cisco-radkit-common",
-        "cisco-radkit-genie", "cisco-radkit-service"))
+    # Resolution order: local radkit-wheels/, then Cisco's index, then PyPI.
+    & $pyExe @($pipInstall + @("--upgrade",
+        "--find-links", $wheelDir,
+        "--extra-index-url", "https://radkit.cisco.com/pip",
+        "cisco-radkit-client==1.9.9", "cisco-radkit-common==1.9.9",
+        "cisco-radkit-genie==1.9.9", "cisco-radkit-service==1.9.9"))
     if ($LASTEXITCODE -ne 0) { Die "Failed to install RADKit wheels from $wheelDir." }
     New-Item -ItemType File -Path $stamp -Force | Out-Null
 }

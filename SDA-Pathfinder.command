@@ -64,11 +64,14 @@ if [ "$NEED_INSTALL" = "1" ]; then
     log "Installing dependencies (one-time, ~1–2 min)..."
     pip install --quiet --upgrade pip
     python -m pip install --quiet -r requirements.txt
-    # --find-links without --no-index: cisco-radkit-* come from the local
-    # folder, transitive deps (tabulate, etc.) come from pypi.
-    python -m pip install --quiet --upgrade --find-links "$WHEEL_DIR" \
-        cisco-radkit-client cisco-radkit-common \
-        cisco-radkit-genie cisco-radkit-service
+    # Resolution order: local radkit-wheels/, then Cisco's index
+    # (https://radkit.cisco.com/pip — avoids the PyPI stub), then PyPI
+    # for transitives (tabulate, pyats, etc.).
+    python -m pip install --quiet --upgrade \
+        --find-links "$WHEEL_DIR" \
+        --extra-index-url https://radkit.cisco.com/pip \
+        cisco-radkit-client==1.9.9 cisco-radkit-common==1.9.9 \
+        cisco-radkit-genie==1.9.9 cisco-radkit-service==1.9.9
     touch "$STAMP"
 fi
 
