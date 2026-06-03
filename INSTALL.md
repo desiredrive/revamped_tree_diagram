@@ -85,3 +85,18 @@ launcher continues with the current code — no harm done.
 
 **Port 8000 in use** — close whatever else is using it, or edit the
 `uvicorn` line at the bottom of the launcher to use a different port.
+
+**RADKit install still fails (last-resort manual install)** — if the
+launcher's pip step keeps failing, run these by hand from the project
+folder:
+```
+source .venv/bin/activate          # macOS/Linux
+# .venv\Scripts\activate           # Windows (PowerShell)
+cd radkit-wheels
+python3 -m pip install --find-links . "cisco_radkit_common==1.9.9"
+python3 -m pip install --find-links . "cisco_radkit_service==1.9.9"
+python3 -m pip install --find-links . "cisco_radkit_client==1.9.9"
+python3 -m pip install --find-links . "cisco_radkit_genie==1.9.9"
+cd ..
+```
+Then re-run the launcher — it skips the install step on second run.
