@@ -4,6 +4,30 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.2] — 2026-06-03
+
+Maintenance release: repo cleanup, no behavior changes.
+
+### Changed
+- **Repo layout** — collapsed 25 `checks_*.py` modules at the root into a
+  single `checks/` package (`checks/base.py`, `checks/dhcp.py`,
+  `checks/ew_*.py`, `checks/underlay_multicast*.py`, etc.).
+  `from checks import Check, CheckResult, CheckStatus, RunContext` still
+  works via package re-export.
+- **`run.sh`** now installs the bundled RADKit wheels from
+  `vendor/linux-x86_64/` on first launch (previously skipped — only the
+  macOS launcher did this correctly).
+- **`INSTALL.md`** spells out where to put RADKit wheels per platform
+  and points at the GitHub Release zip for non-git installs.
+
+### Removed
+- Legacy CLI scripts that the FastAPI app does not import: `main.py`,
+  `sandbox.py`, `genie_sandbox.py`, `offlinesandbox.py`, `mcastflow.py`,
+  `dhcptroubleshooting.py` (the live one lives at
+  `traffic_flows/dhcp_troubleshooting.py`), `hostonboardtshoot.py`,
+  `wirelesstshoot.py`, `payloads.py`, `event_bus.py`,
+  `DocumentationReference.py`, `api_reference`.
+
 ## [1.0.0-beta.1] — 2026-06-02
 
 First public beta. Web-based SDA fabric troubleshooter built on FastAPI +
