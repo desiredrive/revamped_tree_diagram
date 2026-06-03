@@ -4,6 +4,25 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.3] — 2026-06-03
+
+Install-flow improvements for cross-platform TAC use.
+
+### Changed
+- **Single drop folder for RADKit wheels** — collapsed the per-platform
+  `vendor/<platform>/` tree into a single `radkit-wheels/` folder.
+  Engineers download the four wheels for their OS from
+  https://radkit.cisco.com/downloads/release/ and drop them directly
+  into that folder; pip picks the matching tag automatically. Linux
+  wheels remain bundled, so Linux is still zero-touch.
+- **Launchers** (`run.sh`, `SDA-Pathfinder.command`,
+  `scripts/launcher.ps1`) print a clear "where to download / where to
+  drop / re-run me" message and exit when `radkit-wheels/` is empty,
+  instead of silently falling through to a broken venv.
+
+### Removed
+- `run.bat` (redundant with `SDA-Pathfinder.bat` → `launcher.ps1`).
+
 ## [1.0.0-beta.2] — 2026-06-03
 
 Maintenance release: repo cleanup, no behavior changes.

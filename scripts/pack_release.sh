@@ -32,33 +32,31 @@ rsync -a \
   --exclude 'collection_logfile.txt' \
   --exclude 'script_logs.txt' \
   --exclude '*.deb' \
-  --exclude 'vendor/macos-arm64/*' \
-  --exclude 'vendor/macos-x86_64/*' \
-  --exclude 'vendor/windows-x86_64/*' \
   --exclude '.claude' \
   --exclude '.vscode' \
   ./ "${STAGE}/"
 
 # Sanity: make sure linux wheels survived.
-if ! ls "${STAGE}/vendor/linux-x86_64/"*.whl > /dev/null 2>&1; then
-  echo "ERROR: Linux wheels missing from staged tree." >&2
+if ! ls "${STAGE}/radkit-wheels/"cisco_radkit_*.whl > /dev/null 2>&1; then
+  echo "ERROR: RADKit wheels missing from staged tree." >&2
   exit 1
 fi
 
 # Drop a SUPPORTED-PLATFORMS note so TAC users know what this beta covers.
 cat > "${STAGE}/SUPPORTED-PLATFORMS.txt" <<'EOF'
-SDA Pathfinder 1.0.0-beta.1 — supported platforms
+SDA Pathfinder 1.0.0-beta.2 — supported platforms
 ==================================================
 
-This beta ships RADKit wheels for Linux x86_64 (Python 3.12) only.
-
 Tested:
-  - RHEL / CentOS / Rocky 8+ (x86_64)
-  - Ubuntu 22.04 / 24.04 (x86_64)
+  - RHEL / CentOS / Rocky 8+ (x86_64) — RADKit wheels bundled.
+  - Ubuntu 22.04 / 24.04 (x86_64)     — RADKit wheels bundled.
+  - macOS 13+ (Intel + Apple Silicon) — drop wheels into radkit-wheels/.
+  - Windows 10 / 11 (x86_64)          — drop wheels into radkit-wheels/.
 
-macOS (Intel + Apple Silicon) and Windows wheels are not bundled in this
-beta. To run on those platforms, install RADKit 1.9.9 from cisco.com into
-your Python 3.12 venv before launching.
+For macOS and Windows, download the four RADKit 1.9.9 cp312 wheels
+for your OS from https://radkit.cisco.com/downloads/release/ and drop
+them into the project's radkit-wheels/ folder before launching. See
+INSTALL.md for the exact tag suffixes.
 EOF
 
 cd "${OUT_DIR}"

@@ -25,17 +25,27 @@ SDA Pathfinder talks to fabric devices through Cisco RADKit.
 
 | Platform           | Action                                                                 |
 |--------------------|------------------------------------------------------------------------|
-| Linux x86_64       | **Already bundled** in `vendor/linux-x86_64/` — nothing to do.         |
-| macOS (Intel/ARM)  | Download RADKit 1.9.9 cp312 wheels, drop into `vendor/macos-arm64/` or `vendor/macos-x86_64/`. |
-| Windows x86_64     | Download RADKit 1.9.9 cp312 wheels, drop into `vendor/windows-x86_64/`. |
+| Linux x86_64       | **Already bundled** in `radkit-wheels/` — nothing to do.               |
+| macOS / Windows    | Download four wheels and drop them into `radkit-wheels/`.              |
 
-Where to get the wheels: https://radkit.cisco.com/downloads/release/  → pick **1.9.9** → grab the four cp312 wheels for your OS:
-- `cisco_radkit_client-1.9.9-cp312-…-<platform>.whl`
-- `cisco_radkit_common-1.9.9-cp312-…-<platform>.whl`
-- `cisco_radkit_genie-1.9.9-cp312-…-<platform>.whl`
-- `cisco_radkit_service-1.9.9-cp312-…-<platform>.whl`
+**For macOS / Windows:**
 
-Drop all four into the matching `vendor/<platform>/` folder. The launcher installs them automatically on next start.
+1. Go to https://radkit.cisco.com/downloads/release/ and pick **1.9.9**.
+2. Download the four cp312 wheels for your OS:
+   - `cisco_radkit_client-1.9.9-cp312-...whl`
+   - `cisco_radkit_common-1.9.9-cp312-...whl`
+   - `cisco_radkit_genie-1.9.9-cp312-...whl`
+   - `cisco_radkit_service-1.9.9-cp312-...whl`
+
+   Pick the right tag suffix:
+   - macOS Apple Silicon → `macosx_11_0_arm64`
+   - macOS Intel → `macosx_10_15_x86_64`
+   - Windows 64-bit → `win_amd64`
+3. Drop all four into the project's `radkit-wheels/` folder.
+4. Launch — the script installs them automatically.
+
+You only do this once per machine. Mixing wheels for different platforms
+in the folder is fine; pip picks the matching ones and ignores the rest.
 
 ## Run it
 
@@ -45,9 +55,10 @@ Drop all four into the matching `vendor/<platform>/` folder. The launcher instal
 | Windows  | Double-click **`SDA-Pathfinder.bat`**            |
 | Linux    | `./run.sh` from a terminal in the project folder |
 
-That's it. On first run the launcher creates a virtualenv, installs
-dependencies, and opens your browser at `http://127.0.0.1:8000`. Every
-subsequent run pulls the latest changes from GitHub and starts the server.
+On first run the launcher creates a virtualenv, installs dependencies
++ RADKit wheels, and opens your browser at `http://127.0.0.1:8000`.
+Every subsequent run pulls the latest changes from GitHub and starts
+the server.
 
 ## Stopping
 Close the terminal window, or press **Ctrl+C** inside it.
@@ -60,9 +71,12 @@ Just relaunch — the launcher does `git pull --ff-only` automatically.
 **"Python 3.12+ is required"** — install Python from python.org, then re-run.
 On Windows, make sure "Add to PATH" was checked during install.
 
-**Login fails / `radkit_client` import error** — the matching RSA wheels
-aren't present for your platform. See `vendor/README.md` for which files
-go where.
+**"RADKit wheels not found in ./radkit-wheels/"** — see the RADKit section
+above. Drop the four wheels into that folder and re-run the launcher.
+
+**Login fails / `radkit_client` import error** — the wheels you dropped
+don't match this OS / Python. They must be `cp312` wheels for your
+platform (see tag suffix list above).
 
 **"git pull skipped"** — you're either offline or have local edits. The
 launcher continues with the current code — no harm done.

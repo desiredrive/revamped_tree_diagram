@@ -30,6 +30,22 @@ if (-not $pyCmd) {
 }
 Log "Using $((& $pyCmd[0] @($pyCmd[1..($pyCmd.Count-1)] + '--version') 2>&1))"
 
+$wheelDir = "radkit-wheels"
+$wheels = @(Get-ChildItem $wheelDir -Filter "cisco_radkit_*.whl" -ErrorAction SilentlyContinue)
+if ($wheels.Count -eq 0) {
+    Die @"
+RADKit wheels not found.
+
+Download the four RADKit 1.9.9 cp312 wheels for Windows from:
+   https://radkit.cisco.com/downloads/release/
+
+Drop them into:
+   $((Get-Location).Path)\$wheelDir\
+
+Then run this launcher again.
+"@
+}
+
 # Pull latest from GitHub if this is a git checkout.
 if ((Test-Path ".git") -and (Get-Command git -ErrorAction SilentlyContinue)) {
     Log "Checking for updates..."
@@ -45,16 +61,15 @@ if (-not (Test-Path ".venv")) {
 $pyExe = ".\.venv\Scripts\python.exe"
 $pipInstall = @("-m", "pip", "install", "--quiet")
 
-# Install deps if requirements or vendor wheels changed.
+# Install deps if requirements or wheels changed.
 $stamp = ".venv\.installed"
 $needInstall = $false
 if (-not (Test-Path $stamp)) { $needInstall = $true }
 elseif ((Get-Item "requirements.txt").LastWriteTime -gt (Get-Item $stamp).LastWriteTime) { $needInstall = $true }
-$vendorDir = "vendor\windows-x86_64"
-if ((Test-Path $vendorDir) -and (Test-Path $stamp)) {
+if (Test-Path $stamp) {
     $stampTime = (Get-Item $stamp).LastWriteTime
-    Get-ChildItem $vendorDir -Filter *.whl -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.LastWriteTime -gt $stampTime) { $needInstall = $true }
+    foreach ($w in $wheels) {
+        if ($w.LastWriteTime -gt $stampTime) { $needInstall = $true }
     }
 }
 if ($needInstall) {
@@ -62,14 +77,10 @@ if ($needInstall) {
     & $pyExe -m pip install --quiet --upgrade pip
     & $pyExe @($pipInstall + @("-r", "requirements.txt"))
     if ($LASTEXITCODE -ne 0) { Die "pip install -r requirements.txt failed." }
-    $wheels = @(Get-ChildItem $vendorDir -Filter *.whl -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-    if ($wheels.Count -gt 0) {
-        & $pyExe @($pipInstall + @("--upgrade") + $wheels)
-        if ($LASTEXITCODE -ne 0) { Die "Failed to install RSA wheels from $vendorDir." }
-    } else {
-        Log "WARNING: no RSA wheels in $vendorDir - login will fail."
-        Log "Drop cisco_radkit_*.whl files into $vendorDir\ and re-run."
-    }
+    # pip picks the wheel matching this interpreter; non-matching wheels are
+    # skipped without error, so dropping multiple platforms here is fine.
+    & $pyExe @($pipInstall + @("--upgrade") + ($wheels | ForEach-Object { $_.FullName }))
+    if ($LASTEXITCODE -ne 0) { Die "Failed to install RADKit wheels from $wheelDir." }
     New-Item -ItemType File -Path $stamp -Force | Out-Null
 }
 

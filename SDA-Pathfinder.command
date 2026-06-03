@@ -25,13 +25,15 @@ done
 [ -n "$PY" ] || die "Python 3.12+ is required.\n\nInstall from python.org or run: brew install python@3.12"
 log "Using $($PY --version)"
 
-# Detect arch for vendor wheel selection.
+# Detect arch (informational only — wheels are tag-matched by pip).
 ARCH=$(uname -m)
-case "$ARCH" in
-    arm64) VENDOR_DIR="vendor/macos-arm64" ;;
-    x86_64) VENDOR_DIR="vendor/macos-x86_64" ;;
-    *) die "Unsupported macOS architecture: $ARCH" ;;
-esac
+log "Architecture: $ARCH"
+
+WHEEL_DIR="radkit-wheels"
+
+if ! ls "$WHEEL_DIR"/cisco_radkit_*.whl >/dev/null 2>&1; then
+    die "RADKit wheels not found.\n\nDownload the four RADKit 1.9.9 cp312 wheels for macOS from:\n   https://radkit.cisco.com/downloads/release/\n\nDrop them into:\n   $(pwd)/$WHEEL_DIR/\n\nThen run this launcher again."
+fi
 
 # Pull latest from GitHub (silent if not a git checkout).
 if [ -d .git ] && command -v git >/dev/null 2>&1; then
@@ -47,22 +49,19 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-# Install deps when requirements.txt or vendor wheels have changed.
+# Install deps when requirements.txt or wheels have changed.
 STAMP=".venv/.installed"
 NEED_INSTALL=0
 [ -f "$STAMP" ] || NEED_INSTALL=1
 [ "requirements.txt" -nt "$STAMP" ] && NEED_INSTALL=1
-[ -d "$VENDOR_DIR" ] && [ -n "$(find "$VENDOR_DIR" -name '*.whl' -newer "$STAMP" 2>/dev/null)" ] && NEED_INSTALL=1
+[ -n "$(find "$WHEEL_DIR" -name 'cisco_radkit_*.whl' -newer "$STAMP" 2>/dev/null)" ] && NEED_INSTALL=1
 if [ "$NEED_INSTALL" = "1" ]; then
     log "Installing dependencies (one-time, ~1–2 min)..."
     pip install --quiet --upgrade pip
     pip install --quiet -r requirements.txt
-    if [ -d "$VENDOR_DIR" ] && ls "$VENDOR_DIR"/*.whl >/dev/null 2>&1; then
-        pip install --quiet --upgrade "$VENDOR_DIR"/*.whl
-    else
-        log "WARNING: no RSA wheels in $VENDOR_DIR — login will fail."
-        log "Place cisco_radkit_*.whl files into $VENDOR_DIR/ and re-run."
-    fi
+    # pip picks the wheel matching this interpreter; non-matching wheels are
+    # skipped without error, so dropping multiple platforms here is fine.
+    pip install --quiet --upgrade "$WHEEL_DIR"/cisco_radkit_*.whl
     touch "$STAMP"
 fi
 
