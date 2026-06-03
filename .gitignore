@@ -5,3 +5,4 @@ collection_logfile.txt
 __pycache__/
 *.pyc
 .venv/
+dist/
