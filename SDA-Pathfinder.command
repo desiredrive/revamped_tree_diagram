@@ -64,10 +64,9 @@ if [ "$NEED_INSTALL" = "1" ]; then
     log "Installing dependencies (one-time, ~1–2 min)..."
     pip install --quiet --upgrade pip
     python -m pip install --quiet -r requirements.txt
-    # No version pins — Cisco ships mixed versions per platform (mac arm64
-    # has some packages only at 1.9.5, others at 1.9.9). Let pip pick what's
-    # in the folder.
-    python -m pip install --quiet --upgrade --no-index --find-links "$WHEEL_DIR" \
+    # --find-links without --no-index: cisco-radkit-* come from the local
+    # folder, transitive deps (tabulate, etc.) come from pypi.
+    python -m pip install --quiet --upgrade --find-links "$WHEEL_DIR" \
         cisco-radkit-client cisco-radkit-common \
         cisco-radkit-genie cisco-radkit-service
     touch "$STAMP"

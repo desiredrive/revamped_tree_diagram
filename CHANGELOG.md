@@ -4,6 +4,17 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.5] — 2026-06-03
+
+### Fixed
+- **`--no-index` was blocking transitive deps** — RADKit declares
+  `tabulate>=0.8.10,<1.0` and other pypi-only deps. With `--no-index`,
+  pip had nowhere to fetch them and died with
+  *"Could not find a version that satisfies the requirement tabulate"*.
+  All three launchers now use `--find-links radkit-wheels/` without
+  `--no-index`, so cisco-radkit-* resolve locally while transitives
+  come from pypi.
+
 ## [1.0.0-beta.4] — 2026-06-03
 
 Wheel pre-flight + tag-aware install — fixes the macOS/Windows install path

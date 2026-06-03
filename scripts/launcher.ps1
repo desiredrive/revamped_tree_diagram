@@ -83,9 +83,9 @@ if ($needInstall) {
     & $pyExe -m pip install --quiet --upgrade pip
     & $pyExe @($pipInstall + @("-r", "requirements.txt"))
     if ($LASTEXITCODE -ne 0) { Die "pip install -r requirements.txt failed." }
-    # No version pins — Cisco ships mixed versions per platform; let pip
-    # pick whatever's in the folder for each package.
-    & $pyExe @($pipInstall + @("--upgrade", "--no-index", "--find-links", $wheelDir,
+    # --find-links without --no-index: cisco-radkit-* from the local folder,
+    # transitive deps (tabulate, etc.) from pypi.
+    & $pyExe @($pipInstall + @("--upgrade", "--find-links", $wheelDir,
         "cisco-radkit-client", "cisco-radkit-common",
         "cisco-radkit-genie", "cisco-radkit-service"))
     if ($LASTEXITCODE -ne 0) { Die "Failed to install RADKit wheels from $wheelDir." }

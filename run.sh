@@ -56,10 +56,10 @@ if [ "$NEED_INSTALL" = "1" ]; then
   echo "Installing dependencies ..."
   pip install --upgrade pip
   pip install -r requirements.txt
-  # No version pins — Cisco ships mixed versions per platform (e.g. mac arm64
-  # only has cp312 wheels for some packages at 1.9.5, others at 1.9.9). Let
-  # pip pick whatever's in the folder for each package.
-  pip install --upgrade --no-index --find-links "$WHEEL_DIR" \
+  # --find-links (no --no-index): cisco-radkit-* resolve from the local
+  # folder (they don't exist on pypi), and transitive deps like tabulate
+  # come from pypi.
+  pip install --upgrade --find-links "$WHEEL_DIR" \
     cisco-radkit-client cisco-radkit-common \
     cisco-radkit-genie cisco-radkit-service
   touch "$STAMP"
