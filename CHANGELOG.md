@@ -4,6 +4,16 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.6] — 2026-06-03
+
+### Changed
+- **Python version range widened to 3.10–3.13** to match RADKit's
+  officially supported range. Previously the launchers required 3.12+,
+  which blocked engineers whose machines had only 3.10 or 3.11. The
+  launchers now pick the highest supported Python on the machine and
+  the wheel pre-flight matches the running interpreter's tag, so any
+  3.10/3.11/3.12/3.13 with matching cp wheels works.
+
 ## [1.0.0-beta.5] — 2026-06-03
 
 ### Fixed

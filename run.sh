@@ -6,9 +6,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PY="${PYTHON:-python3.12}"
-if ! command -v "$PY" >/dev/null 2>&1; then
-  echo "Error: $PY not found. Install Python 3.12 (the bundled RADKit wheels are cp312)." >&2
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+  for cand in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$cand" >/dev/null 2>&1; then
+      ver=$("$cand" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo "")
+      maj="${ver%.*}"; min="${ver#*.}"
+      if [ "$maj" = "3" ] && [ "${min:-0}" -ge 10 ] && [ "${min:-0}" -le 13 ]; then
+        PY="$cand"; break
+      fi
+    fi
+  done
+fi
+if [ -z "$PY" ] || ! command -v "$PY" >/dev/null 2>&1; then
+  echo "Error: Python 3.10–3.13 required (RADKit supports 3.10–3.13). Set PYTHON=... to override." >&2
   exit 1
 fi
 

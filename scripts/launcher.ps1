@@ -9,16 +9,17 @@ function Die($msg) {
     exit 1
 }
 
-# Find Python 3.12+. Try the launcher first, then bare python on PATH.
+# Find a Python in RADKit's supported range (3.10–3.13).
 $pyCmd = $null
-foreach ($try in @(@("py","-3.12"), @("py","-3"), @("python"), @("python3"))) {
+foreach ($try in @(@("py","-3.13"), @("py","-3.12"), @("py","-3.11"), @("py","-3.10"), @("py","-3"), @("python"), @("python3"))) {
     try {
         $exe = $try[0]
         $args = if ($try.Count -gt 1) { $try[1..($try.Count-1)] } else { @() }
         $ver = & $exe @args -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')" 2>$null
         if ($LASTEXITCODE -eq 0 -and $ver) {
             $parts = $ver.Trim().Split(".")
-            if ([int]$parts[0] -ge 3 -and [int]$parts[1] -ge 12) {
+            $maj = [int]$parts[0]; $min = [int]$parts[1]
+            if ($maj -eq 3 -and $min -ge 10 -and $min -le 13) {
                 $pyCmd = @($exe) + $args
                 break
             }
@@ -26,7 +27,7 @@ foreach ($try in @(@("py","-3.12"), @("py","-3"), @("python"), @("python3"))) {
     } catch { }
 }
 if (-not $pyCmd) {
-    Die "Python 3.12 or newer is required.`n`nDownload from https://www.python.org/downloads/`n(check 'Add to PATH' during install) then re-run."
+    Die "Python 3.10–3.13 is required (RADKit supports 3.10–3.13).`n`nDownload from https://www.python.org/downloads/`n(check 'Add to PATH' during install) then re-run."
 }
 Log "Using $((& $pyCmd[0] @($pyCmd[1..($pyCmd.Count-1)] + '--version') 2>&1))"
 

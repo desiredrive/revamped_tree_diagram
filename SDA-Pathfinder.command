@@ -13,16 +13,16 @@ die() {
     exit 1
 }
 
-# Pick a Python ≥ 3.12.
+# Pick a Python in RADKit's supported range (3.10–3.13).
 PY=""
-for cand in python3.12 python3.13 python3; do
+for cand in python3.13 python3.12 python3.11 python3.10 python3; do
     if command -v "$cand" >/dev/null 2>&1; then
         ver=$("$cand" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo "")
         maj="${ver%.*}"; min="${ver#*.}"
-        if [ "$maj" = "3" ] && [ "${min:-0}" -ge 12 ]; then PY="$cand"; break; fi
+        if [ "$maj" = "3" ] && [ "${min:-0}" -ge 10 ] && [ "${min:-0}" -le 13 ]; then PY="$cand"; break; fi
     fi
 done
-[ -n "$PY" ] || die "Python 3.12+ is required.\n\nInstall from python.org or run: brew install python@3.12"
+[ -n "$PY" ] || die "Python 3.10–3.13 is required (RADKit supports 3.10–3.13).\n\nInstall from python.org or run: brew install python@3.12"
 log "Using $($PY --version)"
 
 # Detect arch (informational only — wheels are tag-matched by pip).
