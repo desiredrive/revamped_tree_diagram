@@ -37,6 +37,8 @@ EOF
   exit 1
 fi
 
+"$PY" scripts/check_wheels.py || exit 1
+
 if [ ! -d ".venv" ]; then
   echo "Creating virtualenv in .venv ..."
   "$PY" -m venv .venv
@@ -54,9 +56,12 @@ if [ "$NEED_INSTALL" = "1" ]; then
   echo "Installing dependencies ..."
   pip install --upgrade pip
   pip install -r requirements.txt
-  # pip picks the wheel whose tag matches this interpreter; non-matching wheels
-  # are skipped without error, so dropping multiple platforms in one folder is fine.
-  pip install --upgrade "$WHEEL_DIR"/cisco_radkit_*.whl
+  # No version pins — Cisco ships mixed versions per platform (e.g. mac arm64
+  # only has cp312 wheels for some packages at 1.9.5, others at 1.9.9). Let
+  # pip pick whatever's in the folder for each package.
+  pip install --upgrade --no-index --find-links "$WHEEL_DIR" \
+    cisco-radkit-client cisco-radkit-common \
+    cisco-radkit-genie cisco-radkit-service
   touch "$STAMP"
 fi
 

@@ -46,6 +46,12 @@ Then run this launcher again.
 "@
 }
 
+# Pre-flight: verify wheels match this Python + arch before pip sees them.
+$wheelCheckErr = & $pyCmd[0] @($pyCmd[1..($pyCmd.Count-1)] + @("scripts\check_wheels.py")) 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Die ($wheelCheckErr -join "`n")
+}
+
 # Pull latest from GitHub if this is a git checkout.
 if ((Test-Path ".git") -and (Get-Command git -ErrorAction SilentlyContinue)) {
     Log "Checking for updates..."
@@ -77,9 +83,11 @@ if ($needInstall) {
     & $pyExe -m pip install --quiet --upgrade pip
     & $pyExe @($pipInstall + @("-r", "requirements.txt"))
     if ($LASTEXITCODE -ne 0) { Die "pip install -r requirements.txt failed." }
-    # pip picks the wheel matching this interpreter; non-matching wheels are
-    # skipped without error, so dropping multiple platforms here is fine.
-    & $pyExe @($pipInstall + @("--upgrade") + ($wheels | ForEach-Object { $_.FullName }))
+    # No version pins — Cisco ships mixed versions per platform; let pip
+    # pick whatever's in the folder for each package.
+    & $pyExe @($pipInstall + @("--upgrade", "--no-index", "--find-links", $wheelDir,
+        "cisco-radkit-client", "cisco-radkit-common",
+        "cisco-radkit-genie", "cisco-radkit-service"))
     if ($LASTEXITCODE -ne 0) { Die "Failed to install RADKit wheels from $wheelDir." }
     New-Item -ItemType File -Path $stamp -Force | Out-Null
 }

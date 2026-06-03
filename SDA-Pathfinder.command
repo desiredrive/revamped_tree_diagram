@@ -35,6 +35,11 @@ if ! ls "$WHEEL_DIR"/cisco_radkit_*.whl >/dev/null 2>&1; then
     die "RADKit wheels not found.\n\nDownload the four RADKit 1.9.9 cp312 wheels for macOS from:\n   https://radkit.cisco.com/downloads/release/\n\nDrop them into:\n   $(pwd)/$WHEEL_DIR/\n\nThen run this launcher again."
 fi
 
+# Pre-flight: verify wheels match this Python + arch before pip sees them.
+if ! "$PY" scripts/check_wheels.py 2> /tmp/sda_pf_wheel_err; then
+    die "$(cat /tmp/sda_pf_wheel_err)"
+fi
+
 # Pull latest from GitHub (silent if not a git checkout).
 if [ -d .git ] && command -v git >/dev/null 2>&1; then
     log "Checking for updates..."
@@ -58,10 +63,13 @@ NEED_INSTALL=0
 if [ "$NEED_INSTALL" = "1" ]; then
     log "Installing dependencies (one-time, ~1–2 min)..."
     pip install --quiet --upgrade pip
-    pip install --quiet -r requirements.txt
-    # pip picks the wheel matching this interpreter; non-matching wheels are
-    # skipped without error, so dropping multiple platforms here is fine.
-    pip install --quiet --upgrade "$WHEEL_DIR"/cisco_radkit_*.whl
+    python -m pip install --quiet -r requirements.txt
+    # No version pins — Cisco ships mixed versions per platform (mac arm64
+    # has some packages only at 1.9.5, others at 1.9.9). Let pip pick what's
+    # in the folder.
+    python -m pip install --quiet --upgrade --no-index --find-links "$WHEEL_DIR" \
+        cisco-radkit-client cisco-radkit-common \
+        cisco-radkit-genie cisco-radkit-service
     touch "$STAMP"
 fi
 

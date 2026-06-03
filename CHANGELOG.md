@@ -4,6 +4,28 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.4] — 2026-06-03
+
+Wheel pre-flight + tag-aware install — fixes the macOS/Windows install path
+when the engineer downloads a wheel for the wrong Python or CPU.
+
+### Added
+- **`scripts/check_wheels.py`** — pre-flight that compares filenames in
+  `radkit-wheels/` against the running interpreter (Python tag + OS + arch)
+  and exits with an explicit "you've got `<wheel>`, you need
+  `cp312-none-<platform>`" message instead of letting pip die with
+  *"is not a supported wheel on this platform"*.
+
+### Changed
+- **Launchers** (`run.sh`, `SDA-Pathfinder.command`, `scripts/launcher.ps1`)
+  call `check_wheels.py` after the empty-folder check and before pip.
+- **Wheel install** switched from `pip install <whl>...` (which errors on
+  any incompatible wheel in the list) to
+  `pip install --no-index --find-links radkit-wheels/ cisco-radkit-*`
+  (no version pins — Cisco ships mixed versions per platform, e.g. mac
+  arm64 only has cp312 wheels for some packages at 1.9.5, others at
+  1.9.9). pip picks the highest tag-compatible version per package.
+
 ## [1.0.0-beta.3] — 2026-06-03
 
 Install-flow improvements for cross-platform TAC use.
