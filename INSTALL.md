@@ -3,7 +3,7 @@
 ## One-time setup (≈ 5 minutes)
 
 ### Prerequisites
-- **Python 3.12 or newer** — https://www.python.org/downloads/  (on Windows, check "Add Python to PATH" during install)
+- **Python 3.10, 3.11, 3.12, or 3.13** — https://www.python.org/downloads/  (on Windows, check "Add Python to PATH" during install). RADKit supports 3.10–3.13; use whichever your RADKit wheels match.
 - **Git** — https://git-scm.com/downloads  (skip if you only want a snapshot copy)
 
 ### Get the code
@@ -31,11 +31,12 @@ SDA Pathfinder talks to fabric devices through Cisco RADKit.
 **For macOS / Windows:**
 
 1. Go to https://radkit.cisco.com/downloads/release/ and pick **1.9.9**.
-2. Download the four cp312 wheels for your OS:
-   - `cisco_radkit_client-1.9.9-cp312-...whl`
-   - `cisco_radkit_common-1.9.9-cp312-...whl`
-   - `cisco_radkit_genie-1.9.9-cp312-...whl`
-   - `cisco_radkit_service-1.9.9-cp312-...whl`
+2. Download the four wheels for your OS — pick a `cp` tag matching your
+   Python version (RADKit ships cp310, cp311, cp312, and cp313):
+   - `cisco_radkit_client-1.9.9-cp3XX-...whl`
+   - `cisco_radkit_common-1.9.9-cp3XX-...whl`
+   - `cisco_radkit_genie-1.9.9-cp3XX-...whl`
+   - `cisco_radkit_service-1.9.9-cp3XX-...whl`
 
    Pick the right tag suffix:
    - macOS Apple Silicon → `macosx_11_0_arm64`
@@ -68,15 +69,16 @@ Just relaunch — the launcher does `git pull --ff-only` automatically.
 
 ## Troubleshooting
 
-**"Python 3.12+ is required"** — install Python from python.org, then re-run.
+**"Python 3.10–3.13 is required"** — install Python from python.org, then re-run.
 On Windows, make sure "Add to PATH" was checked during install.
 
 **"RADKit wheels not found in ./radkit-wheels/"** — see the RADKit section
 above. Drop the four wheels into that folder and re-run the launcher.
 
 **Login fails / `radkit_client` import error** — the wheels you dropped
-don't match this OS / Python. They must be `cp312` wheels for your
-platform (see tag suffix list above).
+don't match this OS / Python. They must be cp wheels for your Python
+version (3.10/3.11/3.12/3.13) and your platform (see tag suffix list
+above).
 
 **"git pull skipped"** — you're either offline or have local edits. The
 launcher continues with the current code — no harm done.
