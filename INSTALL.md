@@ -65,7 +65,19 @@ the server.
 Close the terminal window, or press **Ctrl+C** inside it.
 
 ## Updates
-Just relaunch — the launcher does `git pull --ff-only` automatically.
+- **Git checkout (recommended path above):** just relaunch — the launcher
+  does `git pull --ff-only` automatically.
+- **Snapshot zip install:** double-click **`Update-SDA-Pathfinder.command`**
+  (macOS), **`Update-SDA-Pathfinder.bat`** (Windows), or run **`./update.sh`**
+  (Linux). It checks GitHub for the newest release, downloads the tarball,
+  and copies it in place over your install. Per-machine state — `.venv/`,
+  `radkit-wheels/`, `collection_logfile.txt`, anything ending in
+  `.local.*` — is preserved. Pass `--force` to reinstall the same version.
+
+> **macOS first-run note:** Gatekeeper may block `SDA-Pathfinder.command` /
+> `Update-SDA-Pathfinder.command` the first time with *"… cannot be opened
+> because it is from an unidentified developer."* Right-click the file →
+> **Open** → **Open**. Only needed once per file.
 
 ## Troubleshooting
 

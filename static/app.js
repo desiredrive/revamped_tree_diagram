@@ -11,6 +11,7 @@ fetch('/version').then(r => r.ok ? r.json() : null).then(v => {
   el.textContent = 'v' + (v.version || 'dev') + sha;
 }).catch(() => {});
 
+
 let currentSession = null;
 let cy = null;
 // Maps virtual node ids (e.g. an RPF-walk hop's `upath3`) to the actual
@@ -326,7 +327,7 @@ function iconSvg(badgeFill) {
     arrows += "<g transform='rotate(" + (i * 45) + " 46 54)'>" + arrow + "</g>";
   }
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<rect x='2' y='10' width='88' height='88' rx='12' ry='12' " +
       "fill='#1e40af' stroke='#0f172a' stroke-width='3'/>" +
     arrows +
@@ -350,7 +351,7 @@ const ICON_URL = {
 // "the client" rather than another fabric device.
 function computerIconSvg() {
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<rect x='12' y='18' width='76' height='52' rx='4' ry='4' " +
       "fill='#0f172a' stroke='#1e293b' stroke-width='3'/>" +
     "<rect x='18' y='24' width='64' height='40' fill='#38bdf8'/>" +
@@ -366,7 +367,7 @@ const ENDPOINT_ICON_URL =
 // Borders look like routers with a globe behind them.
 function borderIconSvg() {
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<circle cx='50' cy='50' r='40' fill='#1e3a8a' stroke='#0f172a' stroke-width='3'/>" +
     "<path d='M10 50 H90 M50 10 V90 M20 30 Q50 50 80 30 M20 70 Q50 50 80 70' " +
       "fill='none' stroke='#93c5fd' stroke-width='2'/>" +
@@ -379,7 +380,7 @@ const BORDER_ICON_URL =
 // Control plane: a square with a sigma (LISP map-server).
 function cpIconSvg() {
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<rect x='10' y='10' width='80' height='80' rx='10' ry='10' " +
       "fill='#7c3aed' stroke='#0f172a' stroke-width='3'/>" +
     "<text x='50' y='65' text-anchor='middle' font-family='monospace' " +
@@ -393,7 +394,7 @@ const CP_ICON_URL =
 // DHCP server: a stack of disks (server rack).
 function dhcpServerIconSvg() {
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<rect x='15' y='18' width='70' height='64' rx='4' ry='4' " +
       "fill='#0f172a' stroke='#1e293b' stroke-width='3'/>" +
     "<rect x='22' y='26' width='56' height='12' fill='#475569'/>" +
@@ -412,7 +413,7 @@ const DHCP_SERVER_ICON_URL =
 function underlaySwitchIconSvg(fill) {
   fill = fill || '#1e293b';
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<rect x='10' y='35' width='80' height='30' rx='3' ry='3' " +
       "fill='" + fill + "' stroke='#0f172a' stroke-width='3'/>" +
     "<rect x='18' y='44' width='8' height='4' fill='#22c55e'/>" +
@@ -435,7 +436,7 @@ const UNDERLAY_UNKNOWN_ICON_URL =
 // topology stays readable.
 function fabricCloudIconSvg() {
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<path d='M25 65 Q12 65 12 52 Q12 42 23 40 Q23 27 38 27 Q42 18 54 18 " +
     "Q67 18 71 30 Q86 30 86 44 Q86 56 75 58 Q75 68 63 68 L28 68 " +
     "Q25 68 25 65 Z' fill='#cbd5e1' stroke='#475569' stroke-width='2.5' " +
@@ -451,7 +452,7 @@ const FABRIC_CLOUD_ICON_URL =
 // bottom, and a status badge in the top-right corner.
 function wlcIconSvg(badgeFill) {
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     // Rounded blue body inset on top & right so the badge can peek out.
     "<rect x='6' y='14' width='80' height='80' rx='10' ry='10' " +
       "fill='#1d4ed8' stroke='#0c1e5e' stroke-width='3'/>" +
@@ -493,7 +494,7 @@ const WLC_ICON_URL = {
 // rectangle window and a top LED dot.
 function apIconSvg() {
   return (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>" +
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     // Rounded blue body.
     "<rect x='14' y='14' width='72' height='72' rx='14' ry='14' " +
       "fill='#1d4ed8' stroke='#0c1e5e' stroke-width='3'/>" +
@@ -1503,7 +1504,7 @@ function handleEvent(msg) {
       break;
     case 'check_started': {
       const nodeId = msg.target_node_id || 'xtr';
-      appendCheck(nodeId, { name: msg.name, status: 'running', message: '' });
+      appendCheck(nodeId, { name: msg.name, status: 'running', message: msg.note || '' });
       break;
     }
     case 'check_finished': {

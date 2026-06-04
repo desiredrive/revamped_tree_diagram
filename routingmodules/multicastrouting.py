@@ -24,10 +24,24 @@ class MulticastConfiguration:
 
         ipmcast_cmd = "show ip multicast {}".format(vrf_mode)
         ipmcast_op = radkit_cli.get_single_output_genie(self.hostname,ipmcast_cmd,service)
-        mcast_path = ipmcast_op['vrf'][vrf]
-        self.multicastenabled = mcast_path['enable']
-        self.multipath = mcast_path['multipath']
-        self.fallbackmode = mcast_path['fallback_group_mode']
+        # Defensive: get_single_output_genie returns None on RADKit timeouts,
+        # genie parse failures, or unsupported platforms. Treat that as "we
+        # don't know" rather than crashing — leave the attributes at safe
+        # defaults so callers can still report a clean SKIP/FAIL.
+        if ipmcast_op is None:
+            self.multicastenabled = False
+            self.multipath = None
+            self.fallbackmode = None
+            return
+        try:
+            mcast_path = ipmcast_op['vrf'][vrf]
+            self.multicastenabled = mcast_path['enable']
+            self.multipath = mcast_path.get('multipath')
+            self.fallbackmode = mcast_path.get('fallback_group_mode')
+        except (KeyError, TypeError):
+            self.multicastenabled = False
+            self.multipath = None
+            self.fallbackmode = None
 
     def multicast_ranges(self,service):
         if self.vrf == "default":

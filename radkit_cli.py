@@ -126,19 +126,47 @@ def get_any_single_output(hostname,command: str,service):
         sys.exit("Error: {} in RSA Inventory, Device: {} ".format(e, hostname))
     return output
 
-def get_single_output_genie(hostname, command: str, service):
+def get_single_output_genie(hostname, command: str, service, timeout: int = 0):
     #Currently available only for IOS_XE platforms!
     type = 'iosxe'
     try:
         append_to_logging_file(command)
         device_inventory = service.inventory[hostname]
-        raw = device_inventory.exec(command).wait()
-        execution = radkit_genie.parse(raw, os=type)
+        raw = device_inventory.exec(command, timeout=timeout).wait()
+        # Always log the raw device output before attempting genie parse, so the
+        # logfile reflects what the device returned even when parsing fails.
         try:
             raw_output = raw.result.data
             append_to_logging_file(raw_output)
+        except Exception:
+            raw_output = None
+        # RADKit 1.9.x can return from .wait() before the request's status flips
+        # to DONE; radkit_genie.parse() then raises "cannot parse requests which
+        # are still being processed". Retry a few times with a short backoff —
+        # the race usually clears in well under a second.
+        execution = None
+        last_exc = None
+        for _ in range(6):
+            try:
+                execution = radkit_genie.parse(raw, os=type)
+                break
+            except Exception as e:
+                last_exc = e
+                if "still being processed" not in str(e):
+                    break
+                time.sleep(0.25)
+                try:
+                    raw.wait()
+                except Exception:
+                    pass
+        if execution is None:
+            append_to_logging_file(
+                "[genie-parse-failed] {} on {}: {}".format(command, hostname, last_exc)
+            )
+            return None
+        try:
             output = execution[hostname][command].data
-        except:
+        except Exception:
             return None
     except ValueError:
         sys.exit("Error when getting the following command: {}".format(command))

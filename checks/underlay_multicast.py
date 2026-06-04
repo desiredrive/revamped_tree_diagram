@@ -566,6 +566,14 @@ class UmcastRpfToRp(_UmcastBase):
     """Report RPF neighbor / interface for reaching the RP."""
 
     base_name = "RPF to RP"
+    running_note = (
+        "Note: `show ip rpf` on IOS-XE reverse-resolves both the queried RP "
+        "and the RPF neighbor. If the device has `ip domain lookup` enabled "
+        "but no reachable resolver, each lookup can stall ~15–30 s, making "
+        "this check take a long time to complete. To avoid the delay, either "
+        "fix DNS reachability / mappings, or disable resolution on every "
+        "fabric node with `no ip domain lookup`."
+    )
 
     def run(self, ctx: RunContext) -> CheckResult:
         K = self._keys

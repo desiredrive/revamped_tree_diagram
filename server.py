@@ -186,6 +186,7 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
             "type": "check_started",
             "name": check.name,
             "target_node_id": target,
+            "note": getattr(check, "running_note", "") or "",
         })
         try:
             result = check.run(ctx)

@@ -330,10 +330,20 @@ class PimConfiguration:
             vrf = self.vrf
             vrf_mode = "vrf "+self.vrf+" "
 
-        #Identify the RPF neighbor for a source
+        #Identify the RPF neighbor for a source.
+        #
+        # `show ip rpf` reverse-resolves both the queried IP and the RPF
+        # neighbor. On a customer box with `ip domain lookup` enabled and no
+        # reachable resolver, each lookup blocks ~15–30 s, which trips RADKit's
+        # default exec timeout and makes radkit_genie.parse() raise
+        # "cannot parse requests which are still being processed". Bump the
+        # exec timeout for this command alone so two slow reverse-DNS lookups
+        # have time to complete.
         self.rpfip = ip
         rpf_cmd = "show ip rpf {} {}".format(vrf_mode,ip)
-        rpf_op = radkit_cli.get_single_output_genie(self.hostname, rpf_cmd, service)
+        rpf_op = radkit_cli.get_single_output_genie(
+            self.hostname, rpf_cmd, service, timeout=180,
+        )
         if rpf_op is not None:
             path = rpf_op['vrf'][vrf]['path']
             for i in path:

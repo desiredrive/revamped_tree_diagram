@@ -54,14 +54,23 @@ class UmcastMsdpSummary(_PerRpMsdp):
         ctx.state[_key(idx, "msdp_originator_id")] = getattr(msdp, "originatorid", None)
         ctx.state[_key(idx, "msdp_rfc3618")] = getattr(msdp, "rfc3618", False)
         if not peers:
+            rp_count = ctx.state.get("umcast_rp_count") or 0
+            rp_ip = ctx.state.get("umcast_rp")
             return CheckResult(
                 CheckStatus.FAIL,
                 f"• Device: {host}\n"
-                f"• MSDP peers configured: 0\n"
-                f"• Anycast-RP without MSDP: each replica's RPF / SA state is "
-                f"isolated; sources registered to one RP will not be visible "
-                f"to receivers anchored on another. Configure MSDP peering "
-                f"between the anycast replicas (typically full mesh).",
+                f"• RP IP {rp_ip} is owned by {rp_count} devices "
+                f"→ this is an anycast-RP set.\n"
+                f"• MSDP peers configured on this replica: 0\n"
+                f"• Anycast-RP cannot work without MSDP. Each replica only "
+                f"sees the sources that register to itself; sources behind "
+                f"one replica are invisible to receivers anchored on another, "
+                f"so (S,G) state never converges across the set.\n"
+                f"• Fix: configure MSDP peering between every replica "
+                f"(typically a full mesh, or a mesh-group), e.g.\n"
+                f"    ip msdp peer <other-replica-loopback> connect-source LoopbackN\n"
+                f"    ip msdp originator-id LoopbackN\n"
+                f"  on each anycast RP, then re-run this check.",
             )
         rows = [
             f"  - Peer {p.get('peer_address')}\n"

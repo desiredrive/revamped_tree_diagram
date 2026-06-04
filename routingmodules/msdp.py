@@ -14,6 +14,12 @@ def parse_msdp_summary(output):
               and contains the extracted fields.
     """
     peers_data = []
+    # Defensive: get_any_single_output() returns None on command/exec failure.
+    # Callers expect a list, so a missing/empty output collapses to an empty
+    # peer list rather than blowing up with `'NoneType' object has no
+    # attribute 'strip'`.
+    if not output:
+        return peers_data
     # Regex to capture the fields: Peer Address, AS, State, Uptime/Downtime, Reset Count, SA Count, Peer Name
     # It handles cases where AS or Peer Name might be '?'
     # Group 1: Peer Address (IP)
@@ -81,6 +87,8 @@ def parse_msdp_peer_detail(output):
               and contains the extracted fields.
     """
     peers_data = []
+    if not output:
+        return peers_data
 
     # Split the output into individual peer blocks
     # Each block starts with "MSDP Peer X.X.X.X"

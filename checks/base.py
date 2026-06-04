@@ -43,6 +43,11 @@ class Check:
 
     name: str = "unnamed-check"
     target_node_id: str = "xtr"
+    # Optional advisory shown next to the check while it's RUNNING. Useful for
+    # checks that may legitimately take a long time (e.g. a show command on
+    # the device that can be slowed by reverse-DNS lookups). Empty string =
+    # no advisory.
+    running_note: str = ""
 
     def run(self, ctx: "RunContext") -> CheckResult:
         raise NotImplementedError

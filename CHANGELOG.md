@@ -4,6 +4,64 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.8] — 2026-06-04
+
+### Fixed
+- **Topology JPEG export rendered icons clipped / garbled in Safari and
+  Chrome.** The icon SVGs declared only `viewBox`, no `width`/`height`,
+  so the browser canvas's `drawImage()` gave them no deterministic
+  intrinsic size when rasterizing — Safari produced the half-moon
+  artefact; Chrome was hit-or-miss depending on cache state. All nine
+  icon SVGs now declare `width='100' height='100'` to match the
+  viewBox, and the export comes out clean on both browsers.
+- **"Underlay Mcast (X): RPF to RP" raised `RADKitGenieException: Error,
+  cannot parse requests which are still being processed`** on devices
+  where `show ip rpf` was slowed by reverse-DNS lookups. On a box with
+  `ip domain lookup` enabled but no reachable resolver, each lookup
+  blocks ~15–30 s and trips RADKit's default 30 s exec timeout. The
+  RPF call now uses a 180 s exec timeout, and
+  `radkit_cli.get_single_output_genie` retries the genie parse race
+  with backoff and logs the raw device output before parsing so a
+  hung resolver still produces a readable diagnostic.
+- **"Underlay Mcast (RP): MSDP peer summary" raised `AttributeError:
+  'NoneType' object has no attribute 'strip'`** when `show ip msdp
+  summary` returned nothing (typical for an anycast-RP replica with
+  no MSDP configured). `parse_msdp_summary` and
+  `parse_msdp_peer_detail` now short-circuit to `[]` on empty input,
+  letting the check produce its proper FAIL message:
+  *"Anycast-RP cannot work without MSDP — each replica only sees the
+  sources that register to itself. Configure MSDP peering between every
+  replica."* The message now also cites the exact RP IP and replica
+  count from discovery, plus the IOS commands to apply the fix.
+- **"Underlay Mcast (RP): global multicast enabled" raised `TypeError:
+  'NoneType' object is not subscriptable`** when `show ip multicast`
+  came back unparseable. `MulticastConfiguration.multicast_enabled`
+  now guards against a None response and partial dict shapes, so the
+  check cleanly reports `Global multicast routing enabled: False`
+  with the existing FAIL guidance instead of crashing the worker.
+
+### Added
+- **DNS-impact advisory on the RPF-to-RP check.** New `running_note`
+  attribute on `Check` lets any check publish an advisory string that
+  the UI shows while the check is RUNNING. The RPF-to-RP check uses
+  it to warn that `show ip rpf` reverse-resolves both the RP and the
+  RPF neighbor, that this can stall the script for 15–30 s per lookup
+  on a box with broken DNS, and that the fix is either to repair DNS
+  reachability or run `no ip domain lookup` on every fabric node.
+- **Standalone CLI updater for snapshot-zip installs.** Three
+  double-clickable wrappers — `Update-SDA-Pathfinder.command` (macOS),
+  `Update-SDA-Pathfinder.bat` (Windows), `update.sh` (Linux) — call
+  `update.py`, which queries the GitHub Releases API, downloads the
+  newest release tarball (falls back to pre-releases when no GA tag
+  exists), and copy-overlays it onto the install. Per-machine state
+  is preserved: `.venv/`, `radkit-wheels/`, `collection_logfile.txt`,
+  `.git/`, and any `*.local.*` files. Pure stdlib so it works before
+  any dependency install. Override the source repo with the
+  `SDA_PATHFINDER_REPO` env var (forks / internal mirrors).
+- **INSTALL.md Updates section** covering both update paths
+  (git checkout vs. zip + CLI updater) plus a macOS Gatekeeper
+  first-run callout.
+
 ## [1.0.0-beta.7] — 2026-06-03
 
 ### Fixed
