@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 import radkit_client
@@ -28,6 +29,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# Per-session collection log.
+#
+# Every check logs through logging_info/error/warning, which funnel into
+# append_to_logging_file below. In the single-user CLI that always meant one
+# file in the CWD. When several sessions share a process (the cloud server),
+# they would otherwise truncate and interleave each other's device output, so
+# each session points this at its own file for the duration of a run.
+#
+# Unset -> the historical CWD path, which keeps the standalone app unchanged.
+DEFAULT_LOGFILE = "collection_logfile.txt"
+
+_current_logfile: ContextVar[str] = ContextVar("_current_logfile", default=None)
+
+
+def set_logfile(path):
+    """Point this context's collection log at `path` (None restores the default)."""
+    return _current_logfile.set(str(path) if path is not None else None)
+
+
+def get_logfile():
+    """Path this context should write collection logs to."""
+    return _current_logfile.get() or DEFAULT_LOGFILE
+
 def logging_info(step,process,subprocess,device,message):
     if subprocess is None:
         subprocess = ""
@@ -56,7 +80,7 @@ def main(service: radkit_client.Service):
     
 def loggin_file():
     currenttime = datetime.now()
-    f = open("collection_logfile.txt", "w")
+    f = open(get_logfile(), "w")
     f.write("File Created on {}".format(currenttime))
     f.write("----------------------------------------------------------------------------------------------------------------------------\n")
     f.write("\n")
@@ -64,8 +88,8 @@ def loggin_file():
 
 def append_to_logging_file(content, char_limit=15000):
     """
-    Appends content to collection_logfile.txt with character-based truncation.
-    Snaps to the last full line to avoid cutting CLI output in half.
+    Appends content to this context's collection log with character-based
+    truncation. Snaps to the last full line to avoid cutting CLI output in half.
     """
     # 1. Truncation Logic
     is_truncated = False
@@ -84,7 +108,7 @@ def append_to_logging_file(content, char_limit=15000):
         content_to_write = content
 
     # 2. File Writing
-    with open("collection_logfile.txt", "a") as f:
+    with open(get_logfile(), "a") as f:
         # STEP separator logic
         if "STEP" in content:
             f.write("\n")

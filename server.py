@@ -14,10 +14,19 @@ from pydantic import BaseModel
 from radkit_client.sync import Client
 
 from checks import Check, CheckResult, CheckStatus, RunContext
+from radkit_cli import DEFAULT_LOGFILE, set_logfile
 from check_registry import build_check_chain
 
 
 _STOP = object()  # sentinel to shut down a session's worker thread
+
+# Cap on retained SSE events per session. A long-lived session with repeated
+# runs would otherwise grow this list without bound.
+EVENT_LOG_MAX = 5000
+
+# Where this (single-user) server writes its collection log. Unchanged from
+# the historical behaviour; the cloud entrypoint overrides it per session.
+LOGFILE_PATH = DEFAULT_LOGFILE
 
 
 @dataclass
@@ -48,6 +57,12 @@ class Session:
     event_log_cond: threading.Condition = field(default_factory=threading.Condition)
     event_counter: int = 0
     cancel_run: threading.Event = field(default_factory=threading.Event)
+    # Lifecycle. `thread` lets teardown join the worker; `last_seen` is
+    # refreshed by polling endpoints so an idle session can be reaped.
+    thread: Optional[threading.Thread] = None
+    created_at: float = field(default_factory=time.time)
+    last_seen: float = field(default_factory=time.time)
+    closing: bool = False
 
 
 def _do_login(sess: Session) -> None:
@@ -65,6 +80,9 @@ def _do_login(sess: Session) -> None:
             domain=sess.domain,
             private_key_password=sess.passphrase,
         )
+        # Don't keep the private-key password resident any longer than the
+        # login that needs it.
+        sess.passphrase = None
         # certificate_login returns PromptInterrupted (not raises) when it
         # couldn't get input it needed from stdin.
         from radkit_client.sync import PromptInterrupted
@@ -124,6 +142,11 @@ def _emit(sess: Session, event: dict) -> None:
         sess.event_counter += 1
         event["id"] = sess.event_counter
         sess.event_log.append(event)
+        # Keep the log bounded. Ids stay monotonic; a reconnecting client whose
+        # Last-Event-ID has already been evicted is detected in the SSE handler
+        # and told to resync rather than silently missing checks.
+        if len(sess.event_log) > EVENT_LOG_MAX:
+            del sess.event_log[:len(sess.event_log) - EVENT_LOG_MAX]
         sess.event_log_cond.notify_all()
 
 
@@ -136,11 +159,18 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
     _emit(sess, {"type": "run_started", "scenario": payload.get("scenario")})
     sess.cancel_run.clear()
 
+    # Bind this run's collection log. Standalone is single-user, so this stays
+    # the historical CWD file; the cloud entrypoint points it at a per-session
+    # path instead. Set on the worker thread so checks -- and the border thread
+    # pool in traffic_flows/iptransit.py, which copies this context -- all
+    # agree on the destination.
+    set_logfile(LOGFILE_PATH)
+
     # Reset the per-run collection log so each invocation starts with a clean
     # file (downloadable via /logfile). Failures here are non-fatal — the run
     # itself can still proceed.
     try:
-        open("collection_logfile.txt", "w").close()
+        open(LOGFILE_PATH, "w").close()
     except OSError:
         pass
 
@@ -308,10 +338,11 @@ def index():
 @app.get("/logfile")
 def download_logfile():
     import os
-    path = "collection_logfile.txt"
+    path = LOGFILE_PATH
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="collection_logfile.txt not found")
-    return FileResponse(path, media_type="text/plain", filename="collection_logfile.txt")
+        raise HTTPException(status_code=404, detail=f"{path} not found")
+    return FileResponse(path, media_type="text/plain",
+                        filename=os.path.basename(path))
 
 
 def _session_worker(sess: Session) -> None:
@@ -343,6 +374,34 @@ def _session_worker(sess: Session) -> None:
                 pass
 
 
+def terminate_session(sess: "Session", timeout: float = 10.0) -> None:
+    """Shut a session down and release its RSA client.
+
+    The worker's `finally` block is the only place client_cm.__exit__ runs, and
+    the worker only returns on _STOP -- so without this the thread, its RSA
+    connection and the session's buffers live for the lifetime of the process.
+    """
+    with sess.lock:
+        if sess.closing:
+            return
+        sess.closing = True
+
+    sess.cancel_run.set()
+    sess.commands.put(_STOP)
+
+    thread = sess.thread
+    if thread is not None and thread.is_alive():
+        # A worker mid-RADKit-call may outlast this; it is a daemon thread and
+        # _STOP is already queued, so it exits once that call returns.
+        thread.join(timeout=timeout)
+
+    # Wake any SSE reader blocked on the condition so it can notice and finish.
+    with sess.event_log_cond:
+        sess.event_log_cond.notify_all()
+
+    sessions.pop(sess.session_id, None)
+
+
 @app.post("/login")
 def login(req: LoginRequest):
     if req.method not in ("sso", "certificate"):
@@ -360,7 +419,9 @@ def login(req: LoginRequest):
         passphrase=req.passphrase,
     )
     sessions[sid] = sess
-    threading.Thread(target=_session_worker, args=(sess,), daemon=True).start()
+    worker = threading.Thread(target=_session_worker, args=(sess,), daemon=True)
+    sess.thread = worker
+    worker.start()
     sess.commands.put(("login", None))
     return {"session_id": sid}
 
@@ -470,6 +531,22 @@ def run_events(sid: str, request: Request):
     def event_stream():
         yield ": stream open\n\n"
         cursor = start_after  # last id already delivered to this client
+        # If the client's cursor predates the oldest retained event, the gap
+        # can't be replayed. Say so explicitly instead of resuming mid-gap and
+        # leaving the client silently missing checks.
+        if cursor:
+            with sess.event_log_cond:
+                oldest = sess.event_log[0].get("id", 0) if sess.event_log else 0
+            if oldest and cursor < oldest - 1:
+                yield _format({
+                    "type": "replay_gap",
+                    "id": cursor,
+                    "ts": time.time(),
+                    "message": (
+                        "Some earlier events are no longer buffered; "
+                        "reload to resync."
+                    ),
+                })
         while True:
             # Snapshot any backlog past the cursor without holding the lock
             # while yielding (yields can block on slow consumers).

@@ -1,4 +1,5 @@
 import sys
+import contextvars
 from pprint import pformat
 from re import search, IGNORECASE, match
 import re
@@ -2649,15 +2650,25 @@ def border_ip_transit(step, catc_name, fabric_id, vrf, vlanid, srcip, dstip, ser
     # We use a thread pool to fetch data from all borders simultaneously
     reachable_borders = [b for b in l3_borders if (b.get("status") or "").strip().lower() == "reachable"]
 
-    with ThreadPoolExecutor(max_workers=len(reachable_borders)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, len(reachable_borders))) as executor:
         # Bind static arguments to the worker function
         worker_func = partial(_fetch_single_border_data,
                               fabric_id=fabric_id, vrf=vrf, vlanid=vlanid, srcip=srcip,
                               dstip=dstip, service=service, isdhcp=isdhcp, iid=iid,
                               catc_name=catc_name, control_planes=control_planes, step=step)
 
+        # Pool threads start with a fresh context, so the caller's collection
+        # logfile would be lost here and the workers would fall back to the
+        # shared default -- interleaving one session's device output into
+        # another's. Snapshot the context HERE (on the calling thread) and run
+        # each worker inside a copy of it.
+        caller_context = contextvars.copy_context()
+
+        def _run_in_caller_context(border):
+            return caller_context.copy().run(worker_func, border)
+
         # Execute in parallel
-        results = list(executor.map(worker_func, reachable_borders))
+        results = list(executor.map(_run_in_caller_context, reachable_borders))
 
     # --- PHASE 2: Sequential Logging & Validation ---
     # Now we loop through the results to print the logs in the correct order
