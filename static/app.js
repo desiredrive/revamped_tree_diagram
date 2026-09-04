@@ -286,6 +286,21 @@ scenarioSelect.addEventListener('change', () => {
   dhcpInputs.style.display   = (v === 'dhcp') ? 'block' : 'none';
   ewInputs.style.display     = (v === 'east_west') ? 'block' : 'none';
   umcastInputs.style.display = (v === 'underlay_multicast') ? 'block' : 'none';
+  const apInputs = document.getElementById('apInputs');
+  if (apInputs) apInputs.style.display = (v === 'ap_onboarding') ? 'block' : 'none';
+  // Keep the cards in step with the select, whichever drove the change.
+  document.querySelectorAll('.scenario-card').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.scenario === v));
+  });
+});
+
+// The cards are the UI; the <select> stays the value holder so every existing
+// reader (and the visibility logic above) keeps working unchanged.
+document.querySelectorAll('.scenario-card').forEach(btn => {
+  btn.addEventListener('click', () => {
+    scenarioSelect.value = btn.dataset.scenario;
+    scenarioSelect.dispatchEvent(new Event('change'));
+  });
 });
 
 // Sync visibility on load — the browser may restore a non-default selection
@@ -362,6 +377,23 @@ scenarioForm.addEventListener('submit', (e) => {
       umcast_dest_ip: document.getElementById('umcast_dest_ip').value,
       umcast_vrf: document.getElementById('umcast_vrf').value,
       umcast_group: document.getElementById('umcast_group').value,
+    };
+  } else if (v === 'ap_onboarding') {
+    const apMacInput = document.getElementById('ap_mac');
+    const apMacMsg = document.getElementById('ap_mac_msg');
+    const normMac = normalizeMac(apMacInput.value);
+    if (!normMac) {
+      apMacMsg.textContent = 'Invalid MAC — need 12 hex characters.';
+      apMacMsg.className = 'field-msg msg-err';
+      apMacInput.focus();
+      return;
+    }
+    apMacInput.value = normMac;
+    payload = {
+      scenario: 'ap_onboarding',
+      mgmt_ip: document.getElementById('ap_mgmt_ip').value,
+      catc_name: document.getElementById('ap_catc_name').value,
+      ap_mac: normMac,
     };
   } else {
     payload = {

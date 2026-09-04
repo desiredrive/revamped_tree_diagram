@@ -50,14 +50,40 @@
   </form>
 
   <!-- Step 3: pick a scenario -->
-  <form id="scenarioForm" class="card" style="display:none; width:360px;">
+  <form id="scenarioForm" class="card" style="display:none; width:560px;">
     <h1>Pick a scenario</h1>
     <div class="muted" id="scenarioService" style="margin-bottom:0.5rem;"></div>
 
-    <label for="scenario">Scenario</label>
-    <select id="scenario" name="scenario">
+    <div id="scenarioCards" class="scenario-cards">
+      <button type="button" class="scenario-card" data-scenario="dhcp" aria-pressed="true">
+        <span class="scenario-icon">🌐</span>
+        <span class="scenario-name">DHCP Troubleshooting</span>
+        <span class="scenario-desc">Why an endpoint never got an address</span>
+      </button>
+      <button type="button" class="scenario-card" data-scenario="east_west" aria-pressed="false">
+        <span class="scenario-icon">↔️</span>
+        <span class="scenario-name">East-West Trace</span>
+        <span class="scenario-desc">Path and policy between two endpoints</span>
+      </button>
+      <button type="button" class="scenario-card" data-scenario="ap_onboarding" aria-pressed="false">
+        <span class="scenario-icon">📡</span>
+        <span class="scenario-name">AP Onboarding</span>
+        <span class="scenario-desc">Fabric-enabled AP joining the wireless fabric</span>
+      </button>
+      <button type="button" class="scenario-card" data-scenario="underlay_multicast" aria-pressed="false">
+        <span class="scenario-icon">🌳</span>
+        <span class="scenario-name">Underlay Multicast</span>
+        <span class="scenario-desc">Underlay multicast tree and RP health</span>
+      </button>
+    </div>
+
+    <!-- Kept in the DOM (hidden) as the value holder: the cards write to it and
+         dispatch 'change', so every existing reader and the visibility logic
+         keep working untouched. -->
+    <select id="scenario" name="scenario" hidden>
       <option value="dhcp" selected>DHCP Troubleshooting</option>
       <option value="east_west">East-West Trace</option>
+      <option value="ap_onboarding">AP Onboarding</option>
       <option value="underlay_multicast">Underlay Multicast</option>
     </select>
 
@@ -119,6 +145,21 @@
     </div>
 
     <!-- Underlay-Multicast inputs -->
+    <!-- AP Onboarding inputs -->
+    <div id="apInputs" style="display:none;">
+      <label>XTR Inventory Management IP</label>
+      <input id="ap_mgmt_ip" type="text" placeholder="10.62.102.152">
+      <div class="hint">The fabric edge the AP is cabled to. Must be an Edge node.</div>
+
+      <label>Catalyst Center name <span style="color:#64748b;">(optional)</span></label>
+      <input id="ap_catc_name" type="text" placeholder="172-31-126-6">
+      <div class="hint">Only required if RSA Standalone Server is in use.</div>
+
+      <label>Access Point MAC</label>
+      <input id="ap_mac" type="text" placeholder="aaaa.bbbb.cccc or aa:bb:cc:dd:ee:ff">
+      <div id="ap_mac_msg" class="field-msg"></div>
+    </div>
+
     <div id="umcastInputs" style="display:none;">
       <label>Source XTR (FHR) management IP</label>
       <input id="umcast_source_ip" type="text" placeholder="172.19.1.68">

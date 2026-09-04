@@ -336,3 +336,37 @@ button:hover { background: #1d4ed8; }
   color: #fee2e2;
   cursor: pointer;
 }
+
+/* Scenario picker: cards instead of a <select>, so the choice is scannable and
+   each flow can say what it actually diagnoses. The <select> is still the value
+   holder -- these write to it -- so nothing downstream had to change. */
+.scenario-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.6rem;
+  margin: 0.4rem 0 1rem;
+}
+.scenario-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #1e293b;
+  color: #e2e8f0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: border-color 0.12s, background 0.12s;
+}
+.scenario-card:hover { border-color: #475569; background: #24334a; }
+.scenario-card:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.scenario-card[aria-pressed="true"] {
+  border-color: #3b82f6;
+  background: #1d3a5f;
+}
+.scenario-icon { font-size: 1.15rem; line-height: 1.4; }
+.scenario-name { font-weight: 600; font-size: 0.9rem; }
+.scenario-desc { font-size: 0.78rem; color: #94a3b8; line-height: 1.3; }

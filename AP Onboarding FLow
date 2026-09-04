@@ -1,0 +1,112 @@
+AP Onboarding Flow:
+
+AI Manifest/MD Rules:
+Every step must be validated against CLI; I can provide access, just tell me how.
+Dont go over 1 single step at once, every step must be carefully tested.
+
+This is the first time a module will include two perspectives, a Platform Independent (IOS) and Platform Dependent  verification, for context, commands like "show mac address" "show access-tunnel" are the indenpendent commands, while their verification in hardware "show platform..." will be available only when the object is PD eligible.
+
+PD eligible objects:
+mac address
+adjacency
+route
+fib entry
+interface programming
+cts sgacl entry
+acl entry
+qos entry
+copp drops
+
+each of these are quite complex, I think we have so far created mac address adjacency and route entries, the rest will be done when we need.
+Every step MIGHT have a module for it already, we must reuse it if it exists.
+
+
+In summary, every time we detect a "PD eligible" object, we must save the object in a database of PD objects we will verify once everything is good (or bad/end of the script).
+
+Steps:
+
+1) AP identification (MAC address) and Switch: Input variables are AP MAC and Switch Management IP (like DHCP or East west modules).
+
+2) WLC Paramters:
+	Get the same parameters as the ones with FEW verifications but we will go over each step to see if it is doable to do them again, ask me for every step to see if we include them in this run.
+	
+3) Evaluation of the current state of the AP:
+	Edge side:
+		MAC Learning (PD available)
+		Authentication State (PD can be done but we must build it)
+		CDP Neighbor
+		Determination of Extended node or Not:
+			is the selected role an Edge or not?
+			if not tell the user that the Extended node flow is not yet available, use the FE as starting point.
+		VLAN state (PD available, we must build it, must be access)
+		It is in INFRAVN? Infra VN Parameters (LISP/Gateway, etc)
+		SVI parameters (PD available)
+		Interface status (counters, utilization)
+		L2 LISP Parameters (MAC on which EID, it is in DB?, LISP session tshoot if not, we will walk over it)
+		Route to the WLC MGMT IP (PD available)
+		Does the AP has an IP address already?:
+			check device-tracking
+			check ip dhcp snooping binding table for the gathered vlan
+			if there is no IP, we will trigger the DHCP flow that already exists with the following parametres:
+				MAC address
+				VLAN
+				vrf: default
+				FE node: from Switch Management IP
+				FEW: False
+		ACL RACL PACL SGACL to and from the AP to WLC and vice versa on FE and Borders (PD object)
+		L3 LISP Parameters (IID must be 4097, dyna eid discovered, registered or not (to trigger lisp session))
+		CEF parameters to the AP
+		CEF parameters to the WLC
+		CTS to the AP
+		CTS to the WLC
+		Ping test from Edge Lo0 to WLC
+		Access-Tunnel creation and formation:
+			Show access-tunnel summary will tell us if the AP already formed an Access TUnnel or not:
+				if so, validate PD and PI:
+				PI:
+					
+					show access-tunnel summary
+					show access-tunnel statistics (get radio mac, we will verify)
+					show lisp instance-id ethernet (ethernet isntance) database wlc (radio mac)
+					show l2lisp statistics
+					show idb 
+					show idp pointers
+					show ifnum list
+					show log (just collection)
+					show switch
+					limit of access tunnels per PID (will provide the data)
+					
+				PD:
+					idb programming (will provide the output)
+					interface numbers pm
+					pĺatform l2lisp statistics
+					access tunnel in r0
+					access tunnel in f0
+					access tunnel object
+					access tunnel in fed on each member
+					sanity verification of access tunel in each member
+					interface programming
+					flood access tunnel programing
+					mcast handle programming
+					ip consistency
+					mac address programming
+			if the access-tunnel is not created yet, we will go through the next validations, we will go through them for collection anyways, we check this even if the above is doable or not
+			
+#remember to ask me what to do in case every output gets no result!!!
+
+4) Control Plane:
+	Registration of the MAC on LISP
+	Registration of the AP IP on LISP on the correct L3 instance
+	Authentication Counters
+	LISP session state with the WLC (otherwise trigger WLC session tshoot)
+	Existence of the EID record (this might exist on a module already...)
+
+5) WLC parameters of the AP:
+	Is it registered? site tag? etc? - This might be already in some module already
+
+
+6) PD verifications on the switch on step 3
+
+7) Collection of show tech access tunnel if available on the FE, collection of show tech wireless on the WLC, these can take time. it is the very last step.
+
+	

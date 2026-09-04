@@ -17,6 +17,7 @@ from checks.common import (
     DetectInfraVn,
     ProfileXtrHostname,
 )
+from checks.ap_onboarding import ApEdgeGate
 from checks.profile import (
     ResolveCatcName,
     ProfileXtrNetworkDevice,
@@ -133,6 +134,19 @@ def build_check_chain(payload: dict) -> list[Check]:
     """Return the ordered list of checks for one run, given the scenario payload."""
     _normalize_payload(payload)
     scenario = payload.get("scenario")
+    if scenario == "ap_onboarding":
+        # Step 1 -- identify the AP and profile the switch it lands on. Reuses
+        # the profiling chain verbatim; ApEdgeGate then stops the flow unless
+        # the XTR is an Edge node, since an AP onboards through a fabric edge.
+        return [
+            ProfileXtrHostname(),
+            ResolveCatcName(),
+            ProfileXtrNetworkDevice(),
+            ProfileXtrFabricDevice(),
+            FabricSiteLookup(),
+            XtrRoleClassification(),
+            ApEdgeGate(),
+        ]
     if scenario == "dhcp":
         return [
             ValidateVrfParam(),
