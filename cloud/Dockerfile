@@ -56,7 +56,7 @@ COPY wirelessmodules/ /app/wirelessmodules/
 COPY traffic_flows/ /app/traffic_flows/
 COPY static/ /app/static/
 COPY check_registry.py device_profiler.py forwardinglogic.py hostonboarding.py \
-     ipverifications.py radkit_cli.py scenario_runner.py server.py \
+     ipverifications.py radkit_cli.py scenario_runner.py server.py transport.py \
      VERSION /app/
 
 # Cache-buster for static assets. Without it _read_version has no .git to read

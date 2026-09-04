@@ -245,3 +245,48 @@ exists, so users on snapshot zips will see the new release immediately.
 Open an issue or pull request on
 <https://github.com/desiredrive/revamped_tree_diagram>. For TAC-internal
 discussion, the maintainer is `jalejand@cisco.com`.
+
+## Offline testing (transport seam)
+
+Every device command and Catalyst Center call funnels through five functions in
+`radkit_cli.py`. `transport.py` puts one indirection under them so the same
+check code runs three ways:
+
+| Transport | Behaviour |
+|---|---|
+| `LiveTransport` | Talks to devices through RADKit. The default — nothing changes unless you opt in. |
+| `RecordingTransport` | Live, and additionally saves every response to a fixture file. |
+| `ReplayTransport` | Serves saved responses. Never touches RADKit; `service` may be `None`. |
+
+Replay is the point: ~30k lines of check logic had no test coverage, because
+exercising a chain needed a live fabric.
+
+```python
+from transport import ReplayTransport, set_transport, reset_transport
+
+token = set_transport(ReplayTransport("fixtures/case_678421.json"))
+try:
+    run_scenario(payload=payload, service=None, emit=collect, ...)
+finally:
+    reset_transport(token)
+```
+
+```bash
+python tests/test_transport.py     # or: python -m pytest tests/ -v
+```
+
+### Things worth knowing
+
+- **A `ContextVar`, not a global or thread-local.** `iptransit` fans work out to
+  a `ThreadPoolExecutor`; a thread-local would leave pool threads unset and they
+  would silently fall back to live RADKit — in exactly the multi-border case a
+  test is trying to replay. It already snapshots the caller's context for the
+  per-session logfile, so the transport rides along at no cost.
+- **`MissingFixture` does not subclass `KeyError`.** `radkit_cli` catches
+  `KeyError` and calls `sys.exit`, which would turn a fixture gap into a silent
+  exit rather than a visible failure.
+- **The collection log is not a fixture source.** `append_to_logging_file`
+  truncates at 15000 characters — fine for reading, silently corrupting for
+  replay. Recording writes its own untruncated file.
+- **The genie parse is re-run on replay**, not cached, so a parser change is
+  exercised by the tests rather than papered over.

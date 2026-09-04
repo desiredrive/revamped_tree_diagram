@@ -1,5 +1,6 @@
 import re
 import sys
+from transport import get_transport
 from radkit_cli import logging_info,logging_error,logging_warning,get_catc_api,get_any_single_output,get_single_output_genie
 from routingmodules.lisp import lisp_route_import
 import time
@@ -201,12 +202,10 @@ class Device:
 
             #Find device in inventory list
             try:
-                self.device_inventory = service.inventory.filter('host', '^{}$'.format(self.mgmtip))
-                device_name = list(self.device_inventory.keys())
+                device_name = get_transport().inventory_filter(service, 'host', '^{}$'.format(self.mgmtip))
 
                 #Validation - Does this device exists?
                 self.hostname = device_name[0]
-                self.device_inventory = service.inventory[self.hostname]
                 return self.hostname
 
             #If the Device does not exist

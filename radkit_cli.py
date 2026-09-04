@@ -4,6 +4,8 @@ from datetime import datetime
 import radkit_client
 import sys
 import radkit_genie
+
+from transport import get_transport
 import logging
 import threading
 import time
@@ -137,8 +139,7 @@ def radkit_version(service):
 def get_any_single_output(hostname,command: str,service):
     try:
         append_to_logging_file(command)
-        device_inventory = service.inventory[hostname]
-        commands = device_inventory.exec([command]).wait()
+        commands = get_transport().exec(hostname, [command], service)
         try:
             output = commands.result["{}".format(command)].data
             append_to_logging_file(output)
@@ -155,8 +156,7 @@ def get_single_output_genie(hostname, command: str, service, timeout: int = 0):
     type = 'iosxe'
     try:
         append_to_logging_file(command)
-        device_inventory = service.inventory[hostname]
-        raw = device_inventory.exec(command, timeout=timeout).wait()
+        raw = get_transport().exec(hostname, command, service, timeout=timeout)
         # Always log the raw device output before attempting genie parse, so the
         # logfile reflects what the device returned even when parsing fails.
         try:
@@ -206,14 +206,12 @@ def get_catc_api(dnac, api_url: str, service):
     # 2. Wrap the logic in the lock
     with CATC_API_LOCK:
         try:
-            device_inventory = service.inventory[dnac]
             attempts = 0
 
             while attempts < 6:
                 try:
                     # Execute the API call
-                    response = device_inventory.http.get(api_url).wait()
-                    response_js = json.loads(response.content)
+                    response_js = get_transport().http_get(dnac, api_url, service)
                     # Log to file
                     to_file = f"Catalyst Center API: {api_url}\n{json.dumps(response_js, indent=2)}"
                     append_to_logging_file(to_file)
@@ -248,14 +246,11 @@ def get_catc_api(dnac, api_url: str, service):
 def get_catc_name(service):  
         #Find CatC in inventory list
         try:
-            device_inventory = service.inventory.filter('device_type', 'CENTER')
-            device_name = list(device_inventory.keys())
+            device_name = get_transport().inventory_filter(service, 'device_type', 'CENTER')
             if len(device_name) == 0:
-                device_inventory = service.inventory.filter('device_type', 'DNAC')
-                device_name = list(device_inventory.keys())
+                device_name = get_transport().inventory_filter(service, 'device_type', 'DNAC')
             #Validation - Does this device exists?
             hostname = device_name[0]
-            device_inventory = service.inventory[hostname]
             return (hostname)
         #If the Device does not exist  
         except (IndexError, ValueError):
@@ -263,10 +258,8 @@ def get_catc_name(service):
 
 def get_hostname_from_mgmtip(mgmtip,service):
         try:
-            device_inventory = service.inventory.filter('host', '^{}$'.format(mgmtip))
-            device_name = list(device_inventory.keys())
+            device_name = get_transport().inventory_filter(service, 'host', '^{}$'.format(mgmtip))
             hostname = device_name[0]
-            device_inventory = service.inventory[hostname]
             return (hostname)
 
         #Does not exist  

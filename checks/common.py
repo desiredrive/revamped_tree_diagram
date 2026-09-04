@@ -80,8 +80,7 @@ class ProfileXtrHostname(Check):
             return CheckResult(CheckStatus.FAIL, "No XTR management IP supplied.")
 
         try:
-            inv = service.inventory.filter("host", "^{}$".format(mgmtip))
-            names = list(inv.keys())
+            names = get_transport().inventory_filter(service, "host", "^{}$".format(mgmtip))
             if not names:
                 return CheckResult(
                     CheckStatus.FAIL,

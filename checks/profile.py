@@ -187,8 +187,7 @@ class ResolveCatcName(Check):
         form_value = (ctx.payload.get("catc_name") or "").strip()
         if form_value:
             try:
-                inv = service.inventory.filter("name", "^{}$".format(form_value))
-                if not list(inv.keys()):
+                if not get_transport().inventory_filter(service, "name", "^{}$".format(form_value)):
                     return CheckResult(
                         CheckStatus.FAIL,
                         f"Catalyst Center '{form_value}' is not in RSA inventory.",
@@ -206,11 +205,9 @@ class ResolveCatcName(Check):
             )
 
         try:
-            inv = service.inventory.filter("device_type", "CENTER")
-            names = list(inv.keys())
+            names = get_transport().inventory_filter(service, "device_type", "CENTER")
             if not names:
-                inv = service.inventory.filter("device_type", "DNAC")
-                names = list(inv.keys())
+                names = get_transport().inventory_filter(service, "device_type", "DNAC")
         except Exception as e:
             return CheckResult(
                 CheckStatus.FAIL,
