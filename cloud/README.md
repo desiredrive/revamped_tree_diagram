@@ -204,3 +204,44 @@ s.connect(('prod.radkit-cloud.cisco.com', 443)); print('direct OK')"
 ```
 
 If that times out, a proxy is required, whatever else appears to be working.
+
+## TLS on a single host
+
+The app speaks plain HTTP. Put Caddy in front of it so session cookies, device
+hostnames and raw CLI output are not on the wire in clear text — see
+[`Caddyfile`](Caddyfile), which carries the SSE and header settings.
+
+The app must stop publishing port 80 first, since Caddy needs it. Bind it to
+localhost only, so the only way in is through TLS:
+
+```bash
+systemctl --user stop sdapf
+podman rm -f sdapf 2>/dev/null
+
+podman create --name sdapf -p 127.0.0.1:8000:8000 \
+  -e COOKIE_SECURE=0 \
+  -e HTTPS_PROXY=http://proxy.esl.cisco.com:80 \
+  -e HTTP_PROXY=http://proxy.esl.cisco.com:80 \
+  -e NO_PROXY=localhost,127.0.0.1 \
+  sda-pathfinder:latest
+podman generate systemd --name sdapf --new --restart-policy=always \
+  > ~/.config/systemd/user/sdapf.service
+podman rm sdapf
+systemctl --user daemon-reload && systemctl --user restart sdapf
+
+# Caddy needs privileged ports; rootless already has the sysctl for :80
+podman run -d --name sdapf-tls --network host \
+  -v ~/revamped_tree_diagram/cloud/Caddyfile:/etc/caddy/Caddyfile:ro,Z \
+  -v caddy-data:/data docker.io/library/caddy:2
+```
+
+Then browse to `https://<host>/`.
+
+**With a self-signed cert (no DNS name yet), browsers warn and engineers must
+click through.** That encrypts the traffic, which is the main win, but does not
+authenticate the server. Get a cert from Cisco IT when a DNS name exists — the
+Caddyfile documents the two-line swap.
+
+`COOKIE_SECURE=0` stays until then only because it is the same flag that lets
+the cookie work over the local HTTP hop. Once a real cert is in place, drop it
+so cookies are marked `Secure`.

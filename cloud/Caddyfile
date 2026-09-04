@@ -1,0 +1,67 @@
+# TLS terminator for SDA Pathfinder on a single host.
+#
+# The app speaks plain HTTP on 8000; Caddy fronts it on 443 so that session
+# cookies, device hostnames and raw CLI output are not on the wire in clear
+# text. Nothing about the app changes -- it does not know it is behind a proxy.
+#
+#   podman run -d --name sdapf-tls --network host \
+#     -v ~/revamped_tree_diagram/cloud/Caddyfile:/etc/caddy/Caddyfile:ro,Z \
+#     -v caddy-data:/data \
+#     docker.io/library/caddy:2
+#
+# ---------------------------------------------------------------------------
+# CURRENT: no DNS name yet, so this serves a self-signed cert on the IP.
+# Browsers WILL warn, and engineers must click through. That encrypts the
+# traffic (worth having) but does not authenticate the server (an interceptor
+# can still substitute their own cert).
+#
+# TO SWITCH to a real cert once you have a DNS name -- replace the block below
+# with:
+#
+#   sda-pathfinder.cisco.com {
+#     tls /etc/caddy/cert.pem /etc/caddy/key.pem   # from Cisco IT
+#     reverse_proxy localhost:8000 { ... }         # keep the body as-is
+#   }
+#
+# and drop COOKIE_SECURE=0 from the app, so cookies become Secure as intended.
+# ---------------------------------------------------------------------------
+
+{
+	# No ACME: an internal IP cannot be validated by a public CA, and there is
+	# no public DNS name to validate. Keeps Caddy from retrying Let's Encrypt.
+	auto_https off
+}
+
+:443 {
+	# Caddy mints a self-signed cert for this host. Swap for `tls cert key`
+	# when a real one exists.
+	tls internal
+
+	reverse_proxy localhost:8000 {
+		# SSE: a collection streams for minutes with quiet stretches between
+		# checks. Without these the proxy buffers events (the topology appears
+		# frozen, then jumps) or severs the stream mid-run.
+		flush_interval -1
+		transport http {
+			response_header_timeout 4h
+			read_timeout 4h
+		}
+	}
+
+	# The app sets its own session cookie; these are transport-level headers it
+	# cannot set for itself from behind a terminator.
+	header {
+		# 1 year, but no preload/includeSubDomains -- this is one internal host,
+		# not a domain the org has committed to HTTPS-only.
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+}
+
+# Redirect plain HTTP so an old bookmark still lands somewhere useful.
+:80 {
+	redir https://{host}{uri} permanent
+}
