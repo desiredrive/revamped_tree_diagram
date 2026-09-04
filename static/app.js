@@ -329,9 +329,19 @@ scenarioForm.addEventListener('submit', (e) => {
 
 // ---- Icons -----------------------------------------------------------------
 
+// Fabric roles (Fabric Edge, Border, Control Plane) render in Cisco light blue
+// with a circled role letter, so the fabric path reads at a glance. Everything
+// else keeps the darker blue.
+const FABRIC_ROLE_FILL = '#29B5E5';
+const DEFAULT_NODE_FILL = '#1e40af';
+
 // One icon SVG per status — the badge is drawn directly inside the SVG so the
 // position is exact and there are no multi-background-image quirks.
-function iconSvg(badgeFill) {
+// `bodyFill` tints the chassis; `roleLabel` is the role marker on the top-left,
+// opposite the status badge. A device can hold several fabric roles at once
+// (a Border that is also a CP), so the marker widens into a pill to fit them
+// all -- "B", "C", "B+C" -- rather than dropping any.
+function iconSvg(badgeFill, bodyFill, roleLabel) {
   // Rect is inset on top & right to leave room for the corner badge to peek out.
   const arrow =
     "<line x1='46' y1='54' x2='46' y2='28' stroke='white' stroke-width='2.2' stroke-linecap='round'/>" +
@@ -340,26 +350,65 @@ function iconSvg(badgeFill) {
   for (let i = 0; i < 8; i++) {
     arrows += "<g transform='rotate(" + (i * 45) + " 46 54)'>" + arrow + "</g>";
   }
+  let roleBadge = "";
+  if (roleLabel) {
+    const stroke = bodyFill || DEFAULT_NODE_FILL;
+    // One character stays a circle; anything longer grows into a pill so the
+    // text never spills outside the marker.
+    const w = roleLabel.length <= 1 ? 22 : 16 + 9 * roleLabel.length;
+    const cx = Math.max(15, w / 2 + 3);  // keep the marker inside the viewBox
+    roleBadge =
+      "<rect x='" + (cx - w / 2) + "' y='10' width='" + w + "' height='22' " +
+        "rx='11' ry='11' fill='white' stroke='" + stroke + "' stroke-width='2.5'/>" +
+      "<text x='" + cx + "' y='21' text-anchor='middle' dominant-baseline='central' " +
+        "font-family='Helvetica,Arial,sans-serif' font-size='" +
+        (roleLabel.length > 1 ? 12 : 13) + "' font-weight='bold' " +
+        "fill='" + stroke + "'>" + roleLabel + "</text>";
+  }
   return (
     "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
     "<rect x='2' y='10' width='88' height='88' rx='12' ry='12' " +
-      "fill='#1e40af' stroke='#0f172a' stroke-width='3'/>" +
+      "fill='" + (bodyFill || DEFAULT_NODE_FILL) + "' stroke='#0f172a' stroke-width='3'/>" +
     arrows +
     "<circle cx='90' cy='10' r='10' fill='" + badgeFill + "' stroke='white' stroke-width='2.5'/>" +
+    roleBadge +
     "</svg>"
   );
 }
-function iconUrl(fill) {
-  return "data:image/svg+xml;utf8," + encodeURIComponent(iconSvg(fill));
+function iconUrl(fill, bodyFill, roleLabel) {
+  return "data:image/svg+xml;utf8," + encodeURIComponent(iconSvg(fill, bodyFill, roleLabel));
 }
-const ICON_URL = {
-  pending: iconUrl('#cbd5e1'),
-  running: iconUrl('#eab308'),
-  ok:      iconUrl('#22c55e'),
-  warn:    iconUrl('#f97316'),
-  fail:    iconUrl('#ef4444'),
-  skip:    iconUrl('#94a3b8'),
+
+const STATUS_BADGE = {
+  pending: '#cbd5e1',
+  running: '#eab308',
+  ok:      '#22c55e',
+  warn:    '#f97316',
+  fail:    '#ef4444',
+  skip:    '#94a3b8',
 };
+
+const ICON_URL = {
+  pending: iconUrl(STATUS_BADGE.pending),
+  running: iconUrl(STATUS_BADGE.running),
+  ok:      iconUrl(STATUS_BADGE.ok),
+  warn:    iconUrl(STATUS_BADGE.warn),
+  fail:    iconUrl(STATUS_BADGE.fail),
+  skip:    iconUrl(STATUS_BADGE.skip),
+};
+
+// Fabric-role icons: light blue body + role marker, one per (role combo,
+// status) pair so the status badge still shows pass/warn/fail on top of the
+// role colour. Combos are pre-built because a device is often several things
+// at once -- a Border that is also a CP shows "B+C".
+const FABRIC_ROLE_COMBOS = ['E', 'B', 'C', 'B+C', 'E+B', 'E+C', 'E+B+C'];
+const FABRIC_ROLE_ICON_URL = {};
+for (const combo of FABRIC_ROLE_COMBOS) {
+  FABRIC_ROLE_ICON_URL[combo] = {};
+  for (const [status, badge] of Object.entries(STATUS_BADGE)) {
+    FABRIC_ROLE_ICON_URL[combo][status] = iconUrl(badge, FABRIC_ROLE_FILL, combo);
+  }
+}
 
 // Endpoint (computer) icon — drawn as a separate shape so it visually reads as
 // "the client" rather than another fabric device.
@@ -577,7 +626,17 @@ function showTopology(payload) {
           'font-weight': 600,
           'text-valign': 'bottom',
           'padding': 0,
-          'text-margin-y': -40,
+          // Push the label clear of the icon. background-clip:none lets the
+          // icon overflow the node box, so the label has to clear the icon's
+          // real extent, not the box -- a negative margin drags it back on top
+          // of the artwork. Labels also grow at runtime (RLOC / [tags] lines),
+          // so this offset is what keeps multi-line labels below the icon.
+          'text-margin-y': 6,
+          // A halo keeps text legible where it passes near an edge or icon.
+          'text-background-color': '#ffffff',
+          'text-background-opacity': 0.85,
+          'text-background-padding': '3px',
+          'text-background-shape': 'round-rectangle',
           'width': 88,
           'height': 88,
           'shape': 'round-rectangle',
@@ -591,38 +650,40 @@ function showTopology(payload) {
           'background-image': ENDPOINT_ICON_URL,
           'width': 72,
           'height': 72,
-          'text-margin-y': -28,
+          'text-margin-y': 8,
           'font-size': '11px',
       }},
       { selector: 'node[role = "border"]', style: {
           'width': 88,
           'height': 88,
-          'text-margin-y': -40,
+          'text-margin-y': 10,
       }},
       { selector: 'node[role = "control-plane"]', style: {
-          'background-image': CP_ICON_URL,
-          'width': 76,
-          'height': 76,
-          'text-margin-y': -30,
+          // No dedicated icon: a CP is a fabric device like an Edge or Border,
+          // so it uses the same light-blue switch, marked with a "C" badge by
+          // applyFabricRoleIcon.
+          'width': 88,
+          'height': 88,
+          'text-margin-y': 10,
       }},
       { selector: 'node[role = "dhcp-server"]', style: {
           'background-image': DHCP_SERVER_ICON_URL,
           'width': 72,
           'height': 72,
-          'text-margin-y': -28,
+          'text-margin-y': 8,
       }},
       { selector: 'node[role = "underlay-switch"]', style: {
           'background-image': UNDERLAY_SWITCH_ICON_URL,
           'width': 70,
           'height': 70,
-          'text-margin-y': -28,
+          'text-margin-y': 8,
           'font-size': '11px',
       }},
       { selector: 'node[role = "underlay-unknown"]', style: {
           'background-image': UNDERLAY_UNKNOWN_ICON_URL,
           'width': 70,
           'height': 70,
-          'text-margin-y': -28,
+          'text-margin-y': 8,
           'font-size': '11px',
           'opacity': 0.75,
       }},
@@ -630,7 +691,7 @@ function showTopology(payload) {
           'background-image': FABRIC_CLOUD_ICON_URL,
           'width': 110,
           'height': 88,
-          'text-margin-y': -36,
+          'text-margin-y': 10,
           'font-size': '12px',
           'font-weight': 'bold',
       }},
@@ -638,7 +699,7 @@ function showTopology(payload) {
           'background-image': WLC_ICON_URL.pending,
           'width': 88,
           'height': 88,
-          'text-margin-y': -40,
+          'text-margin-y': 10,
       }},
       { selector: 'node[role = "wlc"][status = "pending"]', style: { 'background-image': WLC_ICON_URL.pending } },
       { selector: 'node[role = "wlc"][status = "running"]', style: { 'background-image': WLC_ICON_URL.running } },
@@ -650,7 +711,7 @@ function showTopology(payload) {
           'background-image': AP_ICON_URL,
           'width': 88,
           'height': 88,
-          'text-margin-y': -40,
+          'text-margin-y': 10,
           'font-size': '11px',
       }},
       { selector: 'edge', style: {
@@ -1020,6 +1081,9 @@ function updateNode(nodeId, partial) {
   const n = cy.getElementById(nodeId);
   if (n.empty()) return;
   Object.entries(partial).forEach(([k, v]) => n.data(k, v));
+  if ('tags' in partial || 'role' in partial || 'status' in partial) {
+    applyFabricRoleIcon(nodeId);
+  }
 }
 
 function applyNodeLabel(nodeId) {
@@ -1165,20 +1229,27 @@ function addEndpointNode(info) {
 }
 
 // Layout offset, by role, used when no explicit position is given.
+// Offsets are generous on purpose: nodes carry multi-line labels (hostname +
+// RLOC + role tags) drawn *below* the icon, so the visual footprint of a node
+// is considerably taller and wider than its 88px box.
 const ROLE_OFFSET = {
-  endpoint:        { dx: -160, dy:  160 },
-  border:          { dx:  220, dy:    0 },
-  'control-plane': { dx:  220, dy: -180 },
-  'dhcp-server':   { dx:  420, dy:    0 },
-  'underlay-switch':  { dx: -260, dy:  -60 },
-  'underlay-unknown': { dx: -260, dy:  -60 },
-  fabric:          { dx: -340, dy:  140 },
-  wlc:             { dx:    0, dy: -260 },
-  'access-point':  { dx: -180, dy: -160 },
+  endpoint:        { dx: -200, dy:  240 },
+  border:          { dx:  300, dy:    0 },
+  'control-plane': { dx:  300, dy: -240 },
+  'dhcp-server':   { dx:  580, dy:    0 },
+  'underlay-switch':  { dx: -340, dy:  -80 },
+  'underlay-unknown': { dx: -340, dy:  -80 },
+  fabric:          { dx: -440, dy:  200 },
+  wlc:             { dx:    0, dy: -320 },
+  'access-point':  { dx: -240, dy: -220 },
   // Spawned by WirelessFabricEdgeEtr when the wireless endpoint roamed off
   // the user-supplied XTR — placed to the right of the original.
-  xtr:             { dx:  280, dy:    0 },
+  xtr:             { dx:  360, dy:    0 },
 };
+
+// Vertical step used when two nodes would land on the same spot. Must exceed a
+// node's icon plus its label block, or staggered nodes still overlap.
+const STAGGER_Y = 200;
 
 // Human-readable role tag added to a merged node when multiple checks land on
 // the same physical device (matched by IP).
@@ -1192,13 +1263,47 @@ const ROLE_TAG = {
   'access-point': 'AP',
 };
 
+// Which fabric-role marker a node should carry. A device is often several
+// things at once (a Border that is also a CP), and the roles arrive at
+// different times -- 'xtr' is set when the node is created, Border/CP are
+// merged in later as tags when a check lands on the same IP. Every role the
+// node holds is shown, joined with '+', in a stable E/B/C order.
+function fabricRoleOf(n) {
+  const tags = n.data('tags') || [];
+  const role = n.data('role');
+  const parts = [];
+  if (role === 'xtr') parts.push('E');
+  if (tags.includes('Border') || role === 'border') parts.push('B');
+  if (tags.includes('CP') || role === 'control-plane') parts.push('C');
+  return parts.length ? parts.join('+') : null;
+}
+
+// Re-point a node at the right icon for its fabric role + current status.
+// Status still drives the badge, so a failed Border is light blue with a red
+// badge rather than losing its pass/fail signal.
+function applyFabricRoleIcon(nodeId) {
+  if (!cy) return;
+  const n = cy.getElementById(nodeId);
+  if (!n || n.empty()) return;
+  const fr = fabricRoleOf(n);
+  if (!fr) { n.removeStyle('background-image'); return; }
+  const status = n.data('status') || 'pending';
+  // Fall back to building the icon on the fly for any combination not
+  // pre-generated, so a new role never silently loses its marker.
+  const url = (FABRIC_ROLE_ICON_URL[fr] || {})[status]
+           || iconUrl(STATUS_BADGE[status] || STATUS_BADGE.pending, FABRIC_ROLE_FILL, fr);
+  if (url) n.style('background-image', url);
+}
+
 function addNodes(nodes) {
   if (!Array.isArray(nodes) || !cy) return;
+  // [x, y] pairs of every taken slot, compared by proximity below rather than
+  // by exact equality.
   const occupied = new Set();
   const ipIndex = new Map();  // ip -> existing node id
   cy.nodes().forEach(n => {
     const p = n.position();
-    occupied.add(Math.round(p.x) + ',' + Math.round(p.y));
+    occupied.add([p.x, p.y]);
     const ip = n.data('ip');
     if (ip) ipIndex.set(ip, n.id());
   });
@@ -1247,6 +1352,7 @@ function addNodes(nodes) {
           tags.push(tag);
           target.data('tags', tags);
           applyNodeLabel(targetId);
+          applyFabricRoleIcon(targetId);
         }
       }
       const parentId = resolveNodeId(spec.connect_to) || 'xtr';
@@ -1276,11 +1382,15 @@ function addNodes(nodes) {
     const offset = ROLE_OFFSET[role] || { dx: 200, dy: 0 };
     let x = parent.position().x + offset.dx;
     let y = parent.position().y + offset.dy;
-    // Stagger if the slot is already occupied.
-    while (occupied.has(Math.round(x) + ',' + Math.round(y))) {
-      y += 100;
+    // Stagger if something is already near this slot. Exact-coordinate matching
+    // is not enough -- two nodes a few px apart still overlap once their labels
+    // are drawn -- so treat anything within the stagger box as a collision.
+    let guard = 0;
+    while (guard++ < 40 && [...occupied].some(([ox, oy]) =>
+             Math.abs(ox - x) < 200 && Math.abs(oy - y) < STAGGER_Y)) {
+      y += STAGGER_Y;
     }
-    occupied.add(Math.round(x) + ',' + Math.round(y));
+    occupied.add([x, y]);
 
     cy.add({
       group: 'nodes',
@@ -1355,6 +1465,9 @@ function appendCheck(nodeId, entry) {
   // ok/warn/fail count toward the terminal verdict. Running shows while there
   // are still in-flight checks and no failure has surfaced.
   n.data('status', computeNodeStatus(list));
+  // Keep the fabric-role icon in step with the new status (status drives the
+  // badge; the light-blue body stays).
+  applyFabricRoleIcon(nodeId);
   if (selectedNodeId === nodeId) renderChecksPanel();
 }
 
@@ -1452,6 +1565,7 @@ function mergeNodeInto(srcId, tgtId, edgeLabel) {
 
   // Recompute merged status from the unioned check list (skip-neutral).
   tgt.data('status', computeNodeStatus(checks));
+  applyFabricRoleIcon(tgt.id());
 
   // Re-home edges that touched src to touch tgt instead, then drop duplicates.
   // If tgt already has an edge to the same other endpoint, keep the more
