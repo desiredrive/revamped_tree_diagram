@@ -41,13 +41,23 @@ ENV PATH="/opt/venv/bin:$PATH" \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-COPY . /app
 
-# Not shipped in the image: the self-updater rewrites the source tree in place,
-# which is meaningless for an immutable image (the read-only rootfs in the
-# Deployment is the real enforcement).
-RUN rm -f /app/update.py /app/Update-SDA-Pathfinder.* /app/run.sh \
-          /app/SDA-Pathfinder.* /app/collection_logfile.txt
+# Copy the application explicitly rather than `COPY . /app`. A blanket copy
+# depends on .dockerignore listing every stray directory by name, and a working
+# tree accumulates scratch data -- a 6.8 GB directory of case logs once made
+# this image ~10x larger. An allowlist cannot leak what it does not name.
+COPY checks/ /app/checks/
+COPY cloud/ /app/cloud/
+COPY catalystcenterapi/ /app/catalystcenterapi/
+COPY routingmodules/ /app/routingmodules/
+COPY securitymodules/ /app/securitymodules/
+COPY switchingmodules/ /app/switchingmodules/
+COPY wirelessmodules/ /app/wirelessmodules/
+COPY traffic_flows/ /app/traffic_flows/
+COPY static/ /app/static/
+COPY check_registry.py device_profiler.py forwardinglogic.py hostonboarding.py \
+     ipverifications.py radkit_cli.py scenario_runner.py server.py \
+     VERSION /app/
 
 # Cache-buster for static assets. Without it _read_version has no .git to read
 # and falls back to VERSION, so browsers keep stale app.js across deploys.

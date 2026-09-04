@@ -20,6 +20,16 @@ tac-smd.log
 anyconnect_results.json
 testbed.yaml
 
+# Scratch directories of case data (trace archives, device logs). Untracked and
+# not imported by the app, but they dwarf the source -- routemispro/ alone was
+# 6.8 GB and made the image ~10x bigger. Keep case data out of images.
+routemispro
+cases
+scratch
+*.tar.gz
+*.pcap
+*.zip
+
 # Standalone-only launchers (also removed in the image, belt and braces)
 update.py
 Update-SDA-Pathfinder.*
