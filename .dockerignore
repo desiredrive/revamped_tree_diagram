@@ -1,0 +1,36 @@
+# Build context hygiene. Without this the 36 MB tac-smd.log, the stray .rtd
+# venv and the git history all get shipped to the daemon.
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+.rtd
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+
+# Runtime detritus from local runs
+collection_logfile.txt
+tac-smd.log
+*.log
+anyconnect_results.json
+testbed.yaml
+
+# Standalone-only launchers (also removed in the image, belt and braces)
+update.py
+Update-SDA-Pathfinder.*
+SDA-Pathfinder.*
+run.sh
+update.sh
+
+# Docs
+*.md
+!requirements.txt
+programming
+scripts
+.claude
+*.code-workspace

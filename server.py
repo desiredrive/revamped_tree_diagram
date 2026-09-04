@@ -14,8 +14,8 @@ from pydantic import BaseModel
 from radkit_client.sync import Client
 
 from checks import Check, CheckResult, CheckStatus, RunContext
-from radkit_cli import DEFAULT_LOGFILE, set_logfile
-from check_registry import build_check_chain
+from radkit_cli import DEFAULT_LOGFILE
+from scenario_runner import run_scenario as _run_scenario_chain
 
 
 _STOP = object()  # sentinel to shut down a session's worker thread
@@ -155,119 +155,14 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
     Past events stay in the log so a reconnecting browser can still replay
     them — the frontend uses 'run_started' as the boundary for a fresh run.
     """
-
-    _emit(sess, {"type": "run_started", "scenario": payload.get("scenario")})
     sess.cancel_run.clear()
-
-    # Bind this run's collection log. Standalone is single-user, so this stays
-    # the historical CWD file; the cloud entrypoint points it at a per-session
-    # path instead. Set on the worker thread so checks -- and the border thread
-    # pool in traffic_flows/iptransit.py, which copies this context -- all
-    # agree on the destination.
-    set_logfile(LOGFILE_PATH)
-
-    # Reset the per-run collection log so each invocation starts with a clean
-    # file (downloadable via /logfile). Failures here are non-fatal — the run
-    # itself can still proceed.
-    try:
-        open(LOGFILE_PATH, "w").close()
-    except OSError:
-        pass
-
-    chain = build_check_chain(payload)
-    if not chain:
-        _emit(sess, {
-            "type": "run_complete",
-            "ok": False,
-            "message": f"No check chain defined for scenario '{payload.get('scenario')}'.",
-        })
-        return
-
-    ctx = RunContext(payload=payload, service=sess.service)
-    any_fail = False
-
-    # Use an index so Checks can dynamically extend the chain at runtime via
-    # CheckResult.data["queue_checks"] — used by BorderProfile to spawn one
-    # Check per discovered border.
-    chain = list(chain)
-    i = 0
-    while i < len(chain):
-        if sess.cancel_run.is_set():
-            _emit(sess, {
-                "type": "run_complete",
-                "ok": False,
-                "cancelled": True,
-                "message": "Collection cancelled by user.",
-            })
-            return
-        check = chain[i]
-        # Allow a previous check to remap subsequent target node ids — used by
-        # WirelessFabricEdgeRedirect to redirect the wired chain to a newly-spawned
-        # XTR node when the wireless endpoint roamed away from the user's
-        # original input. Captured once and reused for check_finished so a
-        # check that mutates the remap inside its own run() still completes on
-        # the old node; only the NEXT iteration sees the new mapping.
-        remap = ctx.state.get("node_remap") or {}
-        if getattr(check, "bypass_remap", False):
-            target = check.target_node_id
-        else:
-            target = remap.get(check.target_node_id, check.target_node_id)
-        _emit(sess, {
-            "type": "check_started",
-            "name": check.name,
-            "target_node_id": target,
-            "note": getattr(check, "running_note", "") or "",
-        })
-        try:
-            result = check.run(ctx)
-        except BaseException as e:
-            # BaseException covers SystemExit from legacy helpers that call
-            # sys.exit() on hard prerequisite failures — we want to surface the
-            # error on the affected node, not tear down the worker thread.
-            result = CheckResult(
-                CheckStatus.FAIL,
-                f"Unhandled exception in check: {type(e).__name__}: {e}",
-            )
-
-        event = {
-            "type": "check_finished",
-            "name": check.name,
-            "target_node_id": target,
-            "status": result.status.value,
-            "message": result.message,
-        }
-        # Pass through any data the check wanted the UI to act on.
-        if result.data.get("node_relabel"):
-            event["node_relabel"] = result.data["node_relabel"]
-        if result.data.get("relabel_nodes"):
-            event["relabel_nodes"] = result.data["relabel_nodes"]
-        if result.data.get("node_tags") is not None:
-            event["node_tags"] = result.data["node_tags"]
-        if result.data.get("add_endpoint"):
-            event["add_endpoint"] = result.data["add_endpoint"]
-        if result.data.get("add_nodes"):
-            event["add_nodes"] = result.data["add_nodes"]
-        if result.data.get("add_edges"):
-            event["add_edges"] = result.data["add_edges"]
-        if result.data.get("node_rloc"):
-            event["node_rloc"] = result.data["node_rloc"]
-        if result.data.get("merge_into"):
-            event["merge_into"] = result.data["merge_into"]
-        _emit(sess, event)
-
-        # Splice any dynamically-queued follow-up Checks right after the
-        # current position so they run before any later static Checks.
-        extra = result.data.get("queue_checks")
-        if extra:
-            chain[i+1:i+1] = list(extra)
-
-        if result.status == CheckStatus.FAIL:
-            any_fail = True
-            # Do NOT break — the affected node turns red, the error is shown,
-            # and remaining checks continue so the user sees the full picture.
-        i += 1
-
-    _emit(sess, {"type": "run_complete", "ok": not any_fail})
+    _run_scenario_chain(
+        payload=payload,
+        service=sess.service,
+        emit=lambda ev: _emit(sess, ev),
+        cancelled=sess.cancel_run.is_set,
+        logfile=LOGFILE_PATH,
+    )
 
 
 # Registry of command handlers. Each handler runs in the session's worker thread
@@ -287,7 +182,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def _read_version() -> dict:
     """Return version + short git commit if available."""
-    info = {"version": "dev", "commit": None}
+    info = {"version": "dev", "commit": None, "cert_login_enabled": True}
     try:
         with open("VERSION", "r") as f:
             info["version"] = f.read().strip() or "dev"
@@ -336,7 +231,11 @@ def index():
 
 
 @app.get("/logfile")
-def download_logfile():
+@app.get("/logfile/{sid}")
+def download_logfile(sid: str = ""):
+    # Single-user: there is one log regardless of session. The {sid} form
+    # exists so the shared frontend can use one URL for both servers; the
+    # cloud entrypoint uses it to serve only the caller's own log.
     import os
     path = LOGFILE_PATH
     if not os.path.exists(path):

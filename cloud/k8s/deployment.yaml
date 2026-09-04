@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sda-pathfinder
+  labels:
+    app: sda-pathfinder
+spec:
+  # No HPA. Sessions live in process memory and hold a RADKit connection, so
+  # scaling in would kill live troubleshooting sessions.
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sda-pathfinder
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: sda-pathfinder
+    spec:
+      # Must exceed the SSE drain window in the lifespan shutdown handler.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: app
+          image: sda-pathfinder:latest  # replace with your internal registry ref
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8000"
+            - name: DATA_DIR
+              value: /tmp/sda-pathfinder
+            - name: HOME
+              value: /tmp
+            - name: MAX_SESSIONS
+              value: "50"
+            - name: SESSION_IDLE_TIMEOUT
+              value: "1800"
+            - name: SESSION_TTL_SECONDS
+              value: "28800"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Per-session collection logs. emptyDir, not a PVC: the logs are
+            # ephemeral and an RWO volume could not be shared across replicas.
+            - name: scratch
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              # MAX_SESSIONS is what actually bounds memory; size this against it.
+              cpu: "2"
+              memory: 4Gi
+          # RADKit + Genie import is slow; give startup room so a cold boot is
+          # not mistaken for a liveness failure.
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            # Deliberately trivial. A pod busy with many sessions is healthy --
+            # failing here would kill pods holding live sessions.
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            # Only flips on shutdown. It must NOT go unready under load:
+            # readiness controls endpoint membership, and with sticky sessions
+            # dropping out breaks EXISTING sessions, not just new ones.
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Let the router deregister this pod before the app starts
+              # refusing work, so in-flight requests are not dropped.
+              exec:
+                command: ["sleep", "10"]
+      volumes:
+        - name: scratch
+          emptyDir: {}

@@ -53,6 +53,20 @@ const loginForm = document.getElementById('loginForm');
 const loginStatus = document.getElementById('status');
 const methodSelect = document.getElementById('method');
 const passphraseRow = document.getElementById('passphraseRow');
+const methodRow = methodSelect ? methodSelect.closest('label, div') || methodSelect : null;
+
+// Certificate login needs a key on disk and prompts on stdin, so the cloud
+// server does not offer it. It advertises that via /version; the server also
+// rejects the method outright, this just keeps the UI honest.
+fetch('/version').then(r => r.ok ? r.json() : null).then(v => {
+  if (v && v.cert_login_enabled === false) {
+    const opt = methodSelect && methodSelect.querySelector('option[value="certificate"]');
+    if (opt) opt.remove();
+    if (methodSelect) methodSelect.value = 'sso';
+    if (methodRow && methodRow !== methodSelect) methodRow.style.display = 'none';
+    syncPassphraseVisibility();
+  }
+}).catch(() => {});
 
 function syncPassphraseVisibility() {
   passphraseRow.style.display = (methodSelect.value === 'certificate') ? 'block' : 'none';
@@ -700,7 +714,9 @@ function showTopology(payload) {
     // — navigation tears down the active EventSource and surfaces as
     // "interrupted" in the network console.
     const a = document.createElement('a');
-    a.href = '/logfile';
+    // Session-scoped: the cloud server serves only the caller's own log, and
+    // the standalone server ignores the suffix (it has a single log).
+    a.href = currentSession ? '/logfile/' + currentSession : '/logfile';
     a.download = 'collection_logfile.txt';
     document.body.appendChild(a);
     a.click();
