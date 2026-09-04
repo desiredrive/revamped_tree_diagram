@@ -76,6 +76,9 @@ class Session:
     created_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     closing: bool = False
+    # True while a scenario is actually executing. A queue check cannot tell:
+    # the command is dequeued immediately and the run then takes minutes.
+    running: bool = False
 
     def touch(self) -> None:
         self.last_seen = time.time()
@@ -171,13 +174,19 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
     session's own file so concurrent engineers don't overwrite each other."""
     sess.cancel_run.clear()
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-    run_scenario(
-        payload=payload,
-        service=sess.service,
-        emit=lambda ev: _emit(sess, ev),
-        cancelled=sess.cancel_run.is_set,
-        logfile=config.session_logfile(sess.session_id),
-    )
+    with sess.lock:
+        sess.running = True
+    try:
+        run_scenario(
+            payload=payload,
+            service=sess.service,
+            emit=lambda ev: _emit(sess, ev),
+            cancelled=sess.cancel_run.is_set,
+            logfile=config.session_logfile(sess.session_id),
+        )
+    finally:
+        with sess.lock:
+            sess.running = False
 
 
 COMMANDS = {
@@ -387,6 +396,26 @@ async def readyz():
     if _shutting_down:
         raise HTTPException(status_code=503, detail="shutting down")
     return {"ok": True}
+
+
+@app.get("/stats")
+async def stats():
+    """Session counts, so a deploy can wait for engineers to finish.
+
+    Replacing a pod ends its sessions -- a RADKit client cannot move -- and
+    those engineers have to redo SSO. The upgrade CronJob polls this to hold a
+    rollout until nobody is mid-collection. No session ids or identities here:
+    it is a coarse liveness signal, not a session listing.
+    """
+    with _sessions_lock:
+        live = list(sessions.values())
+    active = sum(1 for s in live if s.running)
+    return {
+        "sessions": len(live),
+        "running": active,
+        "busy": bool(live),
+        "version": _read_version().get("commit"),
+    }
 
 
 @app.get("/version")

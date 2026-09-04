@@ -124,3 +124,46 @@ DATA_DIR=/tmp/sdapf COOKIE_SECURE=0 python -m uvicorn cloud.server:app --port 80
 ```
 
 `COOKIE_SECURE=0` is only for local HTTP; leave it set in any deployment.
+
+## Upgrades from GitHub
+
+The standalone app updates by rewriting its own source tree (`update.py`). A pod
+must not do that: three replicas would drift to different versions, and any pod
+that restarted would silently revert to whatever is baked into its image. The
+container-native equivalent is that **a new commit produces a new image**, and
+OpenShift rolls it out.
+
+```bash
+oc apply -f cloud/k8s/upgrade-cronjob.yaml
+```
+
+A CronJob polls GitHub for new commits on `main` and starts a build when the SHA
+changes; the Deployment's ImageStream trigger then rolls the new image out.
+Polling rather than a webhook because it only needs **outbound** access to
+GitHub — an internal cluster can rarely accept an inbound webhook call.
+
+Two behaviours worth knowing:
+
+- **It defers while anyone is mid-collection.** Replacing a pod ends its
+  sessions (a RADKit client cannot be moved) and forces those engineers to redo
+  SSO. The job reads `/stats` from each pod and skips the build until the next
+  tick if any scenario is running.
+- **The SHA is recorded only after a successful build**, so a failed build is
+  retried on the next tick rather than being skipped.
+
+To ship immediately instead of waiting for the schedule:
+
+```bash
+oc start-build sda-pathfinder --commit=$(git rev-parse HEAD) \
+  --build-arg=APP_VERSION=$(git rev-parse --short HEAD) --follow
+```
+
+To pause automatic upgrades: `oc patch cronjob sda-pathfinder-upgrade -p '{"spec":{"suspend":true}}'`
+
+### Rollouts always interrupt sessions
+
+There is no zero-downtime version of this. A session holds a live RADKit client
+bound to one pod, so any pod replacement ends the sessions on it. The CronJob
+avoids interrupting *active runs*, and browsers get a `server_shutdown` event
+explaining what happened, but affected engineers still log in again. Schedule
+accordingly.

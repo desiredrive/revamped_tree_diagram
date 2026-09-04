@@ -1,0 +1,137 @@
+# Self-upgrade from GitHub, the container-native way.
+#
+# The standalone app updates by rewriting its own source tree (update.py). A
+# pod must not do that: three replicas would drift to different versions, and
+# any pod that restarted would silently revert to whatever is baked into the
+# image. Instead a new commit produces a NEW IMAGE, and OpenShift rolls it out.
+#
+# This CronJob polls GitHub for new commits on main and starts a build when the
+# SHA changes. Polling (not a webhook) because it only needs OUTBOUND access to
+# GitHub -- an internal cluster can rarely accept an inbound webhook call.
+#
+#   oc apply -f cloud/k8s/upgrade-cronjob.yaml
+#
+# Rollout is automatic: the ImageStream trigger on the Deployment picks up the
+# new image. Note that replacing a pod ENDS the sessions on it -- a RADKit
+# client cannot be moved -- so the job holds off while anyone is mid-collection
+# (see /stats) and gives up until the next tick rather than interrupting work.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sda-pathfinder-upgrader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sda-pathfinder-upgrader
+rules:
+  - apiGroups: ["build.openshift.io"]
+    resources: ["buildconfigs", "buildconfigs/instantiate", "builds"]
+    verbs: ["get", "list", "create"]
+  - apiGroups: ["image.openshift.io"]
+    resources: ["imagestreams", "imagestreamtags"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sda-pathfinder-upgrader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sda-pathfinder-upgrader
+subjects:
+  - kind: ServiceAccount
+    name: sda-pathfinder-upgrader
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sda-pathfinder-upgrade-state
+data:
+  # Last SHA built. The job updates this itself; seed it empty for a first run.
+  last_sha: ""
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sda-pathfinder-upgrade
+spec:
+  # Off-peak and off the hour, so it does not collide with everyone else's
+  # scheduled jobs. Adjust to your working hours.
+  schedule: "23 6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: sda-pathfinder-upgrader
+          restartPolicy: Never
+          containers:
+            - name: upgrade
+              # Any image with `oc` and `curl`. The OpenShift CLI image is the
+              # obvious choice; swap for your internal mirror if needed.
+              image: registry.redhat.io/openshift4/ose-cli:latest
+              env:
+                - name: REPO
+                  value: desiredrive/revamped_tree_diagram
+                - name: BRANCH
+                  value: main
+                - name: BC
+                  value: sda-pathfinder
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  # Latest upstream commit. If GitHub is unreachable from the
+                  # cluster this is where it fails -- loudly, not silently.
+                  SHA=$(curl -sS --fail --max-time 30 \
+                    "https://api.github.com/repos/${REPO}/commits/${BRANCH}" \
+                    | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
+                  if [ -z "${SHA}" ]; then
+                    echo "Could not read latest SHA from GitHub" >&2; exit 1
+                  fi
+                  SHORT="${SHA:0:7}"
+
+                  LAST=$(oc get configmap sda-pathfinder-upgrade-state \
+                    -o jsonpath='{.data.last_sha}' 2>/dev/null || echo "")
+                  echo "upstream=${SHORT} last_built=${LAST:-none}"
+
+                  if [ "${SHORT}" = "${LAST}" ]; then
+                    echo "Already on the latest commit; nothing to do."; exit 0
+                  fi
+
+                  # Do not interrupt an engineer mid-collection. Replacing a pod
+                  # ends its sessions and forces a fresh SSO login, so a running
+                  # scenario is worth more than shipping today's build -- wait
+                  # for the next tick instead.
+                  BUSY=$(oc get endpoints sda-pathfinder \
+                    -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || echo "")
+                  for ip in ${BUSY}; do
+                    RUNNING=$(curl -sS --max-time 10 "http://${ip}:8000/stats" \
+                      | sed -n 's/.*"running": *\([0-9]*\).*/\1/p' | head -1)
+                    if [ -n "${RUNNING}" ] && [ "${RUNNING}" -gt 0 ]; then
+                      echo "Pod ${ip} has ${RUNNING} scenario(s) running -- deferring."
+                      exit 0
+                    fi
+                  done
+
+                  echo "Building ${SHORT} ..."
+                  oc start-build "${BC}" \
+                    --commit="${SHA}" \
+                    --build-arg=APP_VERSION="${SHORT}" \
+                    --follow --wait
+
+                  # Only record the SHA after a successful build, so a failure
+                  # is retried on the next tick rather than being skipped.
+                  oc patch configmap sda-pathfinder-upgrade-state \
+                    --type merge -p "{\"data\":{\"last_sha\":\"${SHORT}\"}}"
+                  echo "Built ${SHORT}; the ImageStream trigger rolls it out."
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits:   {cpu: 200m, memory: 256Mi}

@@ -4,6 +4,13 @@ metadata:
   name: sda-pathfinder
   labels:
     app: sda-pathfinder
+  annotations:
+    # Roll out automatically when the BuildConfig pushes a new image. Paired
+    # with the upgrade CronJob, a commit on main becomes a running update
+    # without anyone rewriting files inside a pod.
+    image.openshift.io/triggers: |
+      [{"from":{"kind":"ImageStreamTag","name":"sda-pathfinder:latest"},
+        "fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
 spec:
   # No HPA. Sessions live in process memory and hold a RADKit connection, so
   # scaling in would kill live troubleshooting sessions.
