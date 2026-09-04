@@ -167,3 +167,40 @@ bound to one pod, so any pod replacement ends the sessions on it. The CronJob
 avoids interrupting *active runs*, and browsers get a `server_shutdown` event
 explaining what happened, but affected engineers still log in again. Schedule
 accordingly.
+
+## Proxy (Cisco internal hosts)
+
+On an internal Cisco network the RADKit cloud is usually not directly
+reachable — `prod.radkit-cloud.cisco.com` times out on **every** port,
+including 443 — so RADKit must be pointed at the proxy:
+
+```
+HTTPS_PROXY=http://proxy.esl.cisco.com:80
+HTTP_PROXY=http://proxy.esl.cisco.com:80
+NO_PROXY=localhost,127.0.0.1
+```
+
+Keep `.cisco.com` **out of `NO_PROXY`**. The RADKit cloud is itself a
+`.cisco.com` host, so excluding it sends the traffic direct — straight back to
+the timeouts.
+
+### Diagnosing it
+
+The failure is easy to misread, because the two connections fail differently:
+
+- Login may still work while the forwarder does not. The tell is
+  `WebSocketConnectionLostError: Failed to connect to any forwarder (tries=5)`
+  alongside successful `POST .../ocsp/verify "200 OK"` lines.
+- Those 200s do **not** prove direct connectivity — they can already be
+  travelling through a proxy RADKit picked up elsewhere.
+
+The unambiguous test is a raw socket, which no proxy setting can flatter:
+
+```bash
+podman exec sdapf python -c "
+import socket
+s=socket.socket(); s.settimeout(8)
+s.connect(('prod.radkit-cloud.cisco.com', 443)); print('direct OK')"
+```
+
+If that times out, a proxy is required, whatever else appears to be working.
