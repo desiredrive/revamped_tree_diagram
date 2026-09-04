@@ -119,8 +119,20 @@ loginForm.addEventListener('submit', async (e) => {
   }
 });
 
+// RADKit's client setup and forwarder connect each take tens of seconds, and we
+// get no progress out of them -- only the result. A static "Connecting..." is
+// then indistinguishable from a hang, so show elapsed time: it does not make
+// the wait shorter, but it makes it legible as waiting rather than broken.
+function waitingHtml(what, startedAt, extra) {
+  const secs = Math.round((Date.now() - startedAt) / 1000);
+  return what + ' <b>' + secs + 's</b><br>' +
+    '<span style="opacity:0.75;font-size:0.9em">' +
+    (extra || 'RADKit calls can take 30-60s.') + '</span>';
+}
+
 async function pollLoginStatus(sid) {
   let urlShown = false;
+  const startedAt = Date.now();
   while (true) {
     await new Promise(r => setTimeout(r, 1500));
     try {
@@ -155,6 +167,12 @@ async function pollLoginStatus(sid) {
           'Open this URL to authenticate (waiting...):<br><br>' +
           '<a href="' + d.sso_url + '" target="_blank" rel="noopener" ' +
           'style="color:#93c5fd;word-break:break-all">' + d.sso_url + '</a>';
+      } else if (!urlShown) {
+        // Still inside RADKit client setup -- no SSO URL to show yet.
+        loginStatus.className = 'ok';
+        loginStatus.innerHTML = waitingHtml(
+          'Starting RADKit client...', startedAt,
+          'Validating certificates with the RADKit cloud. Usually 30-60s.');
       }
     } catch (e) {
       // network blip — keep polling
@@ -214,10 +232,17 @@ serviceForm.addEventListener('submit', async (e) => {
 });
 
 async function pollServiceStatus(sid) {
+  const startedAt = Date.now();
   while (true) {
     await new Promise(r => setTimeout(r, 1500));
     try {
       const r = await fetch('/service/status/' + sid);
+      if (r.status === 404) {
+        clearSession();
+        setStatus(serviceStatus, 'err',
+          '<b>Session ended.</b><br>The server restarted. Reload and log in again.');
+        return;
+      }
       const d = await r.json();
       if (d.status === 'error') {
         setStatus(serviceStatus, 'err', 'Connect failed: ' + (d.error || 'unknown'));
@@ -229,6 +254,9 @@ async function pollServiceStatus(sid) {
         showScenarioForm(d.name || d.serial);
         return;
       }
+      setStatus(serviceStatus, 'ok', waitingHtml(
+        'Connecting to service...', startedAt,
+        'Establishing the RADKit forwarder tunnel. Usually 30-60s.'));
     } catch (e) { /* keep polling */ }
   }
 }
