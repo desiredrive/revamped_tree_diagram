@@ -104,6 +104,14 @@ def _do_login(sess: Session) -> None:
     resp = c.oauth_connect_only(identity=sess.email, domain=sess.domain)
     if resp is None:
         raise RuntimeError("RSA returned no OAuth response.")
+    # RADKit signals failure by RETURNING an ErrorResult, not by raising. Without
+    # this the next line dies with an opaque AttributeError about .sso_url and
+    # RADKit's actual message -- the only thing that says what went wrong -- is
+    # lost.
+    if not hasattr(resp, "sso_url"):
+        detail = (getattr(resp, "message", None) or getattr(resp, "error", None)
+                  or getattr(resp, "reason", None) or repr(resp))
+        raise RuntimeError(f"RADKit refused the OAuth connect: {detail}")
 
     with sess.lock:
         sess.sso_url = str(resp.sso_url)
@@ -131,6 +139,12 @@ def _do_connect_service(sess: Session, payload: dict) -> None:
         sess.service_error = None
     try:
         service = sess.client.service_cloud(serial).wait()
+        # Same ErrorResult-not-exception pattern as _do_login: surface RADKit's
+        # message rather than failing later on a missing attribute.
+        if service is None or type(service).__name__ == "ErrorResult":
+            detail = (getattr(service, "message", None) or getattr(service, "error", None)
+                      or repr(service))
+            raise RuntimeError(f"RADKit could not open service {serial}: {detail}")
     except Exception as e:
         with sess.lock:
             sess.service_status = "error"
