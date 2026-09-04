@@ -251,9 +251,41 @@ class BorderCollect(Check):
         )
         btype = getattr(bobj, "type", "") or "unknown"
         # Pull the profiled RLOC (Loopback0) so the node carries the same
-        # identity the Edge node shows after its own profiling.
-        rloc = getattr(bobj, "rloc", None) or getattr(
-            getattr(bobj, "profiled_device", None), "rloc", None,
+        # identity the Edge node shows after its own profiling. Two traps here:
+        #   * CatC does not always populate `rloc` on the border object (the
+        #     fabricDevices gap), so we fall back to what profiling read off
+        #     the device -- `loopback`, the Loopback0 address (device_profiler
+        #     .py:325 profiles Border Nodes for it).
+        #   * `rloc`/`rlocdef` can be a LISP locator DESCRIPTOR dict
+        #     ({'Interface': 'Loopback0', 'Priority': ...}, device_profiler.py
+        #     :80) rather than an address. Rendering that gives "[object
+        #     Object]" in the UI, so anything that is not a plain address
+        #     string is rejected and we keep looking.
+        # No mgmtip fallback: a management address is not an RLOC, and showing
+        # one under an "RLOC:" label would be wrong rather than merely missing.
+        def _as_addr(v):
+            if isinstance(v, dict):
+                # A locator descriptor -- the address may be inside it.
+                v = v.get("RLOC") or v.get("Address") or v.get("IP")
+            if v is None:
+                return None
+            s = str(v).strip()
+            # Must look like a bare address, not a rendered dict/list.
+            if not s or s[0] in "{[<" or " " in s:
+                return None
+            return s
+
+        _pd = getattr(bobj, "profiled_device", None)
+        rloc = next(
+            (a for a in (
+                _as_addr(getattr(bobj, "rloc", None)),
+                _as_addr(getattr(_pd, "rloc", None)),
+                _as_addr(getattr(bobj, "loopback", None)),
+                _as_addr(getattr(_pd, "loopback", None)),
+                _as_addr(getattr(bobj, "rlocdef", None)),
+                _as_addr(getattr(_pd, "rlocdef", None)),
+            ) if a),
+            None,
         )
         # Hostname-based merge: match CatC's `hostname` (real configured
         # hostname / CDP-advertised) against each underlay node's CDP
@@ -268,8 +300,17 @@ class BorderCollect(Check):
 
         merge_into = None
         extra_merge_ids = []
-        match_key = _norm(catc_hostname)
-        if match_key:
+        # Match on CatC's hostname, falling back to the profiled hostname. When
+        # a border was not profiled (or CatC returned no hostname) catc_hostname
+        # is None, and matching on that alone silently skips the merge -- the
+        # border then stays a separate CDP "Next-Hop" node with no Border tag
+        # and no RLOC. `hostname` degrades to self.mgmt (an IP), which cannot
+        # match a CDP device_id, so it is only useful when it is a real name.
+        _bare_host = getattr(
+            getattr(bobj, "profiled_device", None), "hostname", None,
+        )
+        match_keys = [k for k in (_norm(catc_hostname), _norm(_bare_host)) if k]
+        if match_keys:
             # Collect every underlay-switch node (across all source Edges) whose
             # CDP device_id matches this border's CatC hostname. First match is
             # the primary merge (relabel + retarget follow-ups); the rest are
@@ -292,7 +333,7 @@ class BorderCollect(Check):
                 uid = u.get("id")
                 if not uid or uid in seen_ids:
                     continue
-                if _norm(u.get("cdp_device_id")) != match_key:
+                if _norm(u.get("cdp_device_id")) not in match_keys:
                     continue
                 seen_ids.add(uid)
                 if merge_into is None:
