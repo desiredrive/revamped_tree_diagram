@@ -824,18 +824,35 @@ function showTopology(payload) {
       cy.center();
     });
   }
-  document.getElementById('topologyDownloadLog').addEventListener('click', () => {
-    // Use a hidden <a download> click instead of navigating window.location
-    // — navigation tears down the active EventSource and surfaces as
-    // "interrupted" in the network console.
-    const a = document.createElement('a');
-    // Session-scoped: the cloud server serves only the caller's own log, and
-    // the standalone server ignores the suffix (it has a single log).
-    a.href = currentSession ? '/logfile/' + currentSession : '/logfile';
-    a.download = 'collection_logfile.txt';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+  document.getElementById('topologyDownloadLog').addEventListener('click', async () => {
+    // Fetch first rather than clicking a plain <a download>: that gives the
+    // browser no way to report a failure, so a 404 shows up as "Check internet
+    // connection" -- which is both wrong and unactionable, and just makes
+    // people retry. Fetching lets us say what actually happened.
+    const url = currentSession ? '/logfile/' + currentSession : '/logfile';
+    try {
+      const r = await fetch(url);
+      if (!r.ok) {
+        showBanner(r.status === 404
+          // 404 covers both "no such session" and "not yours" -- deliberately,
+          // so the endpoint cannot be used to probe for valid session ids.
+          ? 'That log is not available. It belongs to another session, or your ' +
+            'session ended when the server restarted.'
+          : 'Could not download the log (HTTP ' + r.status + ').');
+        return;
+      }
+      const blob = await r.blob();
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = 'collection_logfile.txt';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(href);
+    } catch (e) {
+      showBanner('Could not download the log: ' + e);
+    }
   });
   document.getElementById('topologyDownloadTopology').addEventListener('click', () => {
     if (!cy) return;
