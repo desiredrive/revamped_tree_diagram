@@ -24,18 +24,61 @@ Past a K8s probe timeout the kubelet would kill pods holding live sessions.
 
 ## Build
 
+### On the cluster (the pipeline)
+
 ```bash
-docker build -f cloud/Dockerfile -t <registry>/sda-pathfinder:$(git rev-parse --short HEAD) \
+oc apply -f cloud/k8s/buildconfig.yaml
+oc start-build sda-pathfinder --follow
+```
+
+Building on the cluster rather than a laptop matters here: the RADKit wheels
+are **cp312 / linux-amd64 only**, so the build arch must match the runtime
+arch, and `https://radkit.cisco.com/pip` has to be reachable from wherever the
+build runs — the cluster is the environment that actually has to reach it.
+
+Read the comments in [`k8s/buildconfig.yaml`](k8s/buildconfig.yaml) before
+applying: `origin` is a GitHub SSH remote, which an internal cluster usually
+cannot reach. Either mirror the repo internally and repoint `uri`, or attach a
+deploy key. There is also a commented `buildArgs` block for a build-time proxy.
+
+**Set `APP_VERSION`** to the git SHA when you build. It is the static-asset
+cache buster — without it `_read_version` has no `.git` to read, falls back to
+the `VERSION` file, and browsers keep serving stale `app.js` across deploys:
+
+```bash
+oc start-build sda-pathfinder \
+  --build-arg=APP_VERSION=$(git rev-parse --short HEAD) --follow
+```
+
+### Locally (fast iteration)
+
+```bash
+podman build -f cloud/Dockerfile \
+  -t sda-pathfinder:$(git rev-parse --short HEAD) \
   --build-arg APP_VERSION=$(git rev-parse --short HEAD) .
 ```
 
-Pinned to **Python 3.12 / linux-amd64** — the bundled wheels are
-`cp312-none-manylinux1_x86_64`. `APP_VERSION` is the static-asset cache buster;
-without it a deploy can serve stale `app.js`.
+### Verifying dependencies without a container runtime
 
-The build pulls RADKit from `https://radkit.cisco.com/pip`. **Confirm the build
-cluster can reach it** — the four bundled wheels cover RADKit itself but not its
-transitive dependencies.
+The dependency layer can be checked directly, which catches the likeliest build
+failures:
+
+```bash
+python3.12 -m venv /tmp/dryrun
+/tmp/dryrun/bin/pip install -r requirements.txt
+/tmp/dryrun/bin/pip install --find-links ./radkit-wheels \
+  --extra-index-url https://radkit.cisco.com/pip \
+  cisco-radkit-client==1.9.9 cisco-radkit-common==1.9.9 \
+  cisco-radkit-genie==1.9.9 cisco-radkit-service==1.9.9
+/tmp/dryrun/bin/pip check
+DATA_DIR=/tmp/d COOKIE_SECURE=0 /tmp/dryrun/bin/python -m uvicorn cloud.server:app --port 8000
+```
+
+Verified 2026-09-03 on Python 3.12: installs clean, `pip check` passes, app
+serves. Note RADKit **downgrades** some packages `requirements.txt` installs
+(`starlette` 1.6.0 → 0.52.1, `anyio`, `ncclient`). That is expected and fine —
+RADKit is the more constrained dependency, which is why the Dockerfile installs
+`requirements.txt` first and RADKit second. Do not reorder those steps.
 
 ## Deploy
 

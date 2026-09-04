@@ -1,0 +1,74 @@
+# Cluster-side build for SDA Pathfinder.
+#
+#   oc apply -f cloud/k8s/buildconfig.yaml
+#   oc start-build sda-pathfinder --follow
+#
+# Building on the cluster (rather than a laptop) matters here for two reasons:
+#   * the RADKit wheels are cp312/linux-amd64 only, so the build arch must match
+#     the runtime arch -- a local build on a different arch fails at runtime,
+#     not at build time;
+#   * https://radkit.cisco.com/pip must be reachable from wherever the build
+#     runs, and the cluster is the environment that actually has to reach it.
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: sda-pathfinder
+  labels:
+    app: sda-pathfinder
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: sda-pathfinder
+  labels:
+    app: sda-pathfinder
+spec:
+  source:
+    type: Git
+    git:
+      # NOTE: origin is git@github.com:desiredrive/revamped_tree_diagram.git.
+      # An internal cluster usually cannot reach GitHub -- mirror the repo
+      # internally and point this at that mirror, or keep GitHub and grant
+      # egress. For SSH remotes you must also attach a deploy key:
+      #   oc create secret generic sda-pathfinder-git \
+      #     --from-file=ssh-privatekey=$HOME/.ssh/id_ed25519 \
+      #     --type=kubernetes.io/ssh-auth
+      #   oc set build-secret --source bc/sda-pathfinder sda-pathfinder-git
+      # An https:// mirror needs no secret if the repo is readable.
+      uri: https://github.com/desiredrive/revamped_tree_diagram.git
+      ref: main
+    # sourceSecret:
+    #   name: sda-pathfinder-git
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: cloud/Dockerfile
+      # Uncomment if the cluster reaches the internet through a proxy. RADKit
+      # is pulled from radkit.cisco.com at build time, so without this the
+      # build fails on the pip step.
+      # buildArgs:
+      #   - name: HTTPS_PROXY
+      #     value: http://proxy.example.com:80
+      #   - name: NO_PROXY
+      #     value: .cisco.com,.svc,.cluster.local
+  output:
+    to:
+      kind: ImageStreamTag
+      name: sda-pathfinder:latest
+  resources:
+    # The build installs pyATS/Genie plus RADKit -- a few hundred MB of wheels.
+    # A tight memory limit shows up as an opaque OOM-killed pip step.
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 5
+  triggers:
+    - type: ConfigChange

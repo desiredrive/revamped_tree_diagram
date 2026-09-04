@@ -27,7 +27,10 @@ spec:
         runAsNonRoot: true
       containers:
         - name: app
-          image: sda-pathfinder:latest  # replace with your internal registry ref
+          # With the BuildConfig + ImageStream (buildconfig.yaml) this resolves
+          # against the local ImageStream thanks to lookupPolicy.local: true.
+          # Using an external registry instead? Put the full ref here.
+          image: sda-pathfinder:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
