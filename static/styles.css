@@ -310,3 +310,29 @@ button:hover { background: #1d4ed8; }
   width: auto;
 }
 #checksList { flex: 1; overflow-y: auto; }
+
+/* Session-level notice (server restart, lossy replay). Fixed rather than
+   reusing #status: those events can arrive mid-run, when the login pane that
+   holds #status is hidden. */
+#banner {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 1000;
+  padding: 0.75rem 1rem;
+  background: #7f1d1d;
+  color: #fee2e2;
+  font-size: 0.9rem;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+#banner.show { display: block; }
+#banner button {
+  margin-left: 1rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid #fecaca;
+  border-radius: 3px;
+  background: transparent;
+  color: #fee2e2;
+  cursor: pointer;
+}

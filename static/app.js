@@ -47,6 +47,20 @@ function readSession() {
   catch (e) { return {}; }
 }
 
+// Session-level notice: the server went away, or replay was lossy. Both mean
+// what is on screen can no longer be trusted to be complete, so they get a
+// persistent banner rather than a line in the log.
+function showBanner(text) {
+  const el = document.getElementById('banner');
+  if (!el) return;
+  el.textContent = text + ' ';
+  const btn = document.createElement('button');
+  btn.textContent = 'Reload';
+  btn.onclick = () => location.reload();
+  el.appendChild(btn);
+  el.classList.add('show');
+}
+
 // ---- Login -----------------------------------------------------------------
 
 const loginForm = document.getElementById('loginForm');
@@ -111,6 +125,18 @@ async function pollLoginStatus(sid) {
     await new Promise(r => setTimeout(r, 1500));
     try {
       const r = await fetch('/login/status/' + sid);
+      // 404 means the session is gone -- almost always a server restart, which
+      // ends every session (a RADKit client cannot outlive its process). Say so
+      // and stop; without this the tab polls a dead session forever.
+      if (r.status === 404) {
+        clearSession();
+        loginStatus.className = 'err';
+        loginStatus.innerHTML =
+          '<b>Session ended.</b><br>The server restarted, so this session is ' +
+          'gone. Reload the page and log in again.';
+        return;
+      }
+      if (!r.ok) continue;  // 5xx or a blip -- keep polling
       const d = await r.json();
       if (d.status === 'error') {
         loginStatus.className = 'err';
@@ -1511,7 +1537,20 @@ async function startRun(payload) {
     handleEvent(msg);
     if (msg.type === 'run_complete') { es.close(); setRunInFlight(false); }
   };
-  es.onerror = () => { /* let the browser auto-reconnect */ };
+  es.onerror = () => {
+    // A blip is normal -- EventSource reconnects itself. But if the session is
+    // gone (server restarted), reconnecting just 404s forever, so check once
+    // and tell the user instead of spinning silently.
+    if (!currentSession) return;
+    fetch('/login/status/' + currentSession).then(r => {
+      if (r.status === 404) {
+        es.close();
+        clearSession();
+        setRunInFlight(false);
+        showBanner('Session ended — the server restarted. Log in again.');
+      }
+    }).catch(() => {});
+  };
 
   try {
     const r = await fetch('/run', {
@@ -1630,6 +1669,20 @@ function mergeNodeInto(srcId, tgtId, edgeLabel) {
 
 function handleEvent(msg) {
   switch (msg.type) {
+    case 'server_shutdown':
+      // The server is going away and taking every session with it. Say so --
+      // otherwise EventSource just reconnects into a 404 and the run appears
+      // to hang.
+      clearSession();
+      setRunInFlight(false);
+      showBanner(msg.message || 'Server is restarting — please log in again.');
+      break;
+    case 'replay_gap':
+      // We reconnected past the end of the buffer, so some checks were never
+      // delivered. Better to say the view is incomplete than to paint a
+      // partial run as if it were whole.
+      showBanner(msg.message || 'Some earlier events were missed; reload to resync.');
+      break;
     case 'run_started':
       break;
     case 'check_started': {
@@ -1712,7 +1765,20 @@ function reattachEventStream() {
     handleEvent(msg);
     if (msg.type === 'run_complete') { es.close(); setRunInFlight(false); }
   };
-  es.onerror = () => { /* let the browser auto-reconnect */ };
+  es.onerror = () => {
+    // A blip is normal -- EventSource reconnects itself. But if the session is
+    // gone (server restarted), reconnecting just 404s forever, so check once
+    // and tell the user instead of spinning silently.
+    if (!currentSession) return;
+    fetch('/login/status/' + currentSession).then(r => {
+      if (r.status === 404) {
+        es.close();
+        clearSession();
+        setRunInFlight(false);
+        showBanner('Session ended — the server restarted. Log in again.');
+      }
+    }).catch(() => {});
+  };
   setRunInFlight(true);
 }
 
