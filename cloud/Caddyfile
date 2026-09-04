@@ -33,9 +33,18 @@
 }
 
 :443 {
-	# Caddy mints a self-signed cert for this host. Swap for `tls cert key`
-	# when a real one exists.
-	tls internal
+	# An explicit self-signed cert, NOT `tls internal`. Caddy's internal CA
+	# issues for a hostname, and a browser reaching this by IP rejects that
+	# outright (SSL_ERROR_INTERNAL_ERROR_ALERT) rather than offering the usual
+	# "accept the risk" bypass. Generate one carrying the IP in its SAN:
+	#
+	#   IP=$(hostname -I | awk '{print $1}')
+	#   openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+	#     -keyout ~/certs/key.pem -out ~/certs/cert.pem \
+	#     -subj "/CN=$IP" -addext "subjectAltName=IP:$IP"
+	#
+	# Swap both paths for the Cisco IT cert once a DNS name exists.
+	tls /etc/caddy/cert.pem /etc/caddy/key.pem
 
 	reverse_proxy localhost:8000 {
 		# SSE: a collection streams for minutes with quiet stretches between

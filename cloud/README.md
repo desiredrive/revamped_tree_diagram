@@ -229,9 +229,20 @@ podman generate systemd --name sdapf --new --restart-policy=always \
 podman rm sdapf
 systemctl --user daemon-reload && systemctl --user restart sdapf
 
+# A self-signed cert carrying the IP in its SAN. Caddy's own `tls internal`
+# issues for a hostname, which a browser reaching this by IP rejects outright
+# (SSL_ERROR_INTERNAL_ERROR_ALERT) instead of offering "accept the risk".
+IP=$(hostname -I | awk '{print $1}')
+mkdir -p ~/certs
+openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+  -keyout ~/certs/key.pem -out ~/certs/cert.pem \
+  -subj "/CN=$IP" -addext "subjectAltName=IP:$IP"
+
 # Caddy needs privileged ports; rootless already has the sysctl for :80
-podman run -d --name sdapf-tls --network host \
+podman run -d --replace --name sdapf-tls --network host \
   -v ~/revamped_tree_diagram/cloud/Caddyfile:/etc/caddy/Caddyfile:ro,Z \
+  -v ~/certs/cert.pem:/etc/caddy/cert.pem:ro,Z \
+  -v ~/certs/key.pem:/etc/caddy/key.pem:ro,Z \
   -v caddy-data:/data docker.io/library/caddy:2
 ```
 
