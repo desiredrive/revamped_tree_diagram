@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>SDA Pathfinder</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css?v=2">
   <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
   <script src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
@@ -11,9 +12,70 @@
 <body>
 <div id="banner" role="alert"></div>
   <div id="appVersion" class="app-version" title="App version / git commit"></div>
-  <!-- Step 1: RSA login -->
-  <form id="loginForm">
+
+  <header class="masthead">
+    <div class="masthead-rule">
+      <span class="rule-line"></span>
+      <span class="rule-dot"></span>
+      <span class="rule-line rule-line-lit"></span>
+      <span class="rule-dot rule-dot-lit"></span>
+      <span class="rule-line"></span>
+    </div>
+    <h1 class="wordmark">SDA&nbsp;<span>Pathfinder</span></h1>
+    <p class="wordmark-tag">End to End Fabric Troubleshooting</p>
+  </header>
+
+  <!-- Step 1: pick what you are troubleshooting.
+       Deliberately before login: the choice needs no RSA service, and knowing
+       what you came to do makes the login step feel like part of that task
+       rather than a gate in front of it. -->
+  <div id="pickerPane" class="picker">
+    <h1>What are you troubleshooting?</h1>
+
+    <section class="card scenario-group">
+      <h2 class="group-title">RADKit-based validations</h2>
+      <p class="group-note">Read live state from the fabric. These need an RSA login.</p>
+      <div id="scenarioCards" class="scenario-cards">
+        <button type="button" class="scenario-card" data-scenario="dhcp" aria-pressed="false">
+          <span class="scenario-icon">📋</span>
+          <span class="scenario-name">DHCP Troubleshooting</span>
+          <span class="scenario-desc">Endpoint unable to receive IP address</span>
+        </button>
+        <button type="button" class="scenario-card" data-scenario="east_west" aria-pressed="false">
+          <span class="scenario-icon">↔️</span>
+          <span class="scenario-name">East-West Trace</span>
+          <span class="scenario-desc">Path and policy between two endpoints</span>
+        </button>
+        <button type="button" class="scenario-card" data-scenario="ap_onboarding" aria-pressed="false">
+          <span class="scenario-icon">🛜</span>
+          <span class="scenario-name">AP Onboarding</span>
+          <span class="scenario-desc">Fabric Enabled AP joining the SD-Access Fabric</span>
+        </button>
+        <button type="button" class="scenario-card" data-scenario="underlay_multicast" aria-pressed="false">
+          <span class="scenario-icon">🌳</span>
+          <span class="scenario-name">Underlay Multicast</span>
+          <span class="scenario-desc">Underlay multicast tree and RP health</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="card scenario-group is-offline">
+      <h2 class="group-title">Off-line validations</h2>
+      <p class="group-note">Run against captured output. No device access, no login.</p>
+      <div class="scenario-cards">
+        <div class="scenario-card is-placeholder">
+          <span class="scenario-icon">📼</span>
+          <span class="scenario-name">Replay a captured case</span>
+          <span class="scenario-desc">Re-run a scenario against saved output — not available yet</span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Step 2: RSA login -->
+  <form id="loginForm" style="display:none;">
     <h1>RSA Login</h1>
+    <div class="muted" id="loginForScenario" style="margin-bottom:0.5rem;"></div>
 
     <label for="email">Email</label>
     <input id="email" name="email" type="email" required placeholder="you@cisco.com">
@@ -36,6 +98,7 @@
     </div>
 
     <button type="submit">Log in</button>
+    <button type="button" id="backFromLogin" class="back-link">&larr; Return to Main Screen</button>
     <div id="status"></div>
   </form>
 
@@ -46,36 +109,16 @@
     <label for="serial">Service serial</label>
     <input id="serial" name="serial" type="text" required placeholder="e.g. 7an6-bxvq-tkcs">
     <button type="submit">Connect</button>
+    <button type="button" id="backFromService" class="back-link">&larr; Return to Main Screen</button>
     <div id="serviceStatus" class="status-line"></div>
   </form>
 
   <!-- Step 3: pick a scenario -->
-  <form id="scenarioForm" class="card" style="display:none; width:560px;">
-    <h1>Pick a scenario</h1>
+  <form id="scenarioForm" class="card" style="display:none; width:400px;">
+    <h1 id="scenarioTitle">Scenario</h1>
+    <button type="button" id="changeScenario" class="linkish">&larr; Change scenario</button>
     <div class="muted" id="scenarioService" style="margin-bottom:0.5rem;"></div>
 
-    <div id="scenarioCards" class="scenario-cards">
-      <button type="button" class="scenario-card" data-scenario="dhcp" aria-pressed="true">
-        <span class="scenario-icon">🌐</span>
-        <span class="scenario-name">DHCP Troubleshooting</span>
-        <span class="scenario-desc">Why an endpoint never got an address</span>
-      </button>
-      <button type="button" class="scenario-card" data-scenario="east_west" aria-pressed="false">
-        <span class="scenario-icon">↔️</span>
-        <span class="scenario-name">East-West Trace</span>
-        <span class="scenario-desc">Path and policy between two endpoints</span>
-      </button>
-      <button type="button" class="scenario-card" data-scenario="ap_onboarding" aria-pressed="false">
-        <span class="scenario-icon">📡</span>
-        <span class="scenario-name">AP Onboarding</span>
-        <span class="scenario-desc">Fabric-enabled AP joining the wireless fabric</span>
-      </button>
-      <button type="button" class="scenario-card" data-scenario="underlay_multicast" aria-pressed="false">
-        <span class="scenario-icon">🌳</span>
-        <span class="scenario-name">Underlay Multicast</span>
-        <span class="scenario-desc">Underlay multicast tree and RP health</span>
-      </button>
-    </div>
 
     <!-- Kept in the DOM (hidden) as the value holder: the cards write to it and
          dispatch 'change', so every existing reader and the visibility logic
@@ -144,7 +187,6 @@
       </div>
     </div>
 
-    <!-- Underlay-Multicast inputs -->
     <!-- AP Onboarding inputs -->
     <div id="apInputs" style="display:none;">
       <label>XTR Inventory Management IP</label>

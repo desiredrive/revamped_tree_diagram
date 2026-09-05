@@ -26,6 +26,9 @@ let selectedNodeId = null;
 let currentPayload = null;
 let currentEventSource = null;
 let runInFlight = false;
+// Whether an RSA service is connected. The picker uses it to decide whether a
+// chosen scenario resumes at login, at the service form, or straight at its inputs.
+let serviceReady = false;
 
 // ---- Session persistence (survive page reload / network blip) -------------
 
@@ -203,6 +206,7 @@ function setStatus(el, kind, html) {
 function showServiceForm(sid) {
   currentSession = sid;
   saveSession({ sid });
+  pickerPane.style.display = 'none';
   loginForm.style.display = 'none';
   serviceUser.textContent = 'Logged in as ' + document.getElementById('email').value;
   serviceForm.style.display = 'block';
@@ -276,8 +280,11 @@ const macInput = document.getElementById('dhcp_mac');
 const macMsg = document.getElementById('dhcp_mac_msg');
 
 function showScenarioForm(serviceLabel) {
+  serviceReady = true;
   serviceForm.style.display = 'none';
+  pickerPane.style.display = 'none';
   scenarioService.textContent = 'Service: ' + serviceLabel;
+  if (scenarioTitle) scenarioTitle.textContent = scenarioLabel(scenarioSelect.value);
   scenarioForm.style.display = 'block';
 }
 
@@ -289,17 +296,85 @@ scenarioSelect.addEventListener('change', () => {
   const apInputs = document.getElementById('apInputs');
   if (apInputs) apInputs.style.display = (v === 'ap_onboarding') ? 'block' : 'none';
   // Keep the cards in step with the select, whichever drove the change.
-  document.querySelectorAll('.scenario-card').forEach(btn => {
+  document.querySelectorAll('.scenario-card[data-scenario]').forEach(btn => {
     btn.setAttribute('aria-pressed', String(btn.dataset.scenario === v));
   });
 });
 
 // The cards are the UI; the <select> stays the value holder so every existing
 // reader (and the visibility logic above) keeps working unchanged.
-document.querySelectorAll('.scenario-card').forEach(btn => {
+//
+// Picking a card is also step 1 of the wizard: it advances to login (or
+// straight to the scenario form if this session is already logged in and
+// connected). Choosing the scenario first needs no RSA service, and it makes
+// the login step read as part of the task rather than a gate in front of it.
+const pickerPane = document.getElementById('pickerPane');
+// The masthead belongs to the landing step only -- once a run is underway the
+// topology needs the vertical space more than branding does.
+const masthead = document.querySelector('.masthead');
+function setHeroVisible(on) {
+  if (masthead) masthead.style.display = on ? 'block' : 'none';
+}
+const loginForScenario = document.getElementById('loginForScenario');
+const scenarioTitle = document.getElementById('scenarioTitle');
+
+function scenarioLabel(value) {
+  const opt = scenarioSelect.querySelector(`option[value="${value}"]`);
+  return opt ? opt.textContent : value;
+}
+
+// Where a scenario resumes once its card is picked, given how far this session
+// has already got. Kept in one place so the picker and restoreSession agree.
+function advanceFromPicker() {
+  const label = scenarioLabel(scenarioSelect.value);
+  if (scenarioTitle) scenarioTitle.textContent = label;
+  pickerPane.style.display = 'none';
+  setHeroVisible(false);
+
+  if (currentSession && serviceReady) {
+    scenarioForm.style.display = 'block';
+    return;
+  }
+  if (currentSession) {
+    serviceForm.style.display = 'block';
+    return;
+  }
+  if (loginForScenario) loginForScenario.textContent = 'To run: ' + label;
+  loginForm.style.display = 'block';
+}
+
+document.querySelectorAll('.scenario-card[data-scenario]').forEach(btn => {
   btn.addEventListener('click', () => {
     scenarioSelect.value = btn.dataset.scenario;
     scenarioSelect.dispatchEvent(new Event('change'));
+    saveSession({ scenario: btn.dataset.scenario });
+    advanceFromPicker();
+  });
+});
+
+// Back to the picker. Only the scenario changes -- the session and the
+// connected service are untouched, so there is nothing to re-do.
+const changeScenarioBtn = document.getElementById('changeScenario');
+if (changeScenarioBtn) {
+  changeScenarioBtn.addEventListener('click', () => {
+    scenarioForm.style.display = 'none';
+    pickerPane.style.display = 'block';
+    setHeroVisible(true);
+  });
+}
+
+// Back from login / service. Both only rewind the *view* -- a login already in
+// flight keeps going, and a connected service stays connected, so coming
+// forward again costs nothing. Anything else would throw away a 30-60s RADKit
+// call because someone wanted to re-read the cards.
+['backFromLogin', 'backFromService'].forEach(id => {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    loginForm.style.display = 'none';
+    serviceForm.style.display = 'none';
+    pickerPane.style.display = 'block';
+    setHeroVisible(true);
   });
 });
 
@@ -1872,6 +1947,11 @@ async function restoreSession() {
 
   currentSession = saved.sid;
   loginForm.style.display = 'none';
+  setHeroVisible(false);
+  if (saved.scenario) {
+    scenarioSelect.value = saved.scenario;
+    scenarioSelect.dispatchEvent(new Event('change'));
+  }
 
   // Probe service state — if it's already connected, jump straight to the
   // scenario form and (best-effort) reconnect the SSE stream so any in-flight
@@ -1882,6 +1962,14 @@ async function restoreSession() {
     if (d && d.status === 'ready') {
       const label = d.name || d.serial || saved.serviceName || '';
       saveSession({ serviceName: label, serviceSerial: d.serial });
+      serviceReady = true;
+      if (!saved.scenario) {
+        // Connected, but nothing chosen to run -- start at the picker.
+        scenarioService.textContent = 'Service: ' + label;
+        pickerPane.style.display = 'block';
+        setHeroVisible(true);
+        return;
+      }
       showScenarioForm(label);
       // Reattach to the event stream so an in-flight run keeps painting and a
       // completed-but-missed run still replays final state.
@@ -1891,9 +1979,16 @@ async function restoreSession() {
     }
   } catch (e) { /* fall through to service form */ }
 
-  // Logged in but no service yet — show the service form.
+  // Logged in but no service yet. With a scenario already chosen, resume at the
+  // service form; without one there is nothing to resume to, so show the picker.
   serviceUser.textContent = 'Restored session ' + saved.sid;
-  serviceForm.style.display = 'block';
+  if (saved.scenario) {
+    pickerPane.style.display = 'none';
+    serviceForm.style.display = 'block';
+  } else {
+    pickerPane.style.display = 'block';
+    setHeroVisible(true);
+  }
 }
 
 restoreSession();

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SDA Pathfinder">
+  <title>SDA Pathfinder</title>
+  <defs>
+    <radialGradient id="core" cx="50%" cy="45%" r="60%">
+      <stop offset="0%"   stop-color="#1e3a5f"/>
+      <stop offset="100%" stop-color="#0b1628"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Outer ring, then an inner ring drawn as a dashed arc so it reads as a
+       scanning sweep once rotated. -->
+  <circle cx="32" cy="32" r="29" fill="none" stroke="#1e4976" stroke-width="1.5" opacity="0.7"/>
+  <circle cx="32" cy="32" r="26" fill="url(#core)" stroke="#38bdf8" stroke-width="2"/>
+  <circle class="logo-sweep" cx="32" cy="32" r="22" fill="none"
+          stroke="#38bdf8" stroke-width="1" opacity="0.45"
+          stroke-dasharray="26 112" stroke-linecap="round"/>
+
+  <!-- The trace itself: a flatline broken by one spike. Drawn as a single path
+       so it can be stroke-dashed into a left-to-right sweep. -->
+  <path class="logo-trace"
+        d="M13 32 H24 L27 32 L30 20 L34 44 L37 32 L40 32 H51"
+        fill="none" stroke="#7dd3fc" stroke-width="2.6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

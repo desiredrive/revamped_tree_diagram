@@ -3,10 +3,13 @@ body {
   background: #0f172a;
   color: #e2e8f0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
   margin: 0;
+  padding: 2rem 1rem;
+  box-sizing: border-box;
 }
 body.topology-active {
   display: block;
@@ -342,7 +345,7 @@ button:hover { background: #1d4ed8; }
    holder -- these write to it -- so nothing downstream had to change. */
 .scenario-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.6rem;
   margin: 0.4rem 0 1rem;
 }
@@ -370,3 +373,159 @@ button:hover { background: #1d4ed8; }
 .scenario-icon { font-size: 1.15rem; line-height: 1.4; }
 .scenario-name { font-weight: 600; font-size: 0.9rem; }
 .scenario-desc { font-size: 0.78rem; color: #94a3b8; line-height: 1.3; }
+
+/* "Change scenario" — a back-link, not a button: it undoes a choice rather
+   than performing an action, and must not compete with the submit button. */
+.linkish {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0 0 0.6rem;
+  color: #93c5fd;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.linkish:hover { text-decoration: underline; }
+
+/* Brand header on the picker. Only here: once you are working, the topology
+   deserves the space more than a logo does. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 1.1rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid #1e293b;
+}
+.brand-name { font-size: 1rem; font-weight: 600; color: #f1f5f9; }
+.brand-tag  { font-size: 0.75rem; color: #64748b; }
+
+/* Scenario groups: what needs a live fabric, and what does not. */
+.group-title {
+  margin-top: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  margin: 1.2rem 0 0.15rem;
+}
+.group-note { font-size: 0.76rem; color: #64748b; margin: 0 0 0.5rem; }
+
+/* A capability that is coming but not here yet. Deliberately not a button --
+   it must not look clickable when nothing happens on click. */
+.scenario-card.is-placeholder {
+  opacity: 0.5;
+  cursor: default;
+  border-style: dashed;
+}
+.scenario-card.is-placeholder:hover {
+  border-color: #334155;
+  background: #1e293b;
+}
+
+/* The picker holds one box per group. Separate boxes rather than headings in a
+   single card: what needs a live fabric and what does not are different kinds
+   of work, and the boundary should be visible at a glance. */
+.picker { width: 560px; max-width: 100%; }
+.picker > h1 { margin: 0 0 0.9rem; }
+
+.scenario-group {
+  /* .card padding is tuned for a narrow form; a group box is wider and its
+     cards carry their own padding, so it needs less. */
+  padding: 1.1rem 1.2rem;
+  margin-bottom: 1rem;
+  box-sizing: border-box;
+}
+.scenario-group .group-title { margin-bottom: 0.15rem; }
+
+/* Off-line work needs no device access, so it gets a cooler, quieter treatment
+   than the live-fabric box -- the visual weight matches the risk. */
+.scenario-group.is-offline {
+  background: #0d1626;
+  border-style: dashed;
+  border-color: #1e293b;
+}
+
+/* ---- Masthead ------------------------------------------------------------
+   Deliberately not a glowing emblem in a ring: that is a common look and it
+   said nothing specific about this tool. The identity here is the rule above
+   the name -- a link with two lit hops, the segment of a path this app traces.
+   Flat, left-aligned, and inside the picker column, since body is a centering
+   flexbox and a full-bleed band cannot span it. */
+.masthead {
+  width: 560px;
+  max-width: 100%;
+  margin-bottom: 1.4rem;
+}
+.masthead-rule {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 0.7rem;
+}
+.rule-line {
+  height: 2px;
+  flex: 1 1 auto;
+  background: #1e293b;
+  border-radius: 2px;
+}
+.rule-line-lit {
+  flex: 0 0 84px;
+  background: linear-gradient(90deg, #2b8fd8, #7dd3fc);
+  animation: rule-travel 5.5s ease-in-out infinite;
+}
+.rule-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: #334155;
+  flex: 0 0 auto;
+}
+.rule-dot-lit { background: #7dd3fc; }
+/* The lit segment widens and settles, like a hop resolving. */
+@keyframes rule-travel {
+  0%, 100% { flex-basis: 84px; opacity: 0.75; }
+  50%      { flex-basis: 132px; opacity: 1; }
+}
+
+.wordmark {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: #e2e8f0;
+  line-height: 1.1;
+}
+.wordmark span { color: #7dd3fc; font-weight: 400; }
+
+.wordmark-tag {
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
+  color: #64748b;
+  letter-spacing: 0.01em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rule-line-lit { animation: none; }
+}
+@media (max-width: 600px) {
+  .masthead { width: auto; }
+  .wordmark { font-size: 1.4rem; }
+}
+
+/* One column when there is not room for two side by side. */
+@media (max-width: 620px) {
+  .scenario-cards { grid-template-columns: 1fr; }
+}
+
+/* Back sits under the submit button: same shape, grey instead of blue. It is
+   the secondary way out of a step -- it should be as easy to hit as Log in, but
+   never mistaken for it. */
+.back-link {
+  margin-top: 0.6rem;
+  background: #334155;
+  color: #cbd5e1;
+  font-weight: 500;
+}
+.back-link:hover { background: #3f4d63; color: #e2e8f0; }
