@@ -287,6 +287,217 @@ class EIDIdentification:
                 else:
                     reg_status = lispdb.mapservers
 
+        #L3 Identification (IPv4 host or subnet)
+        # Lean by design: this establishes what the session validations below
+        # actually consume -- the instance, how the EID got into the database,
+        # and which map-servers it registers to. The deep per-failure descent
+        # the MAC branch does (database limits, EID-watch state) is not
+        # repeated here; the AP onboarding checks already grade the L3 path in
+        # detail and report it per step on the canvas.
+        if eid_type in ("IPv4Host", "IPv4Subnet"):
+            qtype = 'ipv4'
+            origin = "DynamicEID"
+
+            # The L3 instance comes from the VRF, not from a VLAN: an IP EID
+            # has no L2 instance to read it off. L3Device.lispiid returns it
+            # as an int, which is the form the database lookups need.
+            l3device = L3Device(vrf, device)
+            l3device.lispiid(service)
+            iid = l3device.iid
+
+            if iid is None:
+                error = "EID Identification - L3LISP Instance"
+                message = "The L3 LISP Instance was NOT found for VRF {}. Review the GPS_SDA Collection logfile for more information.".format(vrf or "default")
+                exit_program(step, process, subprocess, device, error, message)
+
+            self.iid = iid
+
+            # The device rejects a host EID without a mask ("% Incomplete
+            # command"), so a bare address is qualified to /32. A subnet EID
+            # already carries its own mask and is passed through untouched.
+            db_eid = eid if "/" in str(eid) else "{}/32".format(eid)
+
+            lispdb = LISPLocalDB(db_eid, iid, device)
+
+            # Dynamic EID first: it is how an endpoint address normally enters
+            # the database, and knowing the group is what makes a missing
+            # entry actionable.
+            lispdb.L3LISPDyn(service)
+            dyn_groups = getattr(lispdb, "dynamic_eids", None) or []
+            is_dyn = False
+            bare_eid = str(eid).split("/")[0]
+            for group in dyn_groups:
+                if bare_eid in ((group.get('eid_entries') or {}) or {}):
+                    is_dyn = True
+                    break
+            if is_dyn is False:
+                # Not learned. The declared EID space says whether that is even
+                # possible: a group whose database-mapping is gone still shows
+                # up in the group list -- the device prints "NONE" for the
+                # prefix -- and an endpoint in that subnet can never be learned
+                # while it stays that way. This is the L3 counterpart of the
+                # MAC branch's L2LISPStaticDB step.
+                lispdb.L3LISPDatabaseMapping(vrf, service)
+                mappings = getattr(lispdb, "database_mappings", None) or []
+
+                covering = None
+                unmapped = []
+                try:
+                    eid_addr = ipaddress.ip_address(bare_eid)
+                except ValueError:
+                    eid_addr = None
+                for entry in mappings:
+                    prefix = entry.get('eid_prefix')
+                    if prefix is None:
+                        unmapped.append(entry.get('dynamic_eid'))
+                        continue
+                    if eid_addr is None:
+                        continue
+                    try:
+                        network = ipaddress.ip_network(prefix, strict=False)
+                    except ValueError:
+                        continue
+                    if eid_addr.version == network.version and eid_addr in network:
+                        covering = entry
+                        break
+
+                if covering is not None:
+                    msg1 = "LISP - EID Lookup"
+                    message = (
+                        f"Address {eid} is not a learned dynamic EID for IID {iid}, but it falls inside "
+                        f"{covering['eid_prefix']} declared by dynamic-EID group {covering['dynamic_eid']}. "
+                        f"The EID space is configured, so the address itself has not been learned onto it."
+                    )
+                    logging_info(step, process, subprocess, device, msg1 + " | " + message)
+                elif unmapped:
+                    error = "LISP - Database Mapping Removed"
+                    message = (
+                        f"Finding: Dynamic-EID group(s) {', '.join(str(u) for u in unmapped)} exist for IID {iid} "
+                        f"but have no database-mapping prefix configured, so no address in their subnets -- "
+                        f"{eid} included -- can be learned as a dynamic EID. "
+                        f"Remediation: restore the 'database-mapping <prefix> locator-set <name>' line under the "
+                        f"dynamic-EID group; in an SD-Access fabric this is normally pushed by Catalyst Center."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+                else:
+                    msg1 = "LISP - EID Lookup"
+                    message = (
+                        f"Address {eid} is not covered by any dynamic-EID database-mapping for IID {iid}; "
+                        f"it may be registered by a static database-mapping or route-import instead."
+                    )
+                    logging_info(step, process, subprocess, device, msg1 + " | " + message)
+            else:
+                origin_state = True
+
+            # Database entry: authoritative for origin, RLOCs and map-servers
+            # whichever method put the EID there.
+            lispdb.LISPDBEntry(qtype, service)
+
+            if lispdb.address_family is None:
+                msg1 = "LISP - Database Missing Entry"
+                message = (
+                    f"Finding: Address {eid} is not present in the LISP Database for IID {iid}. "
+                    f"Action: Verifying LISP database limits to identify potential capacity or registration issues."
+                )
+                logging_warning(step, process, subprocess, device, msg1 + " | " + message)
+                step += 1
+
+                # Why it is absent, in the same order the MAC branch asks:
+                # capacity first (a full table silently refuses new EIDs), then
+                # whether the SISF-to-LISP channel that would have installed it
+                # is even up. Both readers are address-family generic, so this
+                # is the L2 descent applied to ipv4, not a second copy of it.
+                lispdb.LISPDBLimits(qtype, service)
+                if lispdb.total_database is None:
+                    error = "LISP - Parser Exception"
+                    message = (
+                        f"Finding: Unable to retrieve LISP database statistics for IID {iid} due to a parser exception. "
+                        f"Remediation: Verify device connectivity via RSA and ensure the CLI output format matches the expected Genie parser version."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+
+                if lispdb.static_database_pr > 97:
+                    error = "LISP - Static Table Exhaustion"
+                    message = (
+                        f"Finding: Static database utilization for IID {iid} exceeds 97% "
+                        f"({lispdb.static_database_pr}%), so new static mappings cannot be installed. "
+                        f"Remediation: Prune obsolete static bindings or increase the database limit configuration."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+                elif lispdb.dynamic_database_pr > 97:
+                    error = "LISP - Dynamic Table Exhaustion"
+                    message = (
+                        f"Finding: Dynamic database utilization for IID {iid} exceeds 97% "
+                        f"({lispdb.dynamic_database_pr}%), so {eid} cannot be learned as a dynamic EID. "
+                        f"Remediation: Review endpoint aging timers or increase the dynamic database limit."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+                elif lispdb.global_database_usage_pr > 97:
+                    error = "LISP - Global Database Exhaustion"
+                    message = (
+                        f"Finding: Total LISP database utilization exceeds 97% "
+                        f"({lispdb.global_database_usage_pr}%). "
+                        f"Remediation: Audit total EID registrations across all VNIs and increase global LISP limits if hardware resources permit."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+
+                msg1 = "LISP - EID Watch Check"
+                message = f"Finding: LISP database utilization is below 97%. Action: Verifying SISF-LISP EID Watch state."
+                logging_info(step, process, subprocess, device, msg1 + " | " + message)
+                step += 1
+
+                # 'SISF client' is the client name the device prints, lower-case
+                # 'c' -- verified on IOS-XE 17.x, where the ipv4 eid-watch table
+                # lists it alongside PDM-Steering.
+                eidwatch = LISPEIDWatch(device, iid)
+                eidwatch.eidwatch_status(qtype, 'SISF client', service)
+
+                if eidwatch.processid is None:
+                    error = "LISP - EID Watch Process Missing"
+                    message = (
+                        f"Finding: EID Watch process for LISP IID {iid} was not found. "
+                        f"Remediation: Verify if SISF is enabled on the interface and check for platform software defects related to the LISP process."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+                elif eidwatch.connection_status != 'ENABLED':
+                    error = "LISP - SISF-LISP Disconnected"
+                    message = (
+                        f"Finding: EID Watch process {eidwatch.processid} for IID {iid} is in state '{eidwatch.connection_status}'. "
+                        f"Remediation: The SISF-to-LISP communication channel is impacted. Restart the LISP process or check for internal software errors."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+                else:
+                    error = "LISP - Registration Root Cause Unknown"
+                    message = (
+                        f"Finding: EID Watch process {eidwatch.processid} is ENABLED and the database is not full, "
+                        f"but {eid} is not in the LISP database for IID {iid}. The address may no longer be present in "
+                        f"device-tracking, or no dynamic-EID group, database-mapping or route-import covers it. "
+                        f"Remediation: Confirm the endpoint is still learned on the SVI, then perform "
+                        f"'debug lisp cp all' and 'debug device-tracking' to identify why the SISF trigger is not reaching the LISP database."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+            else:
+                db_method = lispdb.eid_origin
+                if len(lispdb.locators or []) == 0:
+                    error = "LISP - Missing RLOC Definition"
+                    message = (
+                        f"Finding: Address {eid} exists in the LISP Database for IID {iid}, but no RLOC is associated. "
+                        f"Remediation: Ensure the Loopback0 interface is correctly defined as an RLOC in the locator-set."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+                else:
+                    db_status = True
+
+                if len(lispdb.mapservers or []) == 0:
+                    error = "LISP - Missing Map-Server Config"
+                    message = (
+                        f"Finding: Address {eid} exists in the LISP Database, but no Map-Servers are configured for IID {iid}. "
+                        f"Remediation: Verify that Map-Servers are defined under the LISP instance configuration."
+                    )
+                    exit_program(step, process, subprocess, device, error, message)
+                else:
+                    reg_status = lispdb.mapservers
+
         self.eid_type = eid_type
         self.origin = origin
         self.origin_state = origin_state
@@ -354,7 +565,17 @@ class ETRConfiguration:
             if "map-server" in line:
                 mapservers_shwrunparsed = mapservers_shwrunparsed + '\n' + line
         mapservers_shwrun = mapservers_shwrunparsed
-        map_servers_noflag = find_mismatch_key_and_proxy_reply(mapservers_shwrun)
+
+        # The map-servers actually registering this EID, from the operational
+        # LISP data. The show-run blob covers every instance on the box, so both
+        # validations below are restricted to these IPs.
+        known_map_servers = {
+            entry.get('map_server')
+            for entry in (map_servers or [])
+            if isinstance(entry, dict) and entry.get('map_server')
+        } or None
+
+        map_servers_noflag = find_mismatch_key_and_proxy_reply(mapservers_shwrun, known_map_servers)
 
         # P-Flag Enablement #Unreliable check...
         if len(map_servers_noflag) > 0:
@@ -363,7 +584,7 @@ class ETRConfiguration:
             exit_program(step,process,subprocess,device,error,message)
 
         #Map-Server-Key Evaluation:
-        map_server_config = mismatch_keys_servers(mapservers_shwrun)
+        map_server_config = mismatch_keys_servers(mapservers_shwrun, known_map_servers)
         keys_per_ip = defaultdict(set)
 
         for entry in map_server_config:
@@ -518,7 +739,7 @@ def parse_uptime_to_minutes(uptime_str):
             total_minutes = (hours * 60) + minutes
     return total_minutes
 
-def mismatch_keys_servers(lines):
+def mismatch_keys_servers(lines, known_map_servers=None):
     unique_entries = {}
     for line in lines.splitlines():
         line = line.strip()
@@ -531,6 +752,10 @@ def mismatch_keys_servers(lines):
         if parts[3] != "key":
             continue
         map_server_ip = parts[2]
+        # Other instances on the same box legitimately use different keys for
+        # the same map-server, so only the ones registering this EID count.
+        if known_map_servers is not None and map_server_ip not in known_map_servers:
+            continue
         key_type_str = parts[4]
         auth_key = parts[5]
 
@@ -563,43 +788,38 @@ def mismatch_keys_servers(lines):
         }
     return list(unique_entries.values())
 
-def find_mismatch_key_and_proxy_reply(output):
-    # Split the output into lines
+def find_mismatch_key_and_proxy_reply(output, known_map_servers=None):
+    """Return the map-servers that have a key configured but no proxy-reply.
+
+    `show run | section service ipv4` returns every service block on the box,
+    so counting key-lines against proxy-reply-lines per IP mixes instances that
+    have nothing to do with the EID being troubleshot. When the caller knows
+    which map-servers are actually registering the EID (from the operational
+    LISP data), only those are evaluated, and only for the PRESENCE of a
+    proxy-reply line -- not for a matching count.
+    """
     lines = output.strip().split("\n")
 
-    # Dictionaries to count "key" and "proxy-reply" occurrences for each IP
-    key_counts = {}
-    proxy_reply_counts = {}
+    keyed = set()
+    proxied = set()
 
     for line in lines:
-        # Check if the line contains "etr map-server"
-        if "etr map-server" in line:
-            parts = line.split()
-            ip = parts[2]  # Extract the IP address
+        if "etr map-server" not in line:
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        ip = parts[2]
+        if known_map_servers is not None and ip not in known_map_servers:
+            continue
+        if "key" in line:
+            keyed.add(ip)
+        if "proxy-reply" in line:
+            proxied.add(ip)
 
-            # Count occurrences of "key"
-            if "key" in line:
-                if ip not in key_counts:
-                    key_counts[ip] = 0
-                key_counts[ip] += 1
+    return sorted(keyed - proxied)
 
-            # Count occurrences of "proxy-reply"
-            if "proxy-reply" in line:
-                if ip not in proxy_reply_counts:
-                    proxy_reply_counts[ip] = 0
-                proxy_reply_counts[ip] += 1
-
-    # Find IPs where the "key" count doesn't match the "proxy-reply" count
-    mismatched_ips = []
-    for ip in key_counts:
-        key_count = key_counts.get(ip, 0)
-        proxy_reply_count = proxy_reply_counts.get(ip, 0)
-        if key_count != proxy_reply_count:
-            mismatched_ips.append(ip)
-
-    return mismatched_ips
-
-def unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name,etrdefinition,vni):
+def unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name,etrdefinition,vni,isl3=False):
     process = "lispSession"
     subprocess = "[specificLISPSession]"
     msg1 = "LISP Sessions - Specific LISP Sessions"
@@ -645,7 +865,7 @@ def unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name
             cp_hostname = control_plane['radkithostname']
             if cp_state == 'Reachable':
                 # Routing/CEF/Physical Interfaces
-                cpstatus = map_server_local_session(step, mapserverip, state, control_plane, catc_name, service, vni)
+                cpstatus = map_server_local_session(step, mapserverip, state, control_plane, catc_name, service, vni, isl3)
                 step = cpstatus[0]
                 cpstatus_routing = cpstatus[1]
                 interfaces = cpstatus_routing[2]
@@ -1009,7 +1229,7 @@ def down_init_procedure(mapserverip,catc_name,service,step,hostname,etrdefinitio
 
     return step,control_plane
 
-def map_server_local_session(step,mapserverip,state,control_plane,catc_name,service,vni):
+def map_server_local_session(step,mapserverip,state,control_plane,catc_name,service,vni,isl3=False):
     # Map-Server Check: Self LISP Session.
     cp_mgmtip = control_plane['mgmtip']
     cp_hostname = control_plane['radkithostname']
@@ -1030,7 +1250,7 @@ def map_server_local_session(step,mapserverip,state,control_plane,catc_name,serv
     cp.cp_configuration(vni, service)
     # Validations
     cp_configuration = cp.cp_configuration
-    cp_configuration_validation(step, cp_configuration, vni)
+    cp_configuration_validation(step, cp_configuration, vni, isl3)
 
     #Authentication Match
 
@@ -1418,7 +1638,12 @@ def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
     if eid_type == "MAC":
         servicetype = "ethernet"
         isl3 = False
-    if eid_type == "IPv4Subnet":
+    # A host address and a subnet are both IPv4 EIDs and take the same LISP
+    # service. Only "IPv4Subnet" was handled here, so a bare host address --
+    # what eid_identification returns for an AP or client IP -- left both
+    # variables unset and raised UnboundLocalError on the line below before
+    # any validation ran.
+    if eid_type in ("IPv4Subnet", "IPv4Host"):
         servicetype = "ipv4"
         isl3 = True
     etrdefinition.eid_configuration(etrdefinition.eid_properties,servicetype,service)
@@ -1450,7 +1675,7 @@ def singleETRProfiling(mgmtip,eid,vlan,vrf,catc_name,service,step,sourcextr):
     # LISP Session Specific Status (Only to map-servers)
     vni = etrdefinition.eid_properties.iid
     eid_map_servers = etrdefinition.eid_properties.mapservers
-    step,map_server_ips = unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name, etrdefinition, vni)
+    step,map_server_ips = unique_lisp_session(hostname,step,eid_map_servers,etr_rloc,service,catc_name, etrdefinition, vni, isl3)
 
     if len(map_server_ips) is None:
         msg = "LISP Specific Sessions - Local CP"

@@ -93,6 +93,28 @@ def parse_show_auth_sessions_detail(output: str) -> Dict[str, Any]:
         if vlan_match:
             entry["local_policies"]["vlan_group"] = {"vlan": int(vlan_match.group(1))}
 
+        # Any locally-assigned VLAN, whatever line carries it. A critical-auth
+        # fallback prints "Voice Vlan: Vlan: 4096" rather than "Vlan Group:",
+        # so the stricter pattern above misses exactly the case where knowing
+        # the VLAN matters most. Recorded separately so `vlan_group` keeps its
+        # existing meaning for callers that already read it.
+        any_vlan = re.search(r"Vlan:\s+(\d+)", block, re.IGNORECASE)
+        if any_vlan:
+            entry["local_policies"]["assigned_vlan"] = int(any_vlan.group(1))
+
+        # Service templates applied locally. The names are what identify a
+        # critical-auth fallback (DefaultCriticalAuthVlan_SRV_TEMPLATE), which
+        # authorizes a port without the endpoint ever passing authentication --
+        # a state that otherwise reads as a clean "Authorized".
+        templates = re.findall(
+            r"Service Template:\s+(\S+)(?:\s+\(priority\s+(\d+)\))?",
+            block, re.IGNORECASE)
+        if templates:
+            entry["local_policies"]["templates"] = {
+                name: {"priority": int(pri)} if pri else {}
+                for name, pri in templates
+            }
+
         # Parse Method Status List
         method_section = re.search(r"Method status list:(.*)", block, re.DOTALL | re.IGNORECASE)
         if method_section:
@@ -210,6 +232,64 @@ def parse_show_dot1x_interface(output: str) -> Dict[str, Any]:
 
     return result
 
+def parse_show_mab_interface(output: str) -> Dict[str, Any]:
+    """Parses `show mab interface <intf> details`.
+
+    Returns {"interface", "configured", "enabled", "clients"}.
+
+    This command is worth more than the dot1x one for a negative verdict: when
+    MAB is absent the device says so in a sentence -- "MAC-Auth-Bypass is not
+    configured on this interface" -- where `show dot1x interface` on the same
+    port simply prints nothing. Empty output is ambiguous (it also looks like a
+    failed collection); an explicit sentence is not.
+
+    `configured` is None when neither the positive nor the negative form was
+    recognised, so a caller can tell "the device said no" from "we could not
+    tell", and never report the second as the first.
+    """
+    result = {"interface": None, "configured": None, "enabled": None,
+              "clients": []}
+
+    if not output or not isinstance(output, str):
+        return result
+
+    client = None
+    for line in output.splitlines():
+        line = line.strip()
+
+        m = re.search(r"MAB details for\s+(.*)", line, re.IGNORECASE)
+        if m:
+            result["interface"] = m.group(1).strip()
+            result["configured"] = True
+            continue
+
+        if re.search(r"not configured on this interface", line, re.IGNORECASE):
+            result["configured"] = False
+            result["enabled"] = False
+            continue
+
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+
+        if key.lower() == "mac-auth-bypass":
+            result["enabled"] = val.strip().lower() == "enabled"
+            continue
+
+        # Each client block restarts at its MAC, so a port holding more than
+        # one authenticated MAC is reported as more than one client rather
+        # than collapsing into whichever line came last.
+        if key.lower() == "my client mac":
+            client = {"mac": val}
+            result["clients"].append(client)
+            continue
+        if client is not None:
+            client[key.strip().lower().replace(" ", "_")] = val
+
+    return result
+
+
 # Example usage:
 # parsed_output = parse_show_auth_sessions_detail(cli_text)
 
@@ -226,14 +306,36 @@ def authen_session_for_interface(hostname, interface, service):
     # 2. Extract the template name safely from the collected data
     # We use the same logic as inside your class method to find the name
     binding_data = getattr(authensessionstatus, "templateinterface", {}) or {}
-    template_name = next(iter(binding_data.get('interface', {}).values()), {}).get('method', {}).get('static', {}).get(
-        'template_name')
+    # Any binding method counts, not just `static`: a CatC-provisioned AP port
+    # binds `dynamic / Modified Built-in`. Reading only `static` returned None
+    # on those ports, which skipped everything below and left the caller with
+    # no session and no dot1x state to judge.
+    _methods = next(iter((binding_data or {}).get('interface', {}).values()), {}).get('method', {}) or {}
+    template_name = None
+    for _m, _d in _methods.items():
+        template_name = (_d or {}).get('template_name')
+        if template_name:
+            break
 
-    # 3. If a template is bound to the interface, get the live session details
+    # 3. Session details, when a template is bound.
     if template_name:
         # Command to get the detailed session info for the specific interface
         authensessionstatus.authenticationsessioninterface(interface,service)
-        authensessionstatus.dot1xinterfaceparameters(interface,service)
+
+    # dot1x state is collected unconditionally, and deliberately outside the
+    # template test. It is the only positive evidence that a port does or does
+    # not run authentication: `show dot1x interface` prints a PAE block when an
+    # authenticator is running and nothing at all when it is not. Gating it on
+    # a template meant the ports most likely to have no authentication -- the
+    # ones where no template resolved -- were exactly the ports we never asked.
+    # Without it "no authentication" is an inference from an absent config line;
+    # with it, it is what the device said.
+    authensessionstatus.dot1xinterfaceparameters(interface,service)
+    # MAB is collected for the same reason and states the negative outright:
+    # an unconfigured port answers "MAC-Auth-Bypass is not configured on this
+    # interface", which is evidence, where empty dot1x output is only absence.
+    # Together the two cover both methods a port could authenticate with.
+    authensessionstatus.mabinterfaceparameters(interface,service)
 
     return authensessionstatus
 
@@ -274,13 +376,41 @@ class AuthenticationSession:
         op = parse_show_dot1x_interface(op)
         self.dot1xinterfaceparameter = op
 
+    def mabinterfaceparameters(self,interface,service):
+        hostname = self.hostname
+        cmd = f"show mab interface {interface} details"
+        op = get_any_single_output(hostname, cmd, service)
+        op = parse_show_mab_interface(op)
+        self.mabinterfaceparameter = op
+
+    def accountingattributes(self,service,list_name="Def_Acct_List"):
+        hostname = self.hostname
+        cmd = f"show run | se {list_name}"
+        op = get_any_single_output(hostname, cmd, service)
+        self.accountingconfig = op
+
+    def deviceclassifierinterface(self,interface,service):
+        hostname = self.hostname
+        cmd = f"show device classifier attached interface {interface} detail"
+        op = get_single_output_genie(hostname, cmd, service)
+        self.deviceclassifier = op
+
     def templateinterface(self,interface,service):
         hostname = self.hostname
         cmd = f"show template interface binding target {interface}"
         op = get_single_output_genie(hostname, cmd, service)
         self.templateinterface = op
-        template_name = next(iter(op.get('interface', {}).values()), {}).get('method', {}).get('static', {}).get(
-            'template_name')
+        # A template can be bound by any method, and all of them are real: a
+        # CatC-provisioned AP port binds `dynamic / Modified Built-in`, not
+        # `static`. Reading only `static` left template_name None on those
+        # ports, so the config below was never fetched and the caller reported
+        # the template as unreadable -- which it then treated as open mode.
+        methods = next(iter((op or {}).get('interface', {}).values()), {}).get('method', {}) or {}
+        template_name = None
+        for _method, data in methods.items():
+            template_name = (data or {}).get('template_name')
+            if template_name:
+                break
         if template_name is not None:
             cmd = f"show run | section ^template {template_name}"
             op = get_any_single_output(hostname, cmd, service)

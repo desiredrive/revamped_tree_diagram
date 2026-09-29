@@ -12,12 +12,36 @@ This module just imports them and orders them per scenario.
 """
 
 from checks import Check
+from checks.shared import normalize_mac
 from checks.common import (
     ValidateVrfParam,
     DetectInfraVn,
     ProfileXtrHostname,
 )
-from checks.ap_onboarding import ApEdgeGate
+from checks.ap_onboarding import (
+    ApEdgeGate,
+    ApInfraVnVlan,
+    ApMacLearning,
+    ApCdpNeighbor,
+    ApAccountingAttributes,
+    ApSwitchportState,
+    ApAuthTemplate,
+    ApDeviceClassifier,
+    ApAuthenticationSession,
+    ApDataSessionCount,
+    ApSviState,
+    ApL2LispInstance,
+    ApL2LispDynamicEid,
+    ApL2LispDatabase,
+    ApL2LispRegistration,
+    ApIpAddress,
+    ApL3LispInstance,
+    ApL3LispDynamicEid,
+    ApL3LispDatabase,
+    ApL3LispRegistration,
+    ApCpDiscovery,
+)
+from checks.ap_wlc import ApWlcDiscovery, ApWlcProfile
 from checks.profile import (
     ResolveCatcName,
     ProfileXtrNetworkDevice,
@@ -123,11 +147,28 @@ def _normalize_payload(payload: dict) -> None:
         # east-west flows live in a user VRF; honor the form value when present.
         if not (payload.get("vrf") or "").strip():
             payload["vrf"] = payload.get("vrf_name") or "default"
+    if payload.get("scenario") == "ap_onboarding":
+        # The AP form asks for `ap_mac`; every shared check reads `mac`. Without
+        # this the AP MAC is collected, validated, sent -- and silently dropped.
+        if not payload.get("mac") and payload.get("ap_mac"):
+            payload["mac"] = payload["ap_mac"]
+        # An AP onboards in the INFRA_VN.
+        if not (payload.get("vrf") or "").strip():
+            payload["vrf"] = "default"
     if payload.get("scenario") == "underlay_multicast":
         if not payload.get("mgmt_ip") and payload.get("umcast_source_ip"):
             payload["mgmt_ip"] = payload["umcast_source_ip"]
         if not (payload.get("vrf") or "").strip():
             payload["vrf"] = "default"
+
+    # Every check keys device lookups on this MAC, and Genie keys its parsed
+    # results the way IOS prints them (b811.4b0e.2630). Normalising once here --
+    # the single point all of them read from -- means a MAC typed with colons,
+    # hyphens or in upper case finds the endpoint instead of being reported as
+    # unknown to a switch that had profiled it correctly.
+    for key in ("mac", "ap_mac", "client_mac", "destination_mac"):
+        if payload.get(key):
+            payload[key] = normalize_mac(payload[key])
 
 
 def build_check_chain(payload: dict) -> list[Check]:
@@ -146,6 +187,62 @@ def build_check_chain(payload: dict) -> list[Check]:
             FabricSiteLookup(),
             XtrRoleClassification(),
             ApEdgeGate(),
+            # Step 2 -- the wireless controllers themselves. Standalone: every
+            # Fabric WLC at the site is profiled, with no AP-specific lookup.
+            ApWlcDiscovery(),
+            ApWlcProfile(),
+            # Step 3 -- the AP's current state on the edge. Starts by deriving
+            # the VLAN it onboards in from the INFRA_VN L2 instance step 2 read
+            # off the controllers; every later edge check hangs off that VLAN.
+            ApInfraVnVlan(),
+            ApMacLearning(),
+            # CDP before the authentication session: the auth validator reads
+            # the is_ap / cdpneighborhost that this check produces.
+            ApCdpNeighbor(),
+            # Divergence path only: the MAC was learned outside the INFRA_VN
+            # VLAN, and authentication is what assigned the VLAN it is in -- so
+            # it runs BEFORE the interface checks here, to put the reason on the
+            # canvas ahead of the consequence. On the normal path this instance
+            # does not appear and the late one below runs instead.
+            ApAuthenticationSession(early=True),
+            # The port's own L2 state, before anything that runs on top of it.
+            ApSwitchportState(),
+            # What the switch reports to AAA about the AP, which is what
+            # profiling policy matches on.
+            ApAccountingAttributes(),
+            # The switch's own opinion of the endpoint, independent of CDP.
+            ApDeviceClassifier(),
+            # Template before the session: what the port is configured to do,
+            # before what actually happened to it.
+            ApAuthTemplate(),
+            # Authentication last of the port checks: it grades the assigned
+            # VLAN against the INFRA_VN VLAN, so it needs ApInfraVnVlan, and
+            # its port comes from ApMacLearning.
+            ApAuthenticationSession(early=False),
+            # After the session grading: it counts sessions on the same
+            # collected output, and needs ApCdpNeighbor's is_ap to know whether
+            # more than one is a fault or just what a downstream switch looks
+            # like.
+            ApDataSessionCount(),
+            # Spec 3b.1. The AP's gateway, and the first check that leaves the
+            # access port to look at routing. Needs ApInfraVnVlan's VLAN; runs
+            # after the port-level checks because a port that never came up
+            # makes the gateway's state beside the point.
+            ApSviState(),
+            # Spec 3b.3. Graded as a sequence in the order the fabric builds
+            # it: instance, then dynamic EID, then database, then registration
+            # to each control plane. Split into four checks so the canvas says
+            # which link broke rather than failing one node four ways.
+            ApL2LispInstance(),
+            ApL2LispDynamicEid(),
+            ApL2LispDatabase(),
+            ApL2LispRegistration(),
+            ApIpAddress(),
+            ApL3LispInstance(),
+            ApL3LispDynamicEid(),
+            ApL3LispDatabase(),
+            ApL3LispRegistration(),
+            ApCpDiscovery(),
         ]
     if scenario == "dhcp":
         return [

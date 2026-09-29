@@ -19,13 +19,18 @@ class CDPinfo:
                 localinterface = cdpintf_op['index'][i]['local_interface']
                 remoteinterface = cdpintf_op['index'][i]['port_id']
                 capabilities = cdpintf_op['index'][i]['capabilities']
+                # Not every neighbour advertises a version, so this is read
+                # defensively -- an AP reports its image here, which is the
+                # only place CDP carries it.
+                software_version = cdpintf_op['index'][i].get('software_version')
                 cdpneighborinfo = {
                     'device_id': device_id,
                     'management_addresses': management_addresses,
                     'platform': platform,
                     'localinterface': localinterface,
                     'remoteinterface': remoteinterface,
-                    'capabilities' : capabilities
+                    'capabilities' : capabilities,
+                    'software_version': software_version
                 }
                 cdpneighbors.append(cdpneighborinfo)
             self.cdpneighbors = cdpneighbors

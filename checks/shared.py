@@ -6,9 +6,28 @@ shim that lets legacy traffic_flows functions see ctx.state as if it were
 the old edge_node_device object.
 """
 
+import re
 from types import SimpleNamespace
 
 from checks import CheckResult, CheckStatus, RunContext
+
+
+def normalize_mac(mac) -> str:
+    """A MAC in the dotted-quad lower-case form IOS parsers key on.
+
+    Genie keys its results the way IOS prints them -- `b811.4b0e.2630` -- while
+    a user types whatever their notes hold: colons, hyphens, upper case. A
+    lookup that only lower-cases the input misses every one of those, and the
+    checks report the endpoint as unknown to the switch when the switch knew it
+    perfectly well. Anything that is not twelve hex digits is returned trimmed
+    and lower-cased rather than mangled, so a malformed value still reaches the
+    device and fails there with a message about the MAC.
+    """
+    raw = (mac or "").strip().lower()
+    hexonly = re.sub(r"[^0-9a-f]", "", raw)
+    if len(hexonly) != 12:
+        return raw
+    return f"{hexonly[0:4]}.{hexonly[4:8]}.{hexonly[8:12]}"
 
 
 def _legacy_fail(e: BaseException, prefix: str) -> CheckResult:

@@ -203,12 +203,32 @@ function setStatus(el, kind, html) {
   else el.innerHTML = html;
 }
 
+
+// ---- RADKit connection badge ---------------------------------------------
+// Always-on indicator. A login that has quietly gone stale is otherwise
+// invisible until a run fails half a minute in, so the state gets its own
+// corner of the screen rather than a line buried in a form.
+const radkitBadge = document.getElementById('radkitBadge');
+
+function setRadkitStatus(state, label, detail) {
+  if (!radkitBadge) return;
+  radkitBadge.hidden = false;
+  radkitBadge.classList.remove('is-ready', 'is-partial', 'is-dead');
+  if (state) radkitBadge.classList.add('is-' + state);
+  const s = radkitBadge.querySelector('.radkit-state');
+  const d = radkitBadge.querySelector('.radkit-detail');
+  if (s) s.textContent = label;
+  if (d) d.textContent = detail || '';
+}
+
 function showServiceForm(sid) {
   currentSession = sid;
   saveSession({ sid });
   pickerPane.style.display = 'none';
   loginForm.style.display = 'none';
   serviceUser.textContent = 'Logged in as ' + document.getElementById('email').value;
+  setRadkitStatus('partial', 'Logged in \u2014 no service',
+                  document.getElementById('email').value);
   serviceForm.style.display = 'block';
 }
 
@@ -284,6 +304,7 @@ function showScenarioForm(serviceLabel) {
   serviceForm.style.display = 'none';
   pickerPane.style.display = 'none';
   scenarioService.textContent = 'Service: ' + serviceLabel;
+  setRadkitStatus('ready', 'RADKit connected', serviceLabel);
   if (scenarioTitle) scenarioTitle.textContent = scenarioLabel(scenarioSelect.value);
   scenarioForm.style.display = 'block';
 }
@@ -360,6 +381,9 @@ if (changeScenarioBtn) {
     scenarioForm.style.display = 'none';
     pickerPane.style.display = 'block';
     setHeroVisible(true);
+    // Forget the choice too -- otherwise a reload from the picker restores the
+    // scenario the user just backed out of.
+    saveSession({ scenario: null, runStarted: false });
   });
 }
 
@@ -671,48 +695,59 @@ function fabricCloudIconSvg() {
 const FABRIC_CLOUD_ICON_URL =
   "data:image/svg+xml;utf8," + encodeURIComponent(fabricCloudIconSvg());
 
-// Wireless LAN Controller: Cisco-style blue square — three solid white
-// triangles pointing toward the centre on top, chain-link ribbon across the
-// bottom, and a status badge in the top-right corner.
-function wlcIconSvg(badgeFill) {
+// Wireless LAN Controller. Same chassis geometry as the fabric-role icons --
+// identical rect, stroke and badge placement -- so the two read as the same
+// family of device. Only the glyph differs: three arrows converging upward
+// over a chain-link ribbon, per the Cisco WLC symbol.
+//
+// `bodyFill` follows the same rule as the edges: dark blue by default, and
+// fabric light-blue once the WLC is determined to be a fabric WLC.
+function wlcIconSvg(badgeFill, bodyFill) {
+  const white = "#ffffff";
+  // Three arrows radiating from a common centre to the points of a triangle:
+  // tails meet in the middle, heads at the vertices. Built from ONE arrow drawn
+  // straight up from the centre and rotated 0/120/240 degrees, so all three are
+  // identical by construction -- drawing them separately let their origins and
+  // head sizes drift apart.
+  const CX = 46, CY = 48, R = 27, HL = 13, HW = 8;
+  const tipY = CY - R;            // arrowhead tip, at the triangle vertex
+  const baseY = CY - (R - HL);    // arrowhead base
+  const arrow =
+    "<line x1='" + CX + "' y1='" + CY + "' x2='" + CX + "' y2='" + baseY + "' " +
+      "stroke='" + white + "' stroke-width='4' stroke-linecap='round'/>" +
+    "<polygon points='" + CX + "," + tipY + " " +
+      (CX - HW) + "," + baseY + " " + (CX + HW) + "," + baseY + "' fill='" + white + "'/>";
+  let glyph = "";
+  for (let k = 0; k < 3; k++) {
+    glyph += "<g transform='rotate(" + (k * 120) + " " + CX + " " + CY + ")'>" + arrow + "</g>";
+  }
+  // Chain-link ribbon across the bottom.
+  let ribbon = "<g fill='none' stroke='" + white + "' stroke-width='2.6'>";
+  for (let i = 0; i < 6; i++) {
+    ribbon += "<ellipse cx='" + (18 + i * 11) + "' cy='82' rx='6' ry='4.5'/>";
+  }
+  ribbon += "</g>";
   return (
     "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
-    // Rounded blue body inset on top & right so the badge can peek out.
-    "<rect x='6' y='14' width='80' height='80' rx='10' ry='10' " +
-      "fill='#1d4ed8' stroke='#0c1e5e' stroke-width='3'/>" +
-    // Three solid white triangles in a row, all pointing toward the centre
-    // (i.e. up toward the top edge of the icon body).
-    "<polygon points='28,52 18,52 23,40' fill='#ffffff'/>" +
-    "<polygon points='51,52 41,52 46,40' fill='#ffffff'/>" +
-    "<polygon points='74,52 64,52 69,40' fill='#ffffff'/>" +
-    // Divider line above the ribbon.
-    "<line x1='10' y1='62' x2='82' y2='62' stroke='#ffffff' stroke-width='2'/>" +
-    // Chain-link ribbon: six interlocking ovals centred on y=74.
-    "<g fill='none' stroke='#ffffff' stroke-width='2.4'>" +
-      "<ellipse cx='18' cy='74' rx='6' ry='4'/>" +
-      "<ellipse cx='30' cy='74' rx='6' ry='4'/>" +
-      "<ellipse cx='42' cy='74' rx='6' ry='4'/>" +
-      "<ellipse cx='54' cy='74' rx='6' ry='4'/>" +
-      "<ellipse cx='66' cy='74' rx='6' ry='4'/>" +
-      "<ellipse cx='78' cy='74' rx='6' ry='4'/>" +
-    "</g>" +
-    // Status badge in the top-right corner.
-    "<circle cx='86' cy='14' r='10' fill='" + badgeFill + "' " +
-      "stroke='white' stroke-width='2.5'/>" +
+    "<rect x='2' y='10' width='88' height='88' rx='12' ry='12' " +
+      "fill='" + (bodyFill || DEFAULT_NODE_FILL) + "' stroke='#0f172a' stroke-width='3'/>" +
+    glyph +
+    ribbon +
+    "<circle cx='90' cy='10' r='10' fill='" + badgeFill + "' stroke='white' stroke-width='2.5'/>" +
     "</svg>"
   );
 }
-function wlcIconUrl(fill) {
-  return "data:image/svg+xml;utf8," + encodeURIComponent(wlcIconSvg(fill));
+function wlcIconUrl(fill, bodyFill) {
+  return "data:image/svg+xml;utf8," + encodeURIComponent(wlcIconSvg(fill, bodyFill));
 }
-const WLC_ICON_URL = {
-  pending: wlcIconUrl('#cbd5e1'),
-  running: wlcIconUrl('#eab308'),
-  ok:      wlcIconUrl('#22c55e'),
-  warn:    wlcIconUrl('#f97316'),
-  fail:    wlcIconUrl('#ef4444'),
-  skip:    wlcIconUrl('#94a3b8'),
-};
+// Two sets: the default dark-blue chassis, and the fabric light-blue one used
+// once the WLC is confirmed to be a fabric WLC (node gets fabric = 'yes').
+const WLC_ICON_URL = {};
+const WLC_FABRIC_ICON_URL = {};
+for (const [status, badge] of Object.entries(STATUS_BADGE)) {
+  WLC_ICON_URL[status]        = wlcIconUrl(badge, DEFAULT_NODE_FILL);
+  WLC_FABRIC_ICON_URL[status] = wlcIconUrl(badge, FABRIC_ROLE_FILL);
+}
 
 // Access Point: Cisco-style rounded blue square with a smaller rounded
 // rectangle window and a top LED dot.
@@ -751,7 +786,7 @@ const ROLE_ICON = {
 function showTopology(payload) {
   document.body.classList.add('topology-active');
   scenarioForm.style.display = 'none';
-  document.getElementById('topologyPanel').style.display = 'block';
+  document.getElementById('topologyPanel').style.display = 'flex';
   const wiredToggle = document.getElementById('topologyWiredToggle');
   const wiredCheckbox = document.getElementById('topologyTreatAsWired');
   if (payload.scenario === 'dhcp') {
@@ -767,7 +802,9 @@ function showTopology(payload) {
         ? 'Underlay Multicast — FHR ' + payload.umcast_source_ip
           + (payload.umcast_dest_ip ? (' → LHR ' + payload.umcast_dest_ip) : '')
           + ' · IID ' + payload.umcast_l2vni_iid + ' · VLAN ' + payload.umcast_vlan
-        : 'East-West — ' + payload.device_source_ip + ' → ' + payload.destination_ip;
+        : payload.scenario === 'ap_onboarding'
+          ? 'AP Onboarding — Edge ' + payload.mgmt_ip + ' · AP MAC ' + payload.ap_mac
+          : 'East-West — ' + payload.device_source_ip + ' → ' + payload.destination_ip;
 
   cy = cytoscape({
     container: document.getElementById('cy'),
@@ -868,6 +905,14 @@ function showTopology(payload) {
       { selector: 'node[role = "wlc"][status = "warn"]',    style: { 'background-image': WLC_ICON_URL.warn } },
       { selector: 'node[role = "wlc"][status = "fail"]',    style: { 'background-image': WLC_ICON_URL.fail } },
       { selector: 'node[role = "wlc"][status = "skip"]',    style: { 'background-image': WLC_ICON_URL.skip } },
+      // No status yet (node just created): still honour the fabric chassis.
+      { selector: 'node[role = "wlc"][fabric = "yes"]', style: { 'background-image': WLC_FABRIC_ICON_URL.pending } },
+      { selector: 'node[role = "wlc"][fabric = "yes"][status = "pending"]', style: { 'background-image': WLC_FABRIC_ICON_URL.pending } },
+      { selector: 'node[role = "wlc"][fabric = "yes"][status = "running"]', style: { 'background-image': WLC_FABRIC_ICON_URL.running } },
+      { selector: 'node[role = "wlc"][fabric = "yes"][status = "ok"]',      style: { 'background-image': WLC_FABRIC_ICON_URL.ok } },
+      { selector: 'node[role = "wlc"][fabric = "yes"][status = "warn"]',    style: { 'background-image': WLC_FABRIC_ICON_URL.warn } },
+      { selector: 'node[role = "wlc"][fabric = "yes"][status = "fail"]',    style: { 'background-image': WLC_FABRIC_ICON_URL.fail } },
+      { selector: 'node[role = "wlc"][fabric = "yes"][status = "skip"]',    style: { 'background-image': WLC_FABRIC_ICON_URL.skip } },
       { selector: 'node[role = "access-point"]', style: {
           'background-image': AP_ICON_URL,
           'width': 88,
@@ -960,29 +1005,6 @@ function showTopology(payload) {
     } catch (e) {
       showBanner('Could not download the log: ' + e);
     }
-  });
-  document.getElementById('topologyDownloadTopology').addEventListener('click', () => {
-    if (!cy) return;
-    // Render the full graph (not just the visible viewport) into a 1920x1080
-    // JPEG. cy.jpg() with output:'blob' returns a Blob we can download via a
-    // hidden <a download> click — no navigation, EventSource stays alive.
-    const blob = cy.jpg({
-      output: 'blob',
-      full: true,
-      bg: '#ffffff',
-      maxWidth: 1920,
-      maxHeight: 1080,
-      quality: 0.92,
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    a.download = 'topology-' + ts + '.jpg';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
   });
   document.getElementById('topologyDownloadChecks').addEventListener('click', () => {
     if (!cy) return;
@@ -1149,6 +1171,21 @@ function refreshTopology() {
   startRun(currentPayload);
 }
 
+// A refresh or tab close abandons the run but the server worker keeps going.
+// Because that worker is single-threaded, the next run enqueues *behind* the
+// abandoned one, and the reconnecting page replays the old run's events onto a
+// fresh canvas -- which is why the XTR node came back empty. Beacon a stop on
+// the way out so the run dies with the page.
+//
+// 'pagehide' rather than 'beforeunload': it fires on mobile/bfcache paths where
+// beforeunload does not. sendBeacon survives teardown; fetch may not.
+window.addEventListener('pagehide', function () {
+  if (!currentSession) return;
+  try {
+    navigator.sendBeacon('/run/stop/' + currentSession, new Blob([], { type: 'text/plain' }));
+  } catch (e) { /* nothing useful to do while unloading */ }
+});
+
 function backToMenu() {
   console.log('[backToMenu] click received, currentSession=', currentSession);
   if (currentSession) {
@@ -1275,6 +1312,20 @@ function applyNodeLabel(nodeId) {
   if (rloc) label += '\nRLOC: ' + rloc;
   if (tags.length) label += '\n[' + tags.join(', ') + ']';
   n.data('label', label);
+}
+
+// Promote a WLC node to a fabric WLC: cyan chassis (see the
+// node[role="wlc"][fabric="yes"] selectors) and a role tag that says so. Called
+// when the WLC's `show wireless fabric summary` reports Fabric Status: Enabled.
+function markWlcFabric(nodeId) {
+  if (!cy) return;
+  const n = cy.getElementById(nodeId);
+  if (n.empty()) return;
+  n.data('fabric', 'yes');
+  const tags = (n.data('tags') || []).filter(t => t !== 'WLC' && t !== 'Fabric WLC');
+  tags.push('Fabric WLC');
+  n.data('tags', tags);
+  applyNodeLabel(nodeId);
 }
 
 function addEndpointNode(info) {
@@ -1580,7 +1631,10 @@ function addNodes(nodes) {
         ip: spec.ip || null,
         mac: spec.mac || null,
         vlan: spec.vlan != null ? spec.vlan : null,
-        tags: [],
+        // 'yes' switches a WLC to the fabric (light-blue) chassis, matching how
+        // the edges signal fabric membership.
+        fabric: spec.fabric ? 'yes' : 'no',
+        tags: Array.isArray(spec.tags) ? spec.tags.slice() : [],
         checks: [],
       },
       position: { x: x, y: y },
@@ -1598,6 +1652,9 @@ function addNodes(nodes) {
       });
     }
     if (spec.ip) ipIndex.set(spec.ip, spec.id);
+    // Tags supplied at creation (e.g. 'Fabric WLC') must be rendered into the
+    // label; the node was added with the bare base label.
+    if (Array.isArray(spec.tags) && spec.tags.length) applyNodeLabel(spec.id);
   });
 }
 
@@ -1672,7 +1729,19 @@ let lastEventId = 0;
 
 async function startRun(payload) {
   if (currentEventSource) { try { currentEventSource.close(); } catch (e) {} }
+  // Belt and braces for the refresh case: the pagehide beacon usually kills the
+  // abandoned run, but a dropped beacon would leave it running and this new run
+  // would queue behind it. Await the stop so the old run is cancelled and any
+  // queued run is drained before we enqueue ours.
+  if (currentSession) {
+    try {
+      await fetch('/run/stop/' + currentSession, { method: 'POST' });
+    } catch (e) { /* proceed regardless; worst case is the old behaviour */ }
+  }
   setRunInFlight(true);
+  // A reload only resumes into a scenario form if a run actually started --
+  // otherwise an idle refresh traps the user in whatever they last picked.
+  saveSession({ runStarted: true });
   // Pass `?since=<last>` so the server skips events from any earlier run on
   // this session. EventSource auto-reconnects within the same connection use
   // Last-Event-ID; this only affects fresh EventSource instances.
@@ -1699,6 +1768,7 @@ async function startRun(payload) {
         es.close();
         clearSession();
         setRunInFlight(false);
+        setRadkitStatus('dead', 'Session expired', 'log in again');
         showBanner('Session ended — the server restarted. Log in again.');
       }
     }).catch(() => {});
@@ -1869,6 +1939,11 @@ function handleEvent(msg) {
         updateNode(nodeId, { rloc: msg.node_rloc });
         applyNodeLabel(nodeId);
       }
+      // A WLC that reports Fabric Status: Enabled becomes a Fabric WLC --
+      // cyan chassis and a role tag saying so.
+      if (Array.isArray(msg.mark_fabric_wlc)) {
+        msg.mark_fabric_wlc.forEach(id => markWlcFabric(id));
+      }
       if (Array.isArray(msg.relabel_nodes)) {
         msg.relabel_nodes.forEach(spec => {
           if (!spec || !spec.id) return;
@@ -1927,6 +2002,7 @@ function reattachEventStream() {
         es.close();
         clearSession();
         setRunInFlight(false);
+        setRadkitStatus('dead', 'Session expired', 'log in again');
         showBanner('Session ended — the server restarted. Log in again.');
       }
     }).catch(() => {});
@@ -1963,9 +2039,11 @@ async function restoreSession() {
       const label = d.name || d.serial || saved.serviceName || '';
       saveSession({ serviceName: label, serviceSerial: d.serial });
       serviceReady = true;
-      if (!saved.scenario) {
-        // Connected, but nothing chosen to run -- start at the picker.
+      if (!saved.scenario || !saved.runStarted) {
+        // Nothing chosen, or chosen but never run -- start at the picker. Only
+        // a run in progress (or just finished) is worth resuming into.
         scenarioService.textContent = 'Service: ' + label;
+        setRadkitStatus('ready', 'RADKit connected', label);
         pickerPane.style.display = 'block';
         setHeroVisible(true);
         return;
@@ -1982,7 +2060,8 @@ async function restoreSession() {
   // Logged in but no service yet. With a scenario already chosen, resume at the
   // service form; without one there is nothing to resume to, so show the picker.
   serviceUser.textContent = 'Restored session ' + saved.sid;
-  if (saved.scenario) {
+  setRadkitStatus('partial', 'Logged in \u2014 no service', saved.sid);
+  if (saved.scenario && saved.runStarted) {
     pickerPane.style.display = 'none';
     serviceForm.style.display = 'block';
   } else {

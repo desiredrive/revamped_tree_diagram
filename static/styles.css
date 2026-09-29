@@ -145,6 +145,9 @@ button:hover { background: #1d4ed8; }
 .muted { font-size: 0.8rem; color: #94a3b8; }
 .hint  { font-size: 0.72rem; color: #64748b; margin-top: 0.25rem; font-style: italic; }
 .field-msg { font-size: 0.72rem; margin-top: 0.25rem; min-height: 1rem; }
+/* An empty slot still occupied a full line, showing up as a stray gap above
+   the next label. Only reserve the space once there is something to say. */
+.field-msg:empty { min-height: 0; margin-top: 0; }
 .status-line {
   margin-top: 1rem;
   padding: 0.7rem;
@@ -163,17 +166,27 @@ button:hover { background: #1d4ed8; }
   background: #0f172a;
   padding: 1rem;
   box-sizing: border-box;
+  /* Column flex so the body claims exactly the leftover height. A hardcoded
+     calc() silently overflows the viewport whenever the header wraps. */
+  flex-direction: column;
 }
 #topologyPanel .topology-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.75rem;
+  /* Clear the fixed RADKit badge in the top-left corner, which would
+     otherwise sit on top of the title. */
+  padding-left: 12.5rem;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 #topologyPanel .topology-body {
   display: flex;
   gap: 0.75rem;
-  height: calc(100% - 2.5rem);
+  flex: 1;
+  min-height: 0;   /* let the children scroll instead of overflowing */
 }
 #topologyTitle { font-size: 0.95rem; color: #e2e8f0; font-weight: 600; }
 #topologySub   { font-size: 0.8rem; color: #94a3b8; flex: 1; margin-left: 1rem; }
@@ -184,7 +197,6 @@ button:hover { background: #1d4ed8; }
 #topologyRefresh:hover { background: #475569 !important; }
 #topologyRefresh:disabled { background: #1e293b !important; color: #64748b !important; cursor: not-allowed; }
 #topologyDownloadLog,
-#topologyDownloadTopology,
 #topologyDownloadChecks,
 #topologyResetView,
 #topologyRefresh,
@@ -203,14 +215,12 @@ button:hover { background: #1d4ed8; }
   text-align: center !important;
 }
 #topologyDownloadLog,
-#topologyDownloadTopology,
 #topologyDownloadChecks,
 #topologyResetView {
   background: #334155 !important;
   color: #e2e8f0 !important;
 }
 #topologyDownloadLog:hover,
-#topologyDownloadTopology:hover,
 #topologyDownloadChecks:hover,
 #topologyResetView:hover { background: #475569 !important; }
 
@@ -529,3 +539,42 @@ button:hover { background: #1d4ed8; }
   font-weight: 500;
 }
 .back-link:hover { background: #3f4d63; color: #e2e8f0; }
+
+/* RADKit connection badge. Mirrors .app-version but top-left, and clickable
+   so the detail can be read without hunting through the forms. */
+.radkit-badge {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.75rem;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  color: #94a3b8;
+  background: rgba(15, 23, 42, 0.7);
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+.radkit-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #64748b;
+  flex: none;
+}
+.radkit-text { display: flex; flex-direction: column; line-height: 1.25; }
+.radkit-detail {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.65rem;
+  color: #64748b;
+}
+.radkit-detail:empty { display: none; }
+
+.radkit-badge.is-ready .radkit-dot { background: #22c55e; }
+.radkit-badge.is-ready .radkit-state { color: #86efac; }
+.radkit-badge.is-partial .radkit-dot { background: #eab308; }
+.radkit-badge.is-partial .radkit-state { color: #fde047; }
+.radkit-badge.is-dead .radkit-dot { background: #ef4444; }
+.radkit-badge.is-dead .radkit-state { color: #fca5a5; }

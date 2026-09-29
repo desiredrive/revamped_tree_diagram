@@ -10,7 +10,7 @@ predicate, so this module stays free of any session/transport types.
 
 from checks import CheckResult, CheckStatus, RunContext
 from check_registry import build_check_chain
-from radkit_cli import set_logfile
+from radkit_cli import set_logfile, append_to_logging_file
 
 
 def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
@@ -62,6 +62,17 @@ def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
             })
             return
         check = chain[i]
+        # A check can decline to appear at all. Used where the same check is
+        # registered at two points in the chain and only one of them applies to
+        # the run in hand -- emitting the other would paint a node for something
+        # that never ran. Skipping here, before check_started, keeps the canvas
+        # showing only the path actually taken.
+        # NOTE: this is a manual-index loop -- advance `i` before continuing,
+        # or the skip spins on the same check forever.
+        applies = getattr(check, "applies", None)
+        if callable(applies) and not applies(ctx):
+            i += 1
+            continue
         # Allow a previous check to remap subsequent target node ids — used by
         # WirelessFabricEdgeRedirect to redirect the wired chain to a
         # newly-spawned XTR node when the wireless endpoint roamed away from
@@ -86,6 +97,16 @@ def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
             # BaseException covers SystemExit from legacy helpers that call
             # sys.exit() on hard prerequisite failures — we want to surface the
             # error on the affected node, not tear down the worker thread.
+            #
+            # The UI message carries only the exception type and text, which is
+            # all a user can act on. The traceback is the only thing that says
+            # WHERE it came from, so it goes to the collection log rather than
+            # being discarded -- without it every crash here costs a debugging
+            # session to re-localize.
+            import traceback as _tb
+            append_to_logging_file(
+                f"[check-exception] {check.name}: "
+                f"{type(e).__name__}: {e}\n{_tb.format_exc()}")
             result = CheckResult(
                 CheckStatus.FAIL,
                 f"Unhandled exception in check: {type(e).__name__}: {e}",
@@ -100,7 +121,7 @@ def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
         }
         # Pass through any data the check wanted the UI to act on.
         for key in ("node_relabel", "relabel_nodes", "add_endpoint", "add_nodes",
-                    "add_edges", "node_rloc", "merge_into"):
+                    "add_edges", "node_rloc", "merge_into", "mark_fabric_wlc"):
             if result.data.get(key):
                 event[key] = result.data[key]
         # node_tags is meaningful when empty (it clears the tags), so it is

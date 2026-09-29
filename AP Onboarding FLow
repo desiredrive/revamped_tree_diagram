@@ -20,6 +20,12 @@ copp drops
 each of these are quite complex, I think we have so far created mac address adjacency and route entries, the rest will be done when we need.
 Every step MIGHT have a module for it already, we must reuse it if it exists.
 
+Response type: a check that finds a fault in the FABRIC must not be FAIL, because
+FAIL stops the run and skips every remaining validation. Use WARN and let the run
+continue - every check has diagnostic value and we need the full picture. FAIL is
+only for when the tool itself cannot continue (cannot read the device, missing
+prerequisite), not for a finding about the network.
+
 
 In summary, every time we detect a "PD eligible" object, we must save the object in a database of PD objects we will verify once everything is good (or bad/end of the script).
 

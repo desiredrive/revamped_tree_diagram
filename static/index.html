@@ -13,6 +13,16 @@
 <div id="banner" role="alert"></div>
   <div id="appVersion" class="app-version" title="App version / git commit"></div>
 
+  <!-- RADKit connection state. Always visible: a stale login is otherwise
+       invisible until a run fails 30s in. -->
+  <div id="radkitBadge" class="radkit-badge" hidden>
+    <span class="radkit-dot"></span>
+    <span class="radkit-text">
+      <span class="radkit-state">Not connected</span>
+      <span class="radkit-detail"></span>
+    </span>
+  </div>
+
   <header class="masthead">
     <div class="masthead-rule">
       <span class="rule-line"></span>
@@ -116,7 +126,6 @@
   <!-- Step 3: pick a scenario -->
   <form id="scenarioForm" class="card" style="display:none; width:400px;">
     <h1 id="scenarioTitle">Scenario</h1>
-    <button type="button" id="changeScenario" class="linkish">&larr; Change scenario</button>
     <div class="muted" id="scenarioService" style="margin-bottom:0.5rem;"></div>
 
 
@@ -153,7 +162,7 @@
       <div style="display:flex; align-items:center; justify-content:space-between; margin:1rem 0 0.25rem; gap:1rem;">
         <span style="font-size:0.85rem; color:#e2e8f0;">Fabric Enabled Wireless Endpoint</span>
         <label class="toggle">
-          <input id="dhcp_is_few" type="checkbox" checked>
+          <input id="dhcp_is_few" type="checkbox">
           <span class="toggle-slider"></span>
         </label>
       </div>
@@ -223,6 +232,7 @@
     </div>
 
     <button type="submit">Run</button>
+    <button type="button" id="changeScenario" class="back-link">&larr; Return to Main Screen</button>
     <div id="scenarioStatus" class="status-line" style="background:#064e3b; color:#d1fae5;"></div>
   </form>
 
@@ -237,7 +247,6 @@
         <span class="slider-label">Treat as wired (skip wireless onboarding)</span>
       </label>
       <button id="topologyDownloadLog" type="button" title="Download collection_logfile.txt">Download Log</button>
-      <button id="topologyDownloadTopology" type="button" title="Download current topology snapshot (JSON)">Download Topology</button>
       <button id="topologyDownloadChecks" type="button" title="Download all check results as a PDF">Download Checks</button>
       <button id="topologyResetView" type="button" title="Recenter and fit the topology in the viewport">Reset View</button>
       <button id="topologyRefresh" type="button" title="Run the whole flow again">Run Again</button>

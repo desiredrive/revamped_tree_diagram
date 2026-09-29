@@ -1304,6 +1304,137 @@ class lisp_route_import:
         routeimportop = parse_show_lisp_route_import_database(routeimportop)
         self.routeimportprefix = routeimportop
 
+def _parse_ipv4_server_raw(output, eid, iid):
+    """Read a CP's IPv4 site-registration record from the CLI text.
+
+    Genie has a parser for this command, but its schema requires map_notify,
+    proxy_reply and last_registered inside each ETR block, and those come from
+    the per-ETR line
+
+        last registered 1d12h, proxy-reply, map-notify
+
+    whose duration form the parser only matches while the registration is
+    recent. The same healthy record therefore parses when it is minutes old and
+    fails once it has been up a day -- reporting a registered EID as missing,
+    which is the one answer a registration check must never get wrong. The text
+    itself is unambiguous, so it is read directly.
+
+    Returns None when the CP genuinely has no record for the EID.
+    """
+    if not output:
+        return None
+
+    record = {
+        "state": None, "proxy_reply": None, "origin": None,
+        "first_registered": None, "last_registered": None, "ttl": None,
+        "auth_failures": 0, "allowed_locators_mismatch": 0,
+        "site_name": None, "etrs": [], "etrsessions": [], "locators": {},
+        # Which prefix the CP answered with, and whether it is the host's own
+        # /32 rather than a covering prefix.
+        "eid_prefix": None, "exact_prefix": False,
+    }
+
+    # "% No entries found" / an empty Requested EID-prefix section both mean the
+    # CP holds nothing for this EID.
+    if re.search(r"^\s*%", output, re.MULTILINE) and "EID-prefix:" not in output:
+        return None
+    if "EID-prefix:" not in output:
+        return None
+
+    prefix_seen = False
+    current_etr = None
+    in_locator_table = False
+
+    for line in output.splitlines():
+        stripped = line.strip()
+
+        m = re.match(r"^Site name:\s*(\S+)", stripped)
+        if m:
+            record["site_name"] = m.group(1)
+            continue
+
+        m = re.match(r"^EID-prefix:\s*(\S+)", stripped)
+        if m:
+            # The bare-address query returns the record that COVERS the host,
+            # which is normally the site's configured prefix (a /24 per VN) and
+            # not the host's own /32. Requiring an exact match here threw that
+            # record away -- including its authentication-failure counters --
+            # and reported a registering AP as having no record at all.
+            #
+            # So the block is read whatever prefix it carries, and the exact
+            # /32 is tracked separately: a covering record is where the counters
+            # live, but only the host's own /32 is a registration for the host.
+            seen_prefix = str(m.group(1))
+            record["eid_prefix"] = seen_prefix
+            record["exact_prefix"] = (
+                seen_prefix.split("/")[0] == str(eid).split("/")[0]
+                and seen_prefix.endswith("/32"))
+            prefix_seen = True
+            continue
+
+        if not prefix_seen:
+            continue
+
+        m = re.match(r"^First registered:\s*(\S+)", stripped)
+        if m:
+            record["first_registered"] = m.group(1); continue
+        m = re.match(r"^Last registered:\s*(\S+)", stripped)
+        if m:
+            record["last_registered"] = m.group(1); continue
+        m = re.match(r"^Origin:\s*(.+)$", stripped)
+        if m:
+            record["origin"] = m.group(1).strip(); continue
+        m = re.match(r"^Proxy reply:\s*(\S+)", stripped)
+        if m:
+            record["proxy_reply"] = m.group(1).strip().lower() == "yes"; continue
+        m = re.match(r"^TTL:\s*(\S+)", stripped)
+        if m:
+            record["ttl"] = m.group(1); continue
+        # "State: complete" at record level; the per-ETR "state complete" line
+        # has no colon, so it cannot be confused with it.
+        m = re.match(r"^State:\s*(\S+)", stripped)
+        if m:
+            record["state"] = m.group(1); continue
+        m = re.match(r"^Authentication failures:\s*(\d+)", stripped, re.IGNORECASE)
+        if m:
+            record["auth_failures"] = int(m.group(1)); continue
+        m = re.match(r"^Allowed locators mismatch:\s*(\d+)", stripped, re.IGNORECASE)
+        if m:
+            record["allowed_locators_mismatch"] = int(m.group(1)); continue
+
+        m = re.match(r"^ETR\s+(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?", stripped)
+        if m:
+            current_etr = m.group(1)
+            port = m.group(2)
+            record["etrs"].append(current_etr)
+            record["etrsessions"].append(
+                "{}:{}".format(current_etr, port) if port else current_etr)
+            in_locator_table = False
+            continue
+
+        if re.match(r"^Locator\s+Local\s+State", stripped):
+            in_locator_table = True
+            continue
+
+        if in_locator_table:
+            m = re.match(
+                r"^(\d{1,3}(?:\.\d{1,3}){3})\s+(\S+)\s+(\S+)\s+(\d+)/(\d+)", stripped)
+            if m:
+                record["locators"][m.group(1)] = {
+                    "local": m.group(2),
+                    "state": m.group(3),
+                    "priority": int(m.group(4)),
+                    "weight": int(m.group(5)),
+                }
+                continue
+            if not stripped:
+                in_locator_table = False
+
+    if not prefix_seen and not record["etrs"] and record["state"] is None:
+        return None
+    return record
+
+
 class controlplane_eid:
 
     def __init__(self,eid, iid, queriedcp):
@@ -1410,6 +1541,216 @@ class controlplane_eid:
         self.wlcetr = etr_wllist
         self.auth_failures = auth_failures
         self.allowed_locators_mismatch = allowed_locators_mismatch
+
+    def _apply_record(self, record, hostname, process, subprocess):
+        """Set this object's attributes from a parsed registration record.
+
+        Shared by the genie path and the CLI-text fallback so both produce the
+        same object, and the warnings below are raised once regardless of which
+        parser read the record.
+        """
+        # A record coming back is NOT registration. The bare-address query
+        # returns the covering site prefix whether or not the host ever
+        # registered -- the AP case shows "EID-prefix: 172.19.5.0/24 ...
+        # First registered: never ... No registrations." alongside hundreds of
+        # authentication failures. Two things must hold for the host itself to
+        # be registered: the record is for the host's own /32, and at least one
+        # locator is up. Anything else is a record ABOUT the host's subnet.
+        self.eid_prefix = record.get("eid_prefix")
+        self.exact_prefix = bool(record.get("exact_prefix"))
+        locators = record.get("locators") or {}
+        self.locator_up = any(
+            str(v.get("state", "")).lower() == "up" for v in locators.values())
+        self.registered = self.exact_prefix and self.locator_up
+        self.state = record.get("state")
+        self.proxy_reply = record.get("proxy_reply")
+        self.origin = record.get("origin")
+        self.first_registered = record.get("first_registered")
+        self.last_registered = record.get("last_registered")
+        self.ttl = record.get("ttl")
+        self.auth_failures = record.get("auth_failures") or 0
+        self.allowed_locators_mismatch = record.get("allowed_locators_mismatch") or 0
+        self.etrs = record.get("etrs") or []
+        self.etrsessions = record.get("etrsessions") or []
+        self.locators = locators
+        if record.get("site_name"):
+            self.site_name = record["site_name"]
+
+        if self.auth_failures:
+            message = (
+                "Authentication failures detected for EID {} in VNID {} on control plane {}. "
+                "These counters may be historic; if they continue to increment, remediate by "
+                "correcting the LISP authentication key between the ETR and the map-server."
+            ).format(self.eid, self.iid, hostname)
+            logging_warning("X", process, subprocess, hostname, "LISP Authentication | " + message)
+
+        if self.allowed_locators_mismatch:
+            message = (
+                "The Control Plane {} rejected {} registration(s) for EID {} in VNID {} because the "
+                "RLOC offered by the ETR is not in the locators allowed for the site. Verify the "
+                "site configuration on the Map-Server against the ETR's locator-set."
+            ).format(hostname, self.allowed_locators_mismatch, self.eid, self.iid)
+            logging_warning("X", process, subprocess, hostname, "LISP Allowed Locators | " + message)
+
+    def ipv4_q(self, service):
+        """Query a Control Plane for the IPv4 (L3) registration record of an EID.
+
+        The L3 sibling of ethernet_q. Genie parses this command cleanly, so the
+        output is read from the structured result instead of regexed.
+
+        Sets, when the record exists:
+            registered              True
+            state                   'complete' / 'incomplete'
+            proxy_reply             True/False as configured on the site
+            origin                  e.g. 'Dynamic, more specific of 172.19.5.0/24'
+            first_registered / last_registered
+            ttl
+            auth_failures           Registration errors, authentication
+            allowed_locators_mismatch
+            etrs                    RLOCs that registered this EID
+            etrsessions             RLOC:port as reported
+            locators                {rloc: {'state':..,'priority':..,'weight':..}}
+        and registered = False when the CP has no record for the EID.
+        """
+        hostname = self.queriedcp
+        process = "LISP"
+        subprocess = "[Control-Plane]"
+
+        # Query the BARE address, not <addr>/32. Asking for the masked form
+        # makes IOS-XE look for that exact prefix in the SITE CONFIGURATION and
+        # answer "% Could not find ... in site configuration" when the site is
+        # configured with a covering prefix (the normal case: a /24 per VN).
+        # That refusal is indistinguishable from "not registered" and made
+        # every AP look unregistered on a healthy fabric. The bare address does
+        # a longest-match lookup and returns the covering site record, which is
+        # where the registration -- and the authentication-failure counters --
+        # actually live.
+        eid = str(self.eid).split("/")[0]
+        cmd = "show lisp instance-id {} ipv4 server {}".format(self.iid, eid)
+        # What was asked for, to check against what came back.
+        self.requested_host = eid
+        cp_server_output = get_single_output_genie(self.queriedcp, cmd, service)
+
+        self.registered = False
+        # "The control plane has no record" and "the record could not be read"
+        # are different answers: the first is a finding about the fabric, the
+        # second is a failure of this tool. A caller that cannot tell them
+        # apart will report a healthy CP as missing the registration.
+        self.query_failed = False
+        self.state = None
+        self.proxy_reply = None
+        self.origin = None
+        self.first_registered = None
+        self.last_registered = None
+        self.ttl = None
+        self.auth_failures = 0
+        self.allowed_locators_mismatch = 0
+        self.etrs = []
+        self.etrsessions = []
+        self.locators = {}
+        self.arbinding = "NA"
+
+        if cp_server_output is None:
+            # Genie rejects this record once the registration is more than a
+            # day old (see _parse_ipv4_server_raw), so a None here does NOT
+            # mean the CP has nothing -- fall back to the CLI text before
+            # concluding anything.
+            raw = get_any_single_output(self.queriedcp, cmd, service)
+            record = _parse_ipv4_server_raw(raw, eid, self.iid)
+            if record is None:
+                if not raw:
+                    self.query_failed = True
+                    logging_warning("X", process, subprocess, hostname,
+                                    "Could not read the L3 registration for {} from CP {}: "
+                                    "the command returned nothing.".format(eid, self.queriedcp))
+                else:
+                    logging_info("X", process, subprocess, hostname,
+                                 "L3 Registration for {} not found in CP {}".format(eid, self.queriedcp))
+                return
+            self._apply_record(record, hostname, process, subprocess)
+            return
+
+        # Genie keys lisp_id and instance_id by STRING here (unlike the ETR-side
+        # dynamic-eid parsers, which key instance_id by int), and the site name
+        # is not known in advance, so both levels are walked rather than indexed.
+        try:
+            lisp_ids = cp_server_output['lisp_id']
+        except (KeyError, TypeError):
+            logging_info("X", process, subprocess, hostname,
+                         "L3 Registration for {} not found in CP {}".format(eid, self.queriedcp))
+            return
+
+        record = None
+        for lisp_id in lisp_ids.values():
+            for site_name, site in (lisp_id.get('site_name') or {}).items():
+                for inst_id, inst in (site.get('instance_id') or {}).items():
+                    if str(inst_id) != str(self.iid):
+                        continue
+                    # Same reasoning as the CLI-text parser: the bare-address
+                    # query answers with whatever prefix covers the host, so an
+                    # exact match would discard the site record. Prefer the
+                    # host's own /32 if it is there, otherwise take the
+                    # covering prefix and let _apply_record decide what it
+                    # means.
+                    prefixes = (inst.get('eid_prefix') or {})
+                    host = str(eid).split("/")[0]
+                    for prefix, data in prefixes.items():
+                        if str(prefix) == "{}/32".format(host):
+                            record = data
+                            self.matched_prefix = str(prefix)
+                            self.site_name = site_name
+                            break
+                    if record is None and prefixes:
+                        prefix, data = next(iter(prefixes.items()))
+                        record = data
+                        self.matched_prefix = str(prefix)
+                        self.site_name = site_name
+                    if record:
+                        break
+                if record:
+                    break
+            if record:
+                break
+
+        if record is None:
+            logging_info("X", process, subprocess, hostname,
+                         "L3 Registration for {} not found in CP {}".format(eid, self.queriedcp))
+            return
+
+        # Normalise genie's shape into the same record the CLI-text parser
+        # produces, so both routes go through _apply_record.
+        errors = (record.get('registration_erros')
+                  or record.get('registration_errors') or {})
+        etrs, etrsessions, locators = [], [], {}
+        for rloc, etr in (record.get('etr') or {}).items():
+            etrs.append(rloc)
+            port = etr.get('port')
+            etrsessions.append("{}:{}".format(rloc, port) if port else rloc)
+            for locrloc, loc in (etr.get('locators') or {}).items():
+                locators[locrloc] = {
+                    'state': loc.get('state'),
+                    'priority': loc.get('priority'),
+                    'weight': loc.get('weight'),
+                    'local': loc.get('local'),
+                }
+        self._apply_record({
+            'state': record.get('state'),
+            'proxy_reply': str(record.get('proxy_reply', '')).lower() in ('yes', 'true'),
+            'origin': record.get('origin'),
+            'first_registered': record.get('first_registered'),
+            'last_registered': record.get('last_registered'),
+            'ttl': record.get('ttl'),
+            'auth_failures': errors.get('authentication_failures', 0) or 0,
+            'allowed_locators_mismatch': errors.get('allowed_locators_mismatch', 0) or 0,
+            'etrs': etrs,
+            'etrsessions': etrsessions,
+            'locators': locators,
+            'site_name': getattr(self, 'site_name', None),
+            'eid_prefix': getattr(self, 'matched_prefix', None),
+            'exact_prefix': str(getattr(self, 'matched_prefix', '')) ==
+                            "{}/32".format(str(eid).split("/")[0]),
+        }, hostname, process, subprocess)
+
 
 class l2lisp_info:
 
@@ -1746,7 +2087,18 @@ class LISPLocalDB:
 
     def __init__(self,eid, iid, device):
         self.eid = eid              #Can be : IPv4, MAC address (IPv6 not needed for now)
-        self.iid = iid              #LISP Instance ID for the request
+        # Normalised to int. Genie keys instance_id by the INTEGER instance id
+        # (4097, not "4097"), so a caller passing the string form -- which is
+        # what the LISP instance readers return -- made every dict lookup in
+        # this class raise KeyError while the command strings still looked
+        # correct. Both forms render identically in .format(), so storing the
+        # int satisfies the lookups and the commands alike. A non-numeric value
+        # is kept as-is rather than raising, so an unexpected caller degrades
+        # to the old behaviour instead of breaking at construction.
+        try:
+            self.iid = int(iid)
+        except (TypeError, ValueError):
+            self.iid = iid
         self.device = device
 
     def L3LISPDyn(self,service):
@@ -1817,6 +2169,81 @@ class LISPLocalDB:
                         except AttributeError:
                             mac = None
         self.static_mappings = static_mappings
+
+    def L3LISPDatabaseMapping(self,vrf,service):
+        """Dynamic-EID groups and their database-mappings for one eid-table.
+
+        The L3 counterpart to L2LISPStaticDB. Answers a different question than
+        L3LISPDyn: that one lists the addresses actually LEARNED, this one lists
+        the prefixes DECLARED as EID space. An endpoint that never became a
+        dynamic EID is explained by which of the two is empty -- no group
+        configured at all, versus a group that covers the address but has not
+        learned it.
+
+        Sets `self.database_mappings` to a list of
+        {'dynamic_eid', 'eid_prefix', 'locator_set', 'discovered', 'last_eid'}.
+
+        Parsed here rather than by Genie: there is no parser for
+        `show lisp dynamic-eid eid-table ...` and radkit_genie returns None for
+        it -- verified live on IOS-XE 17.x.
+
+        `vrf` selects the table. The INFRA_VN an AP onboards in lives in the
+        global table, which is addressed as `eid-table default`; a user VN uses
+        `eid-table vrf <name>`. IOS prints "Command accepted but obsolete..."
+        before the default-table output and then answers normally, so that line
+        is ignored rather than treated as a failure.
+        """
+        vrf_name = str(vrf).strip() if vrf else "default"
+        if vrf_name.lower() == "default":
+            cmd = "show lisp dynamic-eid eid-table default"
+        else:
+            cmd = "show lisp dynamic-eid eid-table vrf {}".format(vrf_name)
+
+        output = get_any_single_output(self.device, cmd, service)
+        self.database_mappings = []
+        if output is None:
+            return
+
+        current = None
+        for line in output.splitlines():
+            stripped = line.strip()
+
+            name = re.match(r"^Dynamic-EID name:\s+(\S+)$", stripped)
+            if name:
+                current = {"dynamic_eid": name.group(1), "eid_prefix": None,
+                           "locator_set": None, "discovered": None,
+                           "last_eid": None}
+                self.database_mappings.append(current)
+                continue
+
+            if current is None:
+                continue
+
+            mapping = re.match(
+                r"^Database-mapping EID-prefix:\s+(\S+?),\s+locator-set\s+(\S+)$",
+                stripped)
+            if mapping:
+                # The device prints the literal string "NONE" for both fields
+                # when the database-mapping has been removed from a group that
+                # still exists -- the exact state an AP hits when it silently
+                # stops registering. Normalised to None so a caller gets a real
+                # absence: left as "NONE" it reads as data, and the first
+                # ip_network() call on it raises ValueError.
+                prefix = mapping.group(1)
+                locator = mapping.group(2)
+                current["eid_prefix"] = None if prefix.upper() == "NONE" else prefix
+                current["locator_set"] = None if locator.upper() == "NONE" else locator
+                continue
+
+            discovered = re.match(
+                r"^Number of roaming dynamic-EIDs discovered:\s+(\d+)$", stripped)
+            if discovered:
+                current["discovered"] = int(discovered.group(1))
+                continue
+
+            last = re.match(r"^Last dynamic-EID discovered:\s+(\S+?),", stripped)
+            if last:
+                current["last_eid"] = last.group(1)
 
     def LISPDBLimits(self,type,service):
         lispinstanceparameters = "show lisp instance-id {} {}".format(self.iid,type)

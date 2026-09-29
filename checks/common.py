@@ -6,6 +6,7 @@ They contain no scenario-specific logic and are imported by every chain.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
+from transport import get_transport
 
 
 class ValidateVrfParam(Check):

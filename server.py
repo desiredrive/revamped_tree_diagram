@@ -1,3 +1,4 @@
+import os
 import json
 import queue
 import threading
@@ -219,6 +220,13 @@ def index():
     # browsers don't keep serving a stale app.js / styles.css after an update.
     info = _read_version()
     v = info.get("commit") or info.get("version") or "dev"
+    # The commit SHA does not move while editing, so during local development
+    # the browser would keep serving a stale app.js. Mix in the newest asset
+    # mtime, which does move on every save.
+    try:
+        v = f"{v}-{int(max(os.path.getmtime('static/app.js'), os.path.getmtime('static/styles.css')))}"
+    except OSError:
+        pass
     try:
         with open("static/index.html", "r") as f:
             html = f.read()
@@ -227,7 +235,9 @@ def index():
     html = html.replace("/static/styles.css", f"/static/styles.css?v={v}")
     html = html.replace("/static/app.js", f"/static/app.js?v={v}")
     from fastapi.responses import HTMLResponse
-    return HTMLResponse(html)
+    # The page itself must never be cached -- it carries the cache-buster for
+    # everything else, so a stale copy pins stale assets with it.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/logfile")
@@ -386,11 +396,34 @@ def run_scenario(req: RunRequest):
 
 @app.post("/run/stop/{sid}")
 def stop_run(sid: str):
+    """Abort the running collection and drop anything queued behind it.
+
+    Stop and page-refresh both land here. Draining the queue matters as much as
+    the cancel flag: the worker is single-threaded, so a refresh used to enqueue
+    a second run *behind* the still-running first one, and the reconnecting
+    browser would then replay the old run's events onto its fresh canvas -- an
+    XTR node that renders empty or half-populated.
+    """
     sess = sessions.get(sid)
     if sess is None:
-        raise HTTPException(status_code=404, detail="Unknown session")
+        # A refresh can beacon this after the session is gone. Not an error.
+        return {"status": "unknown-session"}
     sess.cancel_run.set()
-    return {"status": "cancelling"}
+    # Drop queued-but-not-started runs; leave _STOP in place if it is there.
+    dropped = 0
+    pending = []
+    try:
+        while True:
+            item = sess.commands.get_nowait()
+            if item is _STOP:
+                pending.append(item)
+            else:
+                dropped += 1
+    except queue.Empty:
+        pass
+    for item in pending:
+        sess.commands.put(item)
+    return {"status": "cancelling", "dropped": dropped}
 
 
 @app.get("/run/events/{sid}")

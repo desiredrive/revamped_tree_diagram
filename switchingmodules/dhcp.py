@@ -323,6 +323,51 @@ class DHCPDevice:
             except:
                 self.bindings = []
 
+    def dhcpsnoopingbindingmac(self, mac, vlan, service):
+        """One endpoint's snooping binding, scoped to MAC *and* VLAN.
+
+        Sets `self.macbinding` to a dict, or None when the device reports no
+        binding. Also sets `self.macbinding_error` when the command could not
+        be read at all, so a caller can tell "no binding" (the device answered,
+        the table is empty) from "not known" (nothing was read).
+
+        Scoped to both MAC and VLAN deliberately: the same MAC can hold a
+        binding in more than one VLAN, and a match from the wrong VLAN would
+        witness a lease that has nothing to do with the VLAN being onboarded.
+
+        Parsed here rather than by Genie. Genie's ShowIpDhcpSnoopingBinding
+        accepts `... binding {mac}` but has no `vlan` form, and passing the
+        combined command raises. The table is fixed-column and single-row, so
+        the row regex below mirrors the one Genie uses for the same output.
+
+        The MAC is passed through as given: IOS accepts both the dotted form
+        (b811.4b0e.2630) and the colon form (B8:11:4B:0E:26:30) here, and it
+        prints colon-separated regardless -- verified live on IOS-XE 17.x.
+        """
+        device = self.device
+        cmd = "show ip dhcp snooping binding {} vlan {}".format(mac, vlan)
+        self.macbinding = None
+        self.macbinding_error = None
+
+        output = get_any_single_output(device, cmd, service)
+        if output is None:
+            self.macbinding_error = "no output for '{}'".format(cmd)
+            return
+
+        # 00:11:01:00:00:01   100.100.0.5   1124   dhcp-snooping   100   Fi6/0/25
+        row = re.compile(
+            r"^(?P<mac>[0-9A-Fa-f:.]+) +(?P<ip>\d+\.\d+\.\d+\.\d+) +"
+            r"(?P<lease>\d+) +(?P<type>\S+) +(?P<vlan>\d+) +(?P<interface>\S+)$")
+
+        for line in output.splitlines():
+            match = row.match(line.strip())
+            if not match:
+                continue
+            entry = match.groupdict()
+            entry["lease"] = int(entry["lease"])
+            self.macbinding = entry
+            return
+
     def dhcprelayconfiguration(self,service):
         #DHCP Relay Configuration, if VPN option is enabled, it will be set to True
         device = self.device
@@ -412,7 +457,7 @@ class DHCPDevice:
                 self.inboundacl = None
             # Outbound ACL
             try:
-                self.outboundacl = helperaddressop[sviname]['inbound_access_list']
+                self.outboundacl = helperaddressop[sviname]['outbound_access_list']
             except KeyError:
                 self.outboundacl = None
 
@@ -467,6 +512,18 @@ class DHCPDevice:
         dhcpsnoopop = get_any_single_output(hostname, dhcpsnoocmd, service)
         # Capture the 3 values from the analysis function
         step, final_status, summary_msg = analyze_dhcp_snooping_trace(dhcpsnoopop, anycastgw, helpers, step)
+
+        # The device-side "| include" window can filter out every usable line
+        # (e.g. the trace timestamps do not match the current/previous hour).
+        # Fall back to the unpiped command so the full trace can be parsed.
+        if final_status == "NO_DATA":
+            dhcpsnoofullcmd = f"show platform dhcpsnooping client stat {mac}"
+            dhcpsnoopfullop = get_any_single_output(hostname, dhcpsnoofullcmd, service)
+            if dhcpsnoopfullop and dhcpsnoopfullop.strip():
+                step, final_status, summary_msg = analyze_dhcp_snooping_trace(
+                    dhcpsnoopfullop, anycastgw, helpers, step
+                )
+
         # Return the 2 values the main script is expecting
         return step, final_status
 

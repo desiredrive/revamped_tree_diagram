@@ -65,7 +65,7 @@ class interface_switchport:
                 if "exclude" not in i:
                     interface = i
             interface_path = intfswport_op[interface]
-            interface_encap_path = interface_path['encapsulation']
+            interface_encap_path = interface_path.get('encapsulation', {}) or {}
             self.switchport_enable = interface_path['switchport_enable']
 
             if self.switchport_enable == True:
@@ -75,11 +75,15 @@ class interface_switchport:
                     self.istrunking = True
                 else:
                     self.istrunking = False
-                self.trunknegotiation = interface_path['negotiation_of_trunk']
-                self.accessvlan = interface_path['access_vlan']
-                self.voicevlan = interface_path['voice_vlan']
-                self.nativevlan = interface_encap_path['native_vlan']
-                self.nativetagging = interface_path['native_vlan_tagging']
-                self.allowedvlanstrunk = interface_path['trunk_vlans']
+                # Genie only emits these when the device reports them: an access
+                # port with no voice VLAN has no 'voice_vlan' key, and a port that
+                # is not trunking has no 'trunk_vlans'. Absent means not
+                # configured, so read them as optional rather than raising.
+                self.trunknegotiation = interface_path.get('negotiation_of_trunk')
+                self.accessvlan = interface_path.get('access_vlan')
+                self.voicevlan = interface_path.get('voice_vlan')
+                self.nativevlan = interface_encap_path.get('native_vlan')
+                self.nativetagging = interface_path.get('native_vlan_tagging')
+                self.allowedvlanstrunk = interface_path.get('trunk_vlans')
         else: 
             return None

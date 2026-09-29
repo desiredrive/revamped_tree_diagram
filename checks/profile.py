@@ -8,6 +8,7 @@ fields those later checks depend on.
 """
 
 from checks import Check, CheckResult, CheckStatus, RunContext
+from transport import get_transport
 from checks.shared import _legacy_fail
 from radkit_cli import get_catc_api, get_any_single_output, get_single_output_genie
 

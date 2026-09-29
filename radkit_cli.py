@@ -153,7 +153,7 @@ def get_any_single_output(hostname,command: str,service):
 
 def get_single_output_genie(hostname, command: str, service, timeout: int = 0):
     #Currently available only for IOS_XE platforms!
-    type = 'iosxe'
+    os_type = 'iosxe'
     try:
         append_to_logging_file(command)
         raw = get_transport().exec(hostname, command, service, timeout=timeout)
@@ -172,7 +172,7 @@ def get_single_output_genie(hostname, command: str, service, timeout: int = 0):
         last_exc = None
         for _ in range(6):
             try:
-                execution = radkit_genie.parse(raw, os=type)
+                execution = radkit_genie.parse(raw, os=os_type)
                 break
             except Exception as e:
                 last_exc = e
@@ -190,7 +190,17 @@ def get_single_output_genie(hostname, command: str, service, timeout: int = 0):
             return None
         try:
             output = execution[hostname][command].data
-        except Exception:
+        except Exception as e:
+            # Silently returning None here made a healthy device look like a
+            # device with nothing to report: the check downstream cannot tell
+            # "the switch has no such entry" from "we failed to read the
+            # result". Log which it was.
+            append_to_logging_file(
+                "[genie-result-missing] {} on {}: {}: {} -- devices={} cmds={}".format(
+                    command, hostname, type(e).__name__, e,
+                    list(execution) if execution is not None else None,
+                    list(execution[hostname]) if execution is not None
+                    and hostname in execution else None))
             return None
     except ValueError:
         sys.exit("Error when getting the following command: {}".format(command))
