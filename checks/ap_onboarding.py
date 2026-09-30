@@ -2917,44 +2917,56 @@ class ApL3LispInstance(_ApCheck):
         )
 
 
-def _l3_dyneid_entries(ctx, hostname, iid):
-    """Roaming dynamic EIDs learned in the global-table LISP instance.
+def _l3_dyneid_lookup(ctx, hostname, iid, ip):
+    """Ask the switch about ONE address: is it a dynamic EID in this instance?
 
-    Deliberately does NOT use the `all` form of the command. `show lisp all
-    ...` makes the device print an "Output for router lisp 0" banner, which
-    sends Genie to a parser whose schema demands per-EID `discovered_by` and
-    `last_activity` keys in a layout this IOS-XE does not produce -- the parse
-    then dies with SchemaMissingKeyError and the check sees nothing at all.
-    Without `all`, ShowLispInstanceIdDynamicEidDetail parses the same output
-    cleanly. Verified live on IOS-XE 17.x.
+    `show lisp instance-id <iid> dynamic-eid <addr>` answers directly, instead
+    of pulling every learned EID with `detail` and filtering here. The device
+    distinguishes the three cases for us:
 
-    The schema here is the `lisp_id -> instance_id` one that
-    routingmodules.lisp.LISPLocalDB.L3LISPDyn already reads, so the walk below
-    mirrors that module rather than inventing a second shape.
+        172.19.5.10, Vlan2045, uptime: 00:35:20     <- learned
+          last activity: never, discovered by: Device-tracking
+        % No dynamic-EID 172.19.5.99 discovered.    <- instance ok, not learned
+        % Could not find EID table instance ID 9999 in LISP 0.   <- no instance
 
-    Returns `(eids, groups)` -- the set of roaming EID addresses, and a list of
-    `(dynamic_eid_name, eid_prefix)` for the dyn-EID groups configured in the
-    instance.
+    Parsed by hand rather than through Genie. ShowLispDynamicEid exists and
+    covers this command, but it raises UnboundLocalError on this output -- it
+    only builds its dict after matching a "Dynamic-EID name:" line, which the
+    per-address form does not print. Verified live on IOS-XE.
+
+    Returns `(entry, err)` -- entry is {"interface", "uptime", "discovered_by"}
+    when the address is a dynamic EID, else None; err is the device's own
+    message when it refused the lookup, else None.
     """
-    from radkit_cli import get_single_output_genie
-    cmd = f"show lisp instance-id {iid} dynamic-eid detail"
-    parsed = _as_mapping(get_single_output_genie(hostname, cmd, ctx.service))
+    from radkit_cli import get_any_single_output
+    cmd = f"show lisp instance-id {iid} dynamic-eid {ip}"
+    raw = get_any_single_output(hostname, cmd, ctx.service) or ""
 
-    eids, groups = set(), []
-    for lisp_body in _as_mapping(parsed.get("lisp_id")).values():
-        instances = _as_mapping(_as_mapping(lisp_body).get("instance_id"))
-        # The instance key is a string here but callers hold `iid` in whichever
-        # form the earlier check stored it, so match on the string form.
-        for inst_id, inst in instances.items():
-            if str(inst_id) != str(iid):
-                continue
-            dyn = _as_mapping(_as_mapping(inst).get("dynamic_eids"))
-            for name, body in dyn.items():
-                body = _as_mapping(body)
-                prefix = _as_mapping(body.get("database_mapping")).get("eid_prefix")
-                groups.append((name, prefix))
-                eids.update(_as_mapping(body.get("eid_entries")).keys())
-    return eids, groups
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("%"):
+            return None, line
+
+    # "    172.19.5.10, Vlan2045, uptime: 00:35:20"
+    addr = re.compile(
+        r"^" + re.escape(str(ip)) + r",\s*(?P<intf>\S+?),\s*uptime:\s*(?P<uptime>\S+)")
+    # "      last activity: never, discovered by: Device-tracking"
+    disc = re.compile(r"discovered by:\s*(?P<by>.+?)\s*$")
+
+    entry = None
+    for line in raw.splitlines():
+        line = line.strip()
+        m = addr.match(line)
+        if m:
+            entry = {"interface": m.group("intf"),
+                     "uptime": m.group("uptime"),
+                     "discovered_by": None}
+            continue
+        if entry is not None and entry["discovered_by"] is None:
+            d = disc.search(line)
+            if d:
+                entry["discovered_by"] = d.group("by")
+    return entry, None
 
 
 class ApL3LispDynamicEid(_ApCheck):
@@ -2987,41 +2999,51 @@ class ApL3LispDynamicEid(_ApCheck):
                 "Address).")
 
         try:
-            eids, groups = _l3_dyneid_entries(ctx, hostname, iid)
+            entry, err = _l3_dyneid_lookup(ctx, hostname, iid, ip)
         except BaseException as e:
             from checks.shared import _legacy_fail
-            return _legacy_fail(e, f"show lisp instance-id {iid} dynamic-eid detail")
+            return _legacy_fail(e, f"show lisp instance-id {iid} dynamic-eid {ip}")
 
-        ctx.state["ap_l3_dyneids"] = sorted(eids)
-
-        if not groups:
+        if err:
+            # The device refused the lookup. "Could not find EID table
+            # instance" means the instance is absent -- a different finding
+            # from an instance that simply has not learned the address.
+            if "instance" in err.lower():
+                return CheckResult(
+                    CheckStatus.WARN,
+                    f"{hostname} has no LISP instance {iid}: it answered "
+                    f"\"{err}\". The AP's address {ip} cannot be a dynamic "
+                    f"EID in an instance that does not exist.",
+                    data={"l3_iid": iid, "ap_ip": ip, "device_error": err},
+                )
             return CheckResult(
-                CheckStatus.FAIL,
-                f"LISP instance {iid} on {hostname} has no dynamic-EID group "
-                f"configured, so the AP's address {ip} can never be learned as "
-                f"an EID. The subnet was never declared as EID space -- check "
-                f"`database-mapping` under the instance.",
+                CheckStatus.WARN,
+                f"The AP's address {ip} is not a dynamic EID in LISP instance "
+                f"{iid} on {hostname} -- the switch answered \"{err}\". The "
+                f"switch holds the AP's IP but never learned it into a "
+                f"dynamic-EID group, so it is not registered to the control "
+                f"plane.",
+                data={"l3_iid": iid, "ap_ip": ip, "device_error": err},
+            )
+
+        if not entry:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} returned nothing for the AP's address {ip} in "
+                f"LISP instance {iid}, so it could not be confirmed as a "
+                f"dynamic EID.",
                 data={"l3_iid": iid, "ap_ip": ip},
             )
 
-        shown = ", ".join(f"{name} ({prefix})" for name, prefix in groups)
-
-        if ip not in eids:
-            return CheckResult(
-                CheckStatus.FAIL,
-                f"The AP's address {ip} is not a dynamic EID in LISP instance "
-                f"{iid} on {hostname}. The switch holds the AP's IP but never "
-                f"learned it into a dynamic-EID group, so it will not be "
-                f"registered to the control plane. Groups configured: {shown}.",
-                data={"l3_iid": iid, "ap_ip": ip, "groups": groups,
-                      "dyneids": sorted(eids)},
-            )
-
+        ctx.state["ap_l3_dyneid"] = entry
+        by = entry.get("discovered_by")
         return CheckResult(
             CheckStatus.OK,
-            f"The AP's address {ip} is a dynamic EID in LISP instance {iid} on "
-            f"{hostname} ({shown}).",
-            data={"l3_iid": iid, "ap_ip": ip, "groups": groups},
+            f"The AP's address {ip} is a dynamic EID in LISP instance {iid} "
+            f"on {hostname}, learned on {entry['interface']} and up for "
+            f"{entry['uptime']}"
+            + (f" (discovered by {by})." if by else "."),
+            data={"l3_iid": iid, "ap_ip": ip, **entry},
         )
 
 
