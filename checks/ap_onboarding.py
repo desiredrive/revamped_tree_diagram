@@ -1894,8 +1894,13 @@ def _cef_interfaces(ctx, hostname, dst_ip):
 def _evaluate_acls(ctx, hostname, interfaces, flows):
     """Evaluate every ACL on `interfaces` against each flow in `flows`.
 
-    Returns (acl_names, denies, permits). A flow is a dict of the shape
-    acl_evaluation expects plus a "label" used in the reported text.
+    Returns (acl_names, denies, permits, unevaluated). A flow is a dict of
+    the shape acl_evaluation expects plus a "label" used in the reported text.
+
+    An ACL that cannot be read is reported in `unevaluated` rather than
+    skipped. It is applied to the path whether or not we can parse it, so
+    treating a parse failure as "nothing found" would report the path clear
+    on the strength of an ACL nobody has looked at.
     """
     from securitymodules.accesslists import AccessList, acl_evaluation
     names = []
@@ -1905,21 +1910,26 @@ def _evaluate_acls(ctx, hostname, interfaces, flows):
         names.extend(getattr(acls, "aclnames", None) or [])
     names = sorted(set(names))
 
-    denies, permits = [], []
+    denies, permits, unevaluated = [], [], []
     for acl in names:
         for flow in flows:
             ev = {k: v for k, v in flow.items() if k != "label"}
             try:
                 hit = acl_evaluation(ctx.service, hostname, acl, False, ev)
-            except BaseException:
+            except BaseException as e:
+                unevaluated.append(
+                    f"{acl} could not be evaluated against {flow['label']} "
+                    f"({type(e).__name__}: {e})")
                 continue
             if not hit or len(hit) < 3:
+                unevaluated.append(
+                    f"{acl} returned no verdict for {flow['label']}")
                 continue
             if hit[1] == "deny":
                 denies.append(f"{acl} denies {flow['label']} at sequence {hit[2]}")
             elif hit[1] == "permit":
                 permits.append(f"{acl} permits {flow['label']} (sequence {hit[2]})")
-    return names, denies, permits
+    return names, denies, permits, unevaluated
 
 
 class ApRouteToWlc(_ApCheck):
@@ -2400,6 +2410,15 @@ class ApCapwapAccessLists(_ApCheck):
                 unreadable.append(f"{mgmt_ip}: no CEF interface")
                 continue
 
+            # The AP's own access port carries the first and last hop of every
+            # CAPWAP packet, so an ACL there blocks the join just as surely as
+            # one on the uplink -- and it is the more common place to find one,
+            # since it is where per-port and downloadable policy land. CEF
+            # derives the uplink only, so the port is added explicitly.
+            ap_port = ctx.state.get("ap_port")
+            if ap_port and ap_port not in interfaces:
+                interfaces = list(interfaces) + [ap_port]
+
             flows = []
             for port in (5246, 5247):
                 kind = "control" if port == 5246 else "data"
@@ -2413,14 +2432,17 @@ class ApCapwapAccessLists(_ApCheck):
                               "dstport": 1024})
 
             try:
-                names, denies, permits = _evaluate_acls(
+                names, denies, permits, unevaluated = _evaluate_acls(
                     ctx, hostname, interfaces, flows)
             except BaseException as e:
                 unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
                 continue
 
+            if unevaluated:
+                unreadable.extend(f"{mgmt_ip}: {u}" for u in unevaluated)
+
             data[mgmt_ip] = {"interfaces": interfaces, "acls": names,
-                             "denies": denies}
+                             "denies": denies, "unevaluated": unevaluated}
             for acl in names:
                 record_pd_object(ctx, "acl_entry", radkit_hostname=hostname,
                                  acl=acl, interfaces=list(interfaces))
@@ -2445,6 +2467,18 @@ class ApCapwapAccessLists(_ApCheck):
                 f"Could not evaluate the ACLs toward any WLC from "
                 f"{hostname}:\n" + "\n".join(f"• {u}" for u in unreadable),
                 data=dict(data, errors=unreadable))
+
+        # A deny outranks an unreadable ACL: it is a concrete, actionable
+        # finding, so it is reported first with the gaps noted alongside it
+        # rather than being hidden behind a "could not read" failure.
+        if blocked:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"An ACL on the path to the WLC is blocking the AP's CAPWAP "
+                f"join:\n\n" + "\n".join(
+                    lines + (["• Could not be read: " + "; ".join(unreadable)]
+                             if unreadable else [])),
+                data=dict(data, errors=unreadable) if unreadable else data)
 
         if unreadable:
             return CheckResult(
