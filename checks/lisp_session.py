@@ -24,6 +24,7 @@ already drawn for its control planes.
 """
 
 from checks.base import Check, CheckResult, CheckStatus, RunContext
+from checks.shared import _cef_interfaces, _evaluate_acls
 
 
 # State key holding the reason the session flow cannot usefully continue. Set by
@@ -1385,10 +1386,15 @@ def _igp_interfaces(ctx, host, peer_ip):
 class LispSessionAccessLists(_SessionCheck):
     """ACLs on the underlay path that could block the LISP session.
 
-    LISP control traffic is TCP/4342 in both directions. An ACL on an
-    underlay interface that denies it breaks the session without anything in
-    the LISP state itself saying why, so each ACL found on the path is
-    evaluated for both directions.
+    LISP control traffic is TCP/4342 and UDP/4342, both directions. The
+    registration rides TCP while map-requests and map-replies ride UDP, so
+    an ACL permitting only one of them breaks the session in a way the LISP
+    state itself never explains -- all four combinations are evaluated.
+
+    The interfaces come from CEF rather than the IGP: CEF is what the
+    forwarding plane actually consults, so it names the port the traffic
+    leaves through even where the IGP offers several or the route was not
+    learned from a neighbor at all.
     """
 
     def __init__(self, target, map_server, cp_hostname=None, on_cp=False,
@@ -1425,14 +1431,7 @@ class LispSessionAccessLists(_SessionCheck):
                     "The RLOCs at both ends could not be resolved, so the "
                     "ACLs on the path cannot be evaluated.", data=data)
 
-            interfaces = _igp_interfaces(ctx, host, dst)
-            from securitymodules.accesslists import AccessList, acl_evaluation
-            names = []
-            for intf in interfaces:
-                acls = AccessList(host)
-                acls.aclbyinterface(intf, ctx.service)
-                names.extend(getattr(acls, "aclnames", None) or [])
-            names = sorted(set(names))
+            interfaces = _cef_interfaces(ctx, host, dst)
         except SystemExit as e:
             return CheckResult(
                 CheckStatus.FAIL,
@@ -1444,7 +1443,49 @@ class LispSessionAccessLists(_SessionCheck):
                 f"Could not read the ACLs on the path "
                 f"({type(e).__name__}: {e}).", data=data)
 
-        data["acls"] = names
+        flows = []
+        for proto in ("tcp", "udp"):
+            flows.append({"label": f"{src} → {dst} {proto.upper()}/4342",
+                          "sourceip": src, "destinationip": dst,
+                          "protocol": proto, "srcport": 4342,
+                          "dstport": 4342})
+            flows.append({"label": f"{dst} → {src} {proto.upper()}/4342",
+                          "sourceip": dst, "destinationip": src,
+                          "protocol": proto, "srcport": 4342,
+                          "dstport": 4342})
+
+        try:
+            names, denies, permits, unevaluated = _evaluate_acls(
+                ctx, host, interfaces, flows)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not read the ACLs on the path "
+                f"({type(e).__name__}: {e}).", data=data)
+
+        data.update({"interfaces": interfaces, "acls": names,
+                     "denies": denies, "unevaluated": unevaluated})
+
+        gaps = (["• Could not be read: " + "; ".join(unevaluated)]
+                if unevaluated else [])
+
+        # A deny outranks an unreadable ACL: it is the actionable finding.
+        if denies:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"An ACL on the underlay path is blocking the LISP session "
+                f"(TCP/4342 and UDP/4342):\n\n"
+                + "\n".join([f"• {d}" for d in denies] + gaps), data=data)
+
+        # An ACL that could not be parsed is applied to the path whether or
+        # not we can read it, so reporting the path clear on the strength of
+        # it would be a guess.
+        if unevaluated:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"The ACLs between {src} and {dst} could not be fully "
+                f"evaluated:\n\n" + "\n".join(gaps), data=data)
+
         if not names:
             return CheckResult(
                 CheckStatus.OK,
@@ -1452,40 +1493,12 @@ class LispSessionAccessLists(_SessionCheck):
                 f"{src} and {dst}, so nothing there can block the session.",
                 data=data)
 
-        forward = {"sourceip": src, "destinationip": dst,
-                   "protocol": "tcp", "srcport": 4342, "dstport": 4342}
-        reverse = {"sourceip": dst, "destinationip": src,
-                   "protocol": "tcp", "srcport": 4342, "dstport": 4342}
-
-        denies, permits = [], []
-        for acl in names:
-            for label, ev in ((f"{src} → {dst}", forward),
-                              (f"{dst} → {src}", reverse)):
-                try:
-                    hit = acl_evaluation(ctx.service, host, acl, False, ev)
-                except BaseException:
-                    continue
-                if not hit or len(hit) < 3:
-                    continue
-                if hit[1] == "deny":
-                    denies.append(f"{acl} denies {label} at sequence {hit[2]}")
-                elif hit[1] == "permit":
-                    permits.append(f"{acl} permits {label} (sequence {hit[2]})")
-
-        data["denies"] = denies
-        if denies:
-            return CheckResult(
-                CheckStatus.WARN,
-                f"An ACL on the underlay path is blocking the LISP session "
-                f"(TCP/4342):\n\n" + "\n".join(f"• {d}" for d in denies),
-                data=data)
-
         detail = "\n".join(f"• {p}" for p in permits) or \
             f"• Checked: {', '.join(names)}"
         return CheckResult(
             CheckStatus.OK,
-            f"No ACL on the path between {src} and {dst} blocks TCP/4342:"
-            f"\n\n{detail}", data=data)
+            f"No ACL on the path between {src} and {dst} blocks TCP/4342 "
+            f"or UDP/4342:\n\n{detail}", data=data)
 
 
 class LispSessionTrustSec(_SessionCheck):

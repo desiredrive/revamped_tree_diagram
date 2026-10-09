@@ -1867,28 +1867,7 @@ class ApAccountingAttributes(_ApCheck):
         )
 
 
-def _cef_interfaces(ctx, hostname, dst_ip):
-    """Outgoing interfaces the CEF entry for `dst_ip` resolves onto.
-
-    ACLs are evaluated on the interfaces the traffic actually leaves by, so
-    the path is taken from CEF rather than from the IGP: CEF is what the box
-    forwards on, and the two can disagree.
-
-    Derived per destination and never shared between them. The interfaces
-    toward a map-server and toward the WLC are separate lookups -- on a switch
-    with more than one uplink they can resolve onto different ports entirely,
-    so reusing one set for the other would evaluate the wrong ACLs.
-    """
-    from routingmodules.cef import IPCef
-    cef = IPCef(dst_ip, "default", hostname)
-    cef.get_cef_internal(ctx.service)
-    intfs = []
-    for hop in (getattr(cef, "nexthops", None) or []):
-        oif = hop.get("oif")
-        # A LISP interface is virtual and carries no ACL.
-        if oif and "LISP" not in oif and oif not in intfs:
-            intfs.append(oif)
-    return intfs
+from checks.shared import _cef_interfaces, _evaluate_acls  # noqa: F401
 
 
 def _dhcp_flows(ap_ip, svi_ip, helpers):
@@ -1930,45 +1909,6 @@ def _dhcp_flows(ap_ip, svi_ip, helpers):
     return flows
 
 
-def _evaluate_acls(ctx, hostname, interfaces, flows):
-    """Evaluate every ACL on `interfaces` against each flow in `flows`.
-
-    Returns (acl_names, denies, permits, unevaluated). A flow is a dict of
-    the shape acl_evaluation expects plus a "label" used in the reported text.
-
-    An ACL that cannot be read is reported in `unevaluated` rather than
-    skipped. It is applied to the path whether or not we can parse it, so
-    treating a parse failure as "nothing found" would report the path clear
-    on the strength of an ACL nobody has looked at.
-    """
-    from securitymodules.accesslists import AccessList, acl_evaluation
-    names = []
-    for intf in interfaces:
-        acls = AccessList(hostname)
-        acls.aclbyinterface(intf, ctx.service)
-        names.extend(getattr(acls, "aclnames", None) or [])
-    names = sorted(set(names))
-
-    denies, permits, unevaluated = [], [], []
-    for acl in names:
-        for flow in flows:
-            ev = {k: v for k, v in flow.items() if k != "label"}
-            try:
-                hit = acl_evaluation(ctx.service, hostname, acl, False, ev)
-            except BaseException as e:
-                unevaluated.append(
-                    f"{acl} could not be evaluated against {flow['label']} "
-                    f"({type(e).__name__}: {e})")
-                continue
-            if not hit or len(hit) < 3:
-                unevaluated.append(
-                    f"{acl} returned no verdict for {flow['label']}")
-                continue
-            if hit[1] == "deny":
-                denies.append(f"{acl} denies {flow['label']} at sequence {hit[2]}")
-            elif hit[1] == "permit":
-                permits.append(f"{acl} permits {flow['label']} (sequence {hit[2]})")
-    return names, denies, permits, unevaluated
 
 
 class ApRouteToWlc(_ApCheck):
