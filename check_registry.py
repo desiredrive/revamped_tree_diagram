@@ -25,6 +25,10 @@ from checks.ap_onboarding import (
     ApCdpNeighbor,
     ApAccountingAttributes,
     ApSwitchportState,
+    ApInterfaceStatus,
+    ApRouteToWlc,
+    ApCefToWlc,
+    ApPhysicalPathToWlc,
     ApAuthTemplate,
     ApDeviceClassifier,
     ApAuthenticationSession,
@@ -207,6 +211,13 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApAuthenticationSession(early=True),
             # The port's own L2 state, before anything that runs on top of it.
             ApSwitchportState(),
+            # Right after the port's L2 config: same port, its physical health.
+            ApInterfaceStatus(),
+            # Path to the controller, in order: RIB, then CEF, then the
+            # physical interfaces the path resolves onto.
+            ApRouteToWlc(),
+            ApCefToWlc(),
+            ApPhysicalPathToWlc(),
             # What the switch reports to AAA about the AP, which is what
             # profiling policy matches on.
             ApAccountingAttributes(),

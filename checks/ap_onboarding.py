@@ -1867,6 +1867,481 @@ class ApAccountingAttributes(_ApCheck):
         )
 
 
+def _record_pd(ctx, kind, objects):
+    """Record PD-eligible objects for the platform-dependent pass.
+
+    The manifest lists the object types whose hardware programming is verified
+    later (mac address, adjacency, route, fib entry, interface programming,
+    cts sgacl entry, acl entry, qos entry, copp drops). A check that touches
+    one records it here instead of verifying it inline, so step 6 knows what
+    to walk without re-deriving it.
+    """
+    if not objects:
+        return
+    store = ctx.state.setdefault("pd_objects", {})
+    bucket = store.setdefault(kind, [])
+    for obj in objects:
+        if obj not in bucket:
+            bucket.append(obj)
+
+
+class ApRouteToWlc(_ApCheck):
+    """The Edge's route to each WLC's management address.
+
+    First of the three that trace the path to the controller: RIB, then CEF,
+    then the physical interfaces the path resolves onto. The AP's CAPWAP join
+    rides this path, so a missing route here explains a join failure that
+    looks like a wireless problem.
+
+    `route` is a PD-eligible object -- recorded for the later platform pass.
+    """
+
+    name = "AP Route to WLC"
+    target_node_id = "xtr"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        wlcs = ctx.state.get("ap_wlc_candidates") or []
+        if not wlcs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery).")
+
+        from routingmodules.iprouting import IPRoute
+        lines, routes, unreadable = [], {}, []
+        for wlc_host, mgmt_ip, _node in wlcs:
+            route = IPRoute(mgmt_ip, "default", hostname)
+            try:
+                route.iproute_prefix(ctx.service, 0)
+            except SystemExit:
+                # The module exits when there is no route at all, not even a
+                # default. That is a finding about the fabric, so it is
+                # reported rather than allowed to stop the run.
+                lines.append(
+                    f"• {wlc_host} ({mgmt_ip}): no route, not even a default "
+                    f"route. Traffic to this controller is dropped.")
+                routes[mgmt_ip] = {"reachable": False}
+                continue
+            except BaseException as e:
+                unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
+                continue
+
+            prefix = getattr(route, "prefix", None)
+            mask = getattr(route, "mask", None)
+            proto = str(getattr(route, "protocol", "") or "unknown")
+            nexthop = getattr(route, "nexthop", None)
+            covering = f"{prefix}/{mask}" if prefix and mask else str(prefix)
+            # A default route here is normal in this design: the WLC sits
+            # outside the fabric and is reached through the border.
+            is_default = str(prefix) == "0.0.0.0"
+            routes[mgmt_ip] = {"prefix": covering, "protocol": proto,
+                               "nexthop": nexthop, "default_route": is_default,
+                               "reachable": True}
+            hops = ", ".join(nexthop) if isinstance(nexthop, list) else str(nexthop)
+            lines.append(
+                f"• {wlc_host} ({mgmt_ip}): via {covering} "
+                + ("(default route) " if is_default else "")
+                + f"learned by {proto}, next-hop {hops}.")
+
+        if unreadable and not routes:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not read the route to any WLC from {hostname}:\n"
+                + "\n".join(f"• {u}" for u in unreadable),
+                data={"errors": unreadable})
+
+        ctx.state["ap_wlc_routes"] = routes
+        _record_pd(ctx, "route",
+                   [{"device": hostname, "prefix": r.get("prefix"),
+                     "vrf": "default"} for r in routes.values()
+                    if r.get("reachable")])
+
+        if unreadable:
+            lines.append("• Could not be read: " + "; ".join(unreadable))
+
+        if any(not r.get("reachable") for r in routes.values()):
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} cannot route to every WLC:\n\n" + "\n".join(lines),
+                data={"routes": routes})
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"{hostname} has a route to every WLC:\n\n" + "\n".join(lines),
+            data={"routes": routes})
+
+
+class ApCefToWlc(_ApCheck):
+    """The Edge's CEF entry for each WLC's management address.
+
+    Second of the three that trace the path to the controller. The RIB says
+    what the control plane decided; CEF is what the box actually forwards on.
+    They normally agree, and when they do not it is CEF that wins, so a
+    mismatch here is a real forwarding fault that a routing check alone
+    cannot see.
+
+    The covering prefix is expected to differ from the RIB's: CEF holds
+    LISP-derived covering entries (0.0.0.0/1) that the RIB does not, so only
+    the resolved next-hop is compared.
+
+    `fib entry` is a PD-eligible object -- recorded for the later platform pass.
+    """
+
+    name = "AP CEF to WLC"
+    target_node_id = "xtr"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        wlcs = ctx.state.get("ap_wlc_candidates") or []
+        if not wlcs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery).")
+
+        rib = ctx.state.get("ap_wlc_routes") or {}
+
+        from routingmodules.cef import IPCef
+        lines, entries, unreadable, mismatches = [], {}, [], []
+        for wlc_host, mgmt_ip, _node in wlcs:
+            cef = IPCef(mgmt_ip, "default", hostname)
+            try:
+                cef.get_cef_internal(ctx.service)
+            except BaseException as e:
+                unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
+                continue
+
+            prefix = getattr(cef, "prefix", None)
+            nexthops = getattr(cef, "nexthops", None) or []
+            hops = [h.get("nexthop") for h in nexthops if h.get("nexthop")]
+            oifs = [h.get("oif") for h in nexthops if h.get("oif")]
+            entries[mgmt_ip] = {"prefix": prefix, "nexthops": hops,
+                                "oifs": oifs, "sources": getattr(cef, "sources", None),
+                                "is_mpls": bool(getattr(cef, "ismpls", False))}
+
+            if not nexthops:
+                # A receive/punt entry or a special adjacency. Either way the
+                # Edge is not forwarding this prefix anywhere.
+                lines.append(
+                    f"• {wlc_host} ({mgmt_ip}): CEF entry {prefix} resolves to "
+                    f"no next-hop. Traffic to this controller is not forwarded.")
+                entries[mgmt_ip]["forwarding"] = False
+                continue
+
+            entries[mgmt_ip]["forwarding"] = True
+            # CEF is what the box forwards on, so a disagreement with the RIB
+            # means the route the previous check reported is not the one in use.
+            rib_hop = (rib.get(mgmt_ip) or {}).get("nexthop")
+            rib_hops = rib_hop if isinstance(rib_hop, list) else ([rib_hop] if rib_hop else [])
+            disagrees = bool(rib_hops) and set(rib_hops) != set(hops)
+            if disagrees:
+                mismatches.append(mgmt_ip)
+            entries[mgmt_ip]["matches_rib"] = not disagrees
+
+            detail = ", ".join(
+                f"{h.get('nexthop')} out {h.get('oif')}" for h in nexthops)
+            lines.append(
+                f"• {wlc_host} ({mgmt_ip}): CEF {prefix} → {detail}."
+                + (f" RIB says {', '.join(rib_hops)} — CEF wins, so this is "
+                   f"the path in use." if disagrees else ""))
+
+        if unreadable and not entries:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not read the CEF entry for any WLC from {hostname}:\n"
+                + "\n".join(f"• {u}" for u in unreadable),
+                data={"errors": unreadable})
+
+        ctx.state["ap_wlc_cef"] = entries
+        _record_pd(ctx, "fib entry",
+                   [{"device": hostname, "prefix": e.get("prefix"),
+                     "vrf": "default"} for e in entries.values()
+                    if e.get("prefix")])
+
+        if unreadable:
+            lines.append("• Could not be read: " + "; ".join(unreadable))
+
+        if any(not e.get("forwarding") for e in entries.values()):
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} has no CEF next-hop for every WLC:\n\n"
+                + "\n".join(lines),
+                data={"cef": entries})
+
+        if mismatches:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} forwards to the WLC differently than the RIB "
+                f"says:\n\n" + "\n".join(lines),
+                data={"cef": entries, "mismatches": mismatches})
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"{hostname} has a CEF path to every WLC:\n\n" + "\n".join(lines),
+            data={"cef": entries})
+
+
+class ApPhysicalPathToWlc(_ApCheck):
+    """The physical ports the path to the WLC resolves onto.
+
+    Last of the three that trace the path to the controller. CEF names an
+    outgoing interface, but that interface is often not a port: a port-channel
+    has to be expanded to its active members, and an SVI has to be resolved
+    through ARP and MAC learning to the port the next-hop is actually learnt
+    on. This check does that recursion and then reads each resulting port, so
+    a saturated or erroring uplink shows up as a cause of a CAPWAP join
+    failure rather than as an unexplained wireless fault.
+
+    `interface programming` is PD-eligible -- recorded for the later pass.
+    """
+
+    name = "AP Physical Path to WLC"
+    target_node_id = "xtr"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        wlcs = ctx.state.get("ap_wlc_candidates") or []
+        if not wlcs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery).")
+
+        cef_state = ctx.state.get("ap_wlc_cef") or {}
+        if not cef_state:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — CEF did not resolve a path to the WLC "
+                "(see AP CEF to WLC).")
+
+        from routingmodules.cef import IPCef, physical_recursion
+        from switchingmodules.interfaces import Interfaces
+
+        lines, ports_by_wlc, unreadable, bad = [], {}, [], []
+        # WLCs whose path could not be verified at all. Tracked separately
+        # from `bad` so an unchecked path is never reported as a clean one.
+        unverified = []
+        for wlc_host, mgmt_ip, _node in wlcs:
+            entry = cef_state.get(mgmt_ip) or {}
+            if not entry.get("forwarding"):
+                lines.append(
+                    f"• {wlc_host} ({mgmt_ip}): skipped, CEF resolved no "
+                    f"next-hop to recurse.")
+                unverified.append(mgmt_ip)
+                continue
+
+            # physical_recursion reads .vrf and .nexthops off the CEF object,
+            # so it is rebuilt here rather than reconstructed from state.
+            cef = IPCef(mgmt_ip, "default", hostname)
+            try:
+                cef.get_cef_internal(ctx.service)
+                rec = physical_recursion(cef, hostname)
+                total_phys = rec.get_physical_interfaces(ctx.service, 0)
+            except SystemExit as e:
+                # Incomplete ARP, a MAC learnt nowhere, or a next-hop that
+                # resolves to no port. All are fabric faults, so they are
+                # reported instead of stopping the run.
+                lines.append(f"• {wlc_host} ({mgmt_ip}): {e}")
+                bad.append(mgmt_ip)
+                continue
+            except BaseException as e:
+                unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
+                continue
+
+            # total_phys is a list per next-hop; flatten and de-duplicate
+            # while keeping the order the recursion produced.
+            ports = []
+            for group in (total_phys or []):
+                for p in (group if isinstance(group, list) else [group]):
+                    if p and p not in ports:
+                        ports.append(p)
+
+            if not ports:
+                lines.append(
+                    f"• {wlc_host} ({mgmt_ip}): the path resolved to no "
+                    f"physical port.")
+                bad.append(mgmt_ip)
+                continue
+
+            port_data = {}
+            for port in ports:
+                intf = Interfaces(port, hostname)
+                try:
+                    intf.show_interface(ctx.service)
+                except BaseException as e:
+                    unreadable.append(f"{port}: {type(e).__name__}: {e}")
+                    continue
+
+                # As in ApInterfaceStatus: show_interface returns silently on
+                # an empty parse, so an unset oper_status means the read
+                # failed -- not that the port is down.
+                if intf.operstate is None:
+                    unreadable.append(f"{port}: returned nothing usable")
+                    port_data[port] = {"readable": False}
+                    continue
+
+                oper = str(intf.operstate)
+                line = str(intf.linestate or "")
+                errs = {"crc_errors": _int0(intf.crcerrors),
+                        "input_queue_drops": _int0(intf.iqdrops),
+                        "output_drops": _int0(intf.outputdrops)}
+                is_up = oper.lower() == "up" and (not line or line.lower() == "up")
+                noisy = any(v for v in errs.values())
+                port_data[port] = dict(errs, oper_status=oper,
+                                       line_protocol=line, up=is_up)
+
+                if not is_up:
+                    bad.append(mgmt_ip)
+                    lines.append(
+                        f"• {wlc_host} ({mgmt_ip}) via {port}: {oper}/{line}"
+                        + (" (err-disabled)" if intf.errdisabled else "")
+                        + ". The path to the controller is broken here.")
+                elif noisy:
+                    bad.append(mgmt_ip)
+                    lines.append(
+                        f"• {wlc_host} ({mgmt_ip}) via {port}: up, but "
+                        + ", ".join(f"{k.replace('_', ' ')} {v}"
+                                    for k, v in errs.items() if v) + ".")
+                else:
+                    lines.append(
+                        f"• {wlc_host} ({mgmt_ip}) via {port}: up/up, clean.")
+
+            # Any unreadable port is a failure, not a partial success. A port
+            # that will not parse is one the device does not have (`% Invalid
+            # input`), so the recursion resolved onto something that is not a
+            # real interface -- the path cannot be called verified even if a
+            # sibling port-channel member reads clean.
+            if any(not d.get("readable", True) for d in port_data.values()):
+                unverified.append(mgmt_ip)
+            ports_by_wlc[mgmt_ip] = port_data
+
+        if unreadable and not ports_by_wlc:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not resolve the physical path to any WLC from "
+                f"{hostname}:\n" + "\n".join(f"• {u}" for u in unreadable),
+                data={"errors": unreadable})
+
+        ctx.state["ap_wlc_physical_ports"] = ports_by_wlc
+        _record_pd(ctx, "interface programming",
+                   [{"device": hostname, "interface": p}
+                    for pd in ports_by_wlc.values()
+                    for p, d in pd.items() if d.get("readable", True)])
+
+        if unreadable:
+            lines.append("• Could not be read: " + "; ".join(unreadable))
+
+        if bad:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The physical path from {hostname} to the WLC has "
+                f"problems:\n\n" + "\n".join(lines),
+                data={"ports": ports_by_wlc})
+
+        if unverified:
+            # Nothing was found wrong, but nothing was confirmed right
+            # either. Saying "clean" here would hide the gap.
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"The physical path from {hostname} to the WLC could not be "
+                f"verified:\n\n" + "\n".join(lines),
+                data={"ports": ports_by_wlc, "unverified": unverified})
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"The physical path from {hostname} to every WLC is up and "
+            f"clean:\n\n" + "\n".join(lines),
+            data={"ports": ports_by_wlc})
+
+
+class ApInterfaceStatus(_ApCheck):
+    """The AP port's line state, load and error counters.
+
+    A port can be up and still be the reason an AP misbehaves: input errors,
+    CRCs and drops point at cabling or duplex, while a saturated link explains
+    loss that looks like a fabric fault. Read here so those are on record
+    before the LISP and tunnel checks interpret what they see.
+
+    Platform-independent. The interface programming behind it is a PD object
+    for the later pass.
+    """
+
+    name = "AP Interface Status"
+    target_node_id = "xtr"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        port = ctx.state.get("ap_port")
+        if not port:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the AP's switchport is unknown (see AP MAC "
+                "Learning).")
+
+        from switchingmodules.interfaces import Interfaces
+        intf = Interfaces(port, hostname)
+        try:
+            intf.show_interface(ctx.service)
+        except BaseException as e:
+            from checks.shared import _legacy_fail
+            return _legacy_fail(e, f"show interface {port}")
+
+        # show_interface returns silently when the parse yields nothing, so an
+        # unset oper_status means the read failed -- NOT that the port is down.
+        if intf.operstate is None:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not read the state of {port} on {hostname}: "
+                f"`show interface {port}` returned nothing usable, so the "
+                f"port's condition is unknown.",
+                data={"port": port})
+
+        oper = str(intf.operstate)
+        line = str(intf.linestate or "")
+        data = {"port": port, "oper_status": oper, "line_protocol": line,
+                "mtu": intf.mtu, "speed": intf.speed, "bandwidth": intf.bw,
+                "description": intf.description,
+                "crc_errors": _int0(intf.crcerrors),
+                "giants": _int0(intf.giants), "runts": _int0(intf.runts),
+                "input_queue_drops": _int0(intf.iqdrops),
+                "output_drops": _int0(intf.outputdrops),
+                "in_rate_pkts": _int0(intf.inputpps),
+                "out_rate_pkts": _int0(intf.outputpps)}
+
+        if oper.lower() != "up" or (line and line.lower() != "up"):
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{port} on {hostname} is {oper}/{line}"
+                + (f" and is err-disabled" if intf.errdisabled else "")
+                + f". The AP cannot onboard through a port that is not up.",
+                data=data)
+
+        errors = {"CRC error": _int0(intf.crcerrors),
+                  "giant": _int0(intf.giants),
+                  "runt": _int0(intf.runts),
+                  "input queue drop": _int0(intf.iqdrops),
+                  "output drop": _int0(intf.outputdrops)}
+        seen = {k: v for k, v in errors.items() if v}
+
+        lines = [f"• {port} is up/{line}, {intf.speed or 'unknown speed'}, "
+                 f"MTU {intf.mtu or '?'}."]
+        if intf.description:
+            lines.append(f"• Description: {intf.description}")
+        lines.append(f"• Load: {_int0(intf.inputpps)} pps in, "
+                     f"{_int0(intf.outputpps)} pps out.")
+
+        if seen:
+            lines.append(
+                "• Counters: "
+                + ", ".join(f"{v} {k}{'s' if v != 1 else ''}"
+                            for k, v in seen.items())
+                + ". These accumulate since the counters were last cleared, "
+                  "so check whether they are still incrementing before "
+                  "treating them as the cause.")
+            return CheckResult(CheckStatus.WARN, "\n".join(lines), data=data)
+
+        lines.append("• No CRC errors, giants, runts or drops recorded.")
+        return CheckResult(CheckStatus.OK, "\n".join(lines), data=data)
+
+
 class ApSwitchportState(_ApCheck):
     """Whether the AP's port is an access port in the right VLAN.
 
