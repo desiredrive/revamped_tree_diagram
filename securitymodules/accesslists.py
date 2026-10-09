@@ -280,26 +280,33 @@ def hexdecimal_acl_hit(hexace, evaluation):
         action = 'deny'
 
     # Step 2 - Function to evaluate if an IP is within a network+wildcard for the source:
-    ip_obj = ipaddress.IPv4Address(sourceip)
-    ip_int = int(ip_obj)
-    hexsource = f"{ip_int:08X}"
-    ip = ip_hex_to_int(hexsource)
-    sourcenet = ip_hex_to_int(ace_source_net)
-    sourcewcard = ip_hex_to_int(ace_source_wcard)
-    matchresult = (ip & ~sourcewcard) == (sourcenet & ~sourcewcard)
-    if matchresult is False:
-        return False
+    # "any" means "do not constrain this end" -- used when a flow is defined
+    # by its ports alone and its addresses legitimately vary (DHCP, which is
+    # sourced from 0.0.0.0, the client, or a relay SVI depending on the leg).
+    # It matches every ACE rather than a particular address, so the port
+    # comparison below decides the hit on its own.
+    if str(sourceip).lower() != 'any':
+        ip_obj = ipaddress.IPv4Address(sourceip)
+        ip_int = int(ip_obj)
+        hexsource = f"{ip_int:08X}"
+        ip = ip_hex_to_int(hexsource)
+        sourcenet = ip_hex_to_int(ace_source_net)
+        sourcewcard = ip_hex_to_int(ace_source_wcard)
+        matchresult = (ip & ~sourcewcard) == (sourcenet & ~sourcewcard)
+        if matchresult is False:
+            return False
 
     # Step 3 - Function to evaluate if an IP is within a network+wildcard for the destination:
-    ip_obj = ipaddress.IPv4Address(destinationip)
-    ip_int = int(ip_obj)
-    hexsource = f"{ip_int:08X}"
-    ip = ip_hex_to_int(hexsource)
-    destnet = ip_hex_to_int(ace_dest_net)
-    destwcard = ip_hex_to_int(ace_dest_wcard)
-    matchresult = (ip & ~destwcard) == (destnet & ~destwcard)
-    if matchresult is False:
-        return False
+    if str(destinationip).lower() != 'any':
+        ip_obj = ipaddress.IPv4Address(destinationip)
+        ip_int = int(ip_obj)
+        hexsource = f"{ip_int:08X}"
+        ip = ip_hex_to_int(hexsource)
+        destnet = ip_hex_to_int(ace_dest_net)
+        destwcard = ip_hex_to_int(ace_dest_wcard)
+        matchresult = (ip & ~destwcard) == (destnet & ~destwcard)
+        if matchresult is False:
+            return False
 
     protocolflag = False
     # Step 4 - Evaluate protocol, if the ace_protocol is "ip or FF" is automatic match, if not, compare only if protocol is not none.

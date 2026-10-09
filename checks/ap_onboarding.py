@@ -1871,44 +1871,42 @@ from checks.shared import _cef_interfaces, _evaluate_acls  # noqa: F401
 
 
 def _dhcp_flows(ap_ip, svi_ip, helpers):
-    """Every DHCP flow on the AP's path, in both directions.
+    """Every DHCP flow on the AP's path, blind on the source address.
 
-    The broadcast leg is what the AP actually sends before it has an
-    address: source 0.0.0.0, destination 255.255.255.255, UDP/68 to 67. It
-    is evaluated whether or not the AP currently holds a lease, because the
-    exchange it has to survive on a reboot or a renewal starts there.
+    DHCP is identified by its ports -- bootpc (68) and bootps (67) -- not by
+    its addresses, and the source legitimately varies: the AP sends from
+    0.0.0.0 before it has a lease and from its own address when renewing,
+    and a relayed request carries whichever SVI address the relay picks. So
+    the source is left unconstrained and the ports decide the match.
 
-    The relayed leg is unicast between the SVI and each helper on UDP/67.
-    Both are included only when their addresses are known; an unknown
-    address would otherwise be evaluated as a literal "None".
+    The destination is kept concrete. A blind destination also matches rules
+    aimed at something else entirely -- a deny toward the WLC, say -- and
+    would report DHCP blocked on the strength of a rule that never touches
+    it. Every destination below is somewhere DHCP actually goes.
     """
-    flows = [
-        {"label": "AP broadcast DISCOVER/REQUEST (UDP/68 → 67)",
-         "sourceip": "0.0.0.0", "destinationip": "255.255.255.255",
-         "protocol": "udp", "srcport": 68, "dstport": 67},
-    ]
+    dsts = [("255.255.255.255", "broadcast to the local segment")]
     if ap_ip:
+        dsts.append((ap_ip, f"the AP at {ap_ip}"))
+    if svi_ip:
+        dsts.append((svi_ip, f"the gateway at {svi_ip}"))
+    for helper in helpers:
+        dsts.append((helper, f"the server at {helper}"))
+
+    flows = []
+    for dst, where in dsts:
         flows.append(
-            {"label": f"offer/ack to {ap_ip} (UDP/67 → 68)",
-             "sourceip": svi_ip or "0.0.0.0", "destinationip": ap_ip,
+            {"label": f"request to {where} (UDP/68 \u2192 67)",
+             "sourceip": "any", "destinationip": dst,
+             "protocol": "udp", "srcport": 68, "dstport": 67})
+        flows.append(
+            {"label": f"reply to {where} (UDP/67 \u2192 68)",
+             "sourceip": "any", "destinationip": dst,
              "protocol": "udp", "srcport": 67, "dstport": 68})
         flows.append(
-            {"label": f"renewal from {ap_ip} (UDP/68 → 67)",
-             "sourceip": ap_ip, "destinationip": svi_ip or "255.255.255.255",
-             "protocol": "udp", "srcport": 68, "dstport": 67})
-    for helper in helpers:
-        if svi_ip:
-            flows.append(
-                {"label": f"relay {svi_ip} → {helper} (UDP/67)",
-                 "sourceip": svi_ip, "destinationip": helper,
-                 "protocol": "udp", "srcport": 67, "dstport": 67})
-            flows.append(
-                {"label": f"reply {helper} → {svi_ip} (UDP/67)",
-                 "sourceip": helper, "destinationip": svi_ip,
-                 "protocol": "udp", "srcport": 67, "dstport": 67})
+            {"label": f"relay to {where} (UDP/67 \u2192 67)",
+             "sourceip": "any", "destinationip": dst,
+             "protocol": "udp", "srcport": 67, "dstport": 67})
     return flows
-
-
 
 
 class ApRouteToWlc(_ApCheck):
@@ -2999,16 +2997,38 @@ class ApDhcpAccessLists(_ApCheck):
                              acl=acl, interfaces=list(interfaces))
 
         where = ", ".join(interfaces)
-        gaps = (["• Could not be read: " + "; ".join(unreadable)]
-                if unreadable else [])
+        # Deduplicated: the same unparseable ACL fails once per flow, and a
+        # dozen identical lines say no more than one does.
+        gaps = []
+        if unreadable:
+            seen, reasons = set(), []
+            for u in unreadable:
+                acl = u.split(" could not be evaluated", 1)[0]
+                why = u.rsplit("(", 1)[-1].rstrip(")") if "(" in u else u
+                if (acl, why) not in seen:
+                    seen.add((acl, why))
+                    reasons.append(f"• {acl} could not be read: {why}")
+            gaps = ["Not every ACL could be evaluated:"] + reasons
 
         # A deny outranks an unreadable ACL: it is the actionable finding.
         if denies:
-            return CheckResult(
-                CheckStatus.WARN,
-                "An ACL on the AP's path is blocking DHCP, so it cannot "
-                "obtain an address:\n\n"
-                + "\n".join([f"• {d}" for d in denies] + gaps), data=data)
+            # Grouped by ACL and sequence: a single rule denying DHCP is hit
+            # by most of the flows, and naming it once is what the reader
+            # needs to go and fix it.
+            by_rule = {}
+            for d in denies:
+                acl = d.split(" denies ", 1)[0]
+                seq = d.rsplit("sequence ", 1)[-1].rstrip(")")
+                by_rule.setdefault((acl, seq), []).append(
+                    d.split(" denies ", 1)[-1].rsplit(" at sequence", 1)[0])
+            out = ["An ACL on the AP's path is blocking DHCP, so the AP "
+                   "cannot obtain an address.", ""]
+            for (acl, seq), labels in by_rule.items():
+                out.append(f"• {acl} denies DHCP at sequence {seq}:")
+                out += [f"    - {l}" for l in labels]
+            if gaps:
+                out += [""] + gaps
+            return CheckResult(CheckStatus.WARN, "\n".join(out), data=data)
 
         if unreadable:
             return CheckResult(
@@ -3022,10 +3042,24 @@ class ApDhcpAccessLists(_ApCheck):
                 f"No ACL is applied on {where}, so nothing there blocks "
                 f"DHCP.", data=data)
 
-        detail = "; ".join(permits) if permits else f"checked {', '.join(names)}"
-        return CheckResult(
-            CheckStatus.OK,
-            f"No ACL on {where} blocks DHCP ({detail}).", data=data)
+        # One line per ACL rather than one per flow. Every flow through a
+        # given ACL almost always lands on the same permit, so listing them
+        # individually repeats the same sequence number a dozen times and
+        # buries the one thing worth reading: which rule let DHCP through.
+        lines = [f"No ACL on the AP's path blocks DHCP.", ""]
+        for acl in names:
+            seqs = sorted({p.rsplit("sequence ", 1)[-1].rstrip(")")
+                           for p in permits if p.startswith(f"{acl} ")})
+            if seqs:
+                at = ("sequence " + seqs[0] if len(seqs) == 1
+                      else "sequences " + ", ".join(seqs))
+                lines.append(f"• {acl} — permits DHCP at {at}")
+            else:
+                lines.append(f"• {acl} — no rule matches DHCP")
+        lines += ["", f"Checked {len(flows)} DHCP flows "
+                      f"(bootpc/68 and bootps/67, both directions) "
+                      f"on {where}."]
+        return CheckResult(CheckStatus.OK, "\n".join(lines), data=data)
 
 
 class ApL2LispInstance(_ApCheck):
