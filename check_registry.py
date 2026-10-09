@@ -220,9 +220,6 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApRouteToWlc(),
             ApCefToWlc(),
             ApPhysicalPathToWlc(),
-            # ACLs on that same CEF-derived path, for the AP's
-            # CAPWAP join to the controller.
-            ApCapwapAccessLists(),
             # What the switch reports to AAA about the AP, which is what
             # profiling policy matches on.
             ApAccountingAttributes(),
@@ -245,7 +242,6 @@ def build_check_chain(payload: dict) -> list[Check]:
             # after the port-level checks because a port that never came up
             # makes the gateway's state beside the point.
             ApSviState(),
-            ApDhcpAccessLists(),
             # Spec 3b.3. Graded as a sequence in the order the fabric builds
             # it: instance, then dynamic EID, then database, then registration
             # to each control plane. Split into four checks so the canvas says
@@ -255,6 +251,13 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApL2LispDatabase(),
             ApL2LispRegistration(),
             ApIpAddress(),
+            # Both ACL checks evaluate flows sourced from the AP's own
+            # address, so they run after ApIpAddress resolves it. Placed
+            # earlier they skipped every run, reporting "no address" for an
+            # AP that had one -- the address simply had not been looked up
+            # yet.
+            ApCapwapAccessLists(),
+            ApDhcpAccessLists(),
             ApL3LispInstance(),
             ApL3LispDynamicEid(),
             ApL3LispDatabase(),
