@@ -30,6 +30,7 @@ from checks.ap_onboarding import (
     ApCefToWlc,
     ApPhysicalPathToWlc,
     ApCapwapAccessLists,
+    ApDhcpAccessLists,
     ApAuthTemplate,
     ApDeviceClassifier,
     ApAuthenticationSession,
@@ -244,6 +245,7 @@ def build_check_chain(payload: dict) -> list[Check]:
             # after the port-level checks because a port that never came up
             # makes the gateway's state beside the point.
             ApSviState(),
+            ApDhcpAccessLists(),
             # Spec 3b.3. Graded as a sequence in the order the fabric builds
             # it: instance, then dynamic EID, then database, then registration
             # to each control plane. Split into four checks so the canvas says

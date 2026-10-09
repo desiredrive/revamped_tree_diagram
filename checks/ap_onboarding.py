@@ -1891,6 +1891,45 @@ def _cef_interfaces(ctx, hostname, dst_ip):
     return intfs
 
 
+def _dhcp_flows(ap_ip, svi_ip, helpers):
+    """Every DHCP flow on the AP's path, in both directions.
+
+    The broadcast leg is what the AP actually sends before it has an
+    address: source 0.0.0.0, destination 255.255.255.255, UDP/68 to 67. It
+    is evaluated whether or not the AP currently holds a lease, because the
+    exchange it has to survive on a reboot or a renewal starts there.
+
+    The relayed leg is unicast between the SVI and each helper on UDP/67.
+    Both are included only when their addresses are known; an unknown
+    address would otherwise be evaluated as a literal "None".
+    """
+    flows = [
+        {"label": "AP broadcast DISCOVER/REQUEST (UDP/68 → 67)",
+         "sourceip": "0.0.0.0", "destinationip": "255.255.255.255",
+         "protocol": "udp", "srcport": 68, "dstport": 67},
+    ]
+    if ap_ip:
+        flows.append(
+            {"label": f"offer/ack to {ap_ip} (UDP/67 → 68)",
+             "sourceip": svi_ip or "0.0.0.0", "destinationip": ap_ip,
+             "protocol": "udp", "srcport": 67, "dstport": 68})
+        flows.append(
+            {"label": f"renewal from {ap_ip} (UDP/68 → 67)",
+             "sourceip": ap_ip, "destinationip": svi_ip or "255.255.255.255",
+             "protocol": "udp", "srcport": 68, "dstport": 67})
+    for helper in helpers:
+        if svi_ip:
+            flows.append(
+                {"label": f"relay {svi_ip} → {helper} (UDP/67)",
+                 "sourceip": svi_ip, "destinationip": helper,
+                 "protocol": "udp", "srcport": 67, "dstport": 67})
+            flows.append(
+                {"label": f"reply {helper} → {svi_ip} (UDP/67)",
+                 "sourceip": helper, "destinationip": svi_ip,
+                 "protocol": "udp", "srcport": 67, "dstport": 67})
+    return flows
+
+
 def _evaluate_acls(ctx, hostname, interfaces, flows):
     """Evaluate every ACL on `interfaces` against each flow in `flows`.
 
@@ -2810,6 +2849,12 @@ class ApSviState(_ApCheck):
         prefix = getattr(info, "prefix", None)
         mask = getattr(info, "mask", None)
 
+        # Published for the DHCP ACL check, which needs the relay endpoints
+        # to evaluate the relayed flow and the gateway address as its source.
+        ctx.state["ap_svi"] = svi
+        ctx.state["ap_svi_helpers"] = list(helpers)
+        ctx.state["ap_svi_address"] = prefix
+
         address = f"{prefix}/{mask}" if prefix else "none"
         detail = [
             f"SVI: {svi}",
@@ -2939,6 +2984,108 @@ def _l2_dyneid_summary(ctx, hostname, vlan):
     group = _as_mapping(body.get("dynamic_eids")).get(f"Auto-L2-group-{iid}")
     eids = list((_as_mapping(group).get("eids") or {}))
     return iid, eids, None
+
+
+class ApDhcpAccessLists(_ApCheck):
+    """ACLs on the AP's path that could block DHCP.
+
+    An AP has no static address to fall back on, so an ACL that drops DHCP
+    strands it before any of the CAPWAP checks can mean anything. Two legs
+    carry the exchange and both are evaluated:
+
+      * The access port, where the AP's broadcast DISCOVER and REQUEST
+        arrive (0.0.0.0 -> 255.255.255.255, UDP/68 to 67) and where the
+        offer is sent back to it.
+      * The uplink the relay uses, where the SVI forwards the request on to
+        each helper address as unicast UDP/67 and the server answers.
+
+    Every interface is evaluated against every flow rather than matching
+    flows to the leg they belong on: an ACL applied in the unexpected
+    direction still drops the traffic, and reporting that is the point.
+
+    `acl_entry` is PD-eligible -- recorded for the later platform pass.
+    """
+
+    name = "AP DHCP ACLs"
+    target_node_id = "xtr"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        ap_port = ctx.state.get("ap_port")
+        helpers = ctx.state.get("ap_svi_helpers") or []
+        svi_ip = ctx.state.get("ap_svi_address")
+        ap_ip = ctx.state.get("ap_ip")
+
+        interfaces = []
+        if ap_port:
+            interfaces.append(ap_port)
+
+        # The relayed leg leaves through whatever CEF picks for the helper.
+        # Derived per helper, for the same reason the CAPWAP check derives
+        # per WLC: separate destinations can resolve onto separate uplinks.
+        unreadable = []
+        for helper in helpers:
+            try:
+                for intf in _cef_interfaces(ctx, hostname, helper):
+                    if intf not in interfaces:
+                        interfaces.append(intf)
+            except BaseException as e:
+                unreadable.append(f"{helper}: {type(e).__name__}: {e}")
+
+        if not interfaces:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — neither the AP's access port nor a relay path is "
+                "known, so there is no interface whose ACLs could be read.",
+                data={"interfaces": [], "errors": unreadable})
+
+        flows = _dhcp_flows(ap_ip, svi_ip, helpers)
+
+        try:
+            names, denies, permits, unevaluated = _evaluate_acls(
+                ctx, hostname, interfaces, flows)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not read the ACLs on {hostname}:\n\n"
+                f"{type(e).__name__}: {e}",
+                data={"interfaces": interfaces})
+
+        unreadable.extend(unevaluated)
+        data = {"interfaces": interfaces, "acls": names, "denies": denies,
+                "helpers": helpers, "unevaluated": unevaluated}
+        for acl in names:
+            record_pd_object(ctx, "acl_entry", radkit_hostname=hostname,
+                             acl=acl, interfaces=list(interfaces))
+
+        where = ", ".join(interfaces)
+        gaps = (["• Could not be read: " + "; ".join(unreadable)]
+                if unreadable else [])
+
+        # A deny outranks an unreadable ACL: it is the actionable finding.
+        if denies:
+            return CheckResult(
+                CheckStatus.WARN,
+                "An ACL on the AP's path is blocking DHCP, so it cannot "
+                "obtain an address:\n\n"
+                + "\n".join([f"• {d}" for d in denies] + gaps), data=data)
+
+        if unreadable:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"DHCP could not be fully evaluated on {hostname}:\n\n"
+                + "\n".join(gaps), data=dict(data, errors=unreadable))
+
+        if not names:
+            return CheckResult(
+                CheckStatus.OK,
+                f"No ACL is applied on {where}, so nothing there blocks "
+                f"DHCP.", data=data)
+
+        detail = "; ".join(permits) if permits else f"checked {', '.join(names)}"
+        return CheckResult(
+            CheckStatus.OK,
+            f"No ACL on {where} blocks DHCP ({detail}).", data=data)
 
 
 class ApL2LispInstance(_ApCheck):
