@@ -1870,41 +1870,70 @@ class ApAccountingAttributes(_ApCheck):
 from checks.shared import _cef_interfaces, _evaluate_acls  # noqa: F401
 
 
-def _dhcp_flows(ap_ip, svi_ip, helpers):
-    """Every DHCP flow on the AP's path, blind on the source address.
+def _dhcp_relay(ctx, hostname):
+    """The SVI's own address and its helper addresses, as (svi_ip, helpers).
 
-    DHCP is identified by its ports -- bootpc (68) and bootps (67) -- not by
-    its addresses, and the source legitimately varies: the AP sends from
-    0.0.0.0 before it has a lease and from its own address when renewing,
-    and a relayed request carries whichever SVI address the relay picks. So
-    the source is left unconstrained and the ports decide the match.
-
-    The destination is kept concrete. A blind destination also matches rules
-    aimed at something else entirely -- a deny toward the WLC, say -- and
-    would report DHCP blocked on the strength of a rule that never touches
-    it. Every destination below is somewhere DHCP actually goes.
+    Both come from one `show ip interface vlan <id>`, so they are collected
+    together. ApSviState publishes them when it has run; when it has not,
+    the VLAN alone is enough to ask.
     """
-    dsts = [("255.255.255.255", "broadcast to the local segment")]
-    if ap_ip:
-        dsts.append((ap_ip, f"the AP at {ap_ip}"))
+    svi_ip = ctx.state.get("ap_svi_address")
+    helpers = ctx.state.get("ap_svi_helpers")
+    if svi_ip is not None and helpers is not None:
+        return svi_ip, helpers
+
+    vlan = ctx.state.get("ap_vlan")
+    if not vlan:
+        return svi_ip, (helpers or [])
+    try:
+        from switchingmodules.dhcp import DHCPDevice
+        svi = DHCPDevice(hostname)
+        svi.svi_configuration(vlan, ctx.service)
+        return (svi_ip or getattr(svi, "prefix", None),
+                list(getattr(svi, "helper_address", None) or []))
+    except BaseException:
+        # Not fatal: the client-broadcast leg needs neither, and a relay
+        # path that cannot be resolved is not evidence that an ACL blocks it.
+        return svi_ip, (helpers or [])
+
+
+def _dhcp_flows(svi_ip, helpers):
+    """The three legs a DHCP exchange travels, on bootpc (68) and bootps (67).
+
+    Each leg is a different pair of addresses, and an ACL can deny one while
+    permitting the others:
+
+      * 0.0.0.0 to 255.255.255.255 -- the client's DISCOVER and REQUEST, sent
+        before it has an address of its own.
+      * the SVI to 255.255.255.255 -- what the gateway puts back on the
+        segment toward a client that still has no address.
+      * the SVI to each helper -- the relayed request, re-sourced by the
+        relay and unicast to the server.
+
+    Both ports are evaluated on every leg rather than only the one that leg
+    normally carries: a rule denying either breaks the exchange, and which
+    of the two a given packet uses is not worth assuming.
+    """
+    legs = [("0.0.0.0", "255.255.255.255", "client broadcast")]
     if svi_ip:
-        dsts.append((svi_ip, f"the gateway at {svi_ip}"))
-    for helper in helpers:
-        dsts.append((helper, f"the server at {helper}"))
+        legs.append((svi_ip, "255.255.255.255",
+                     f"gateway {svi_ip} to the segment"))
+        for helper in helpers:
+            legs.append((svi_ip, helper, f"relay {svi_ip} to {helper}"))
 
     flows = []
-    for dst, where in dsts:
+    for src, dst, where in legs:
         flows.append(
-            {"label": f"request to {where} (UDP/68 \u2192 67)",
-             "sourceip": "any", "destinationip": dst,
+            {"label": f"{where} (UDP/68 \u2192 67)",
+             "sourceip": src, "destinationip": dst,
              "protocol": "udp", "srcport": 68, "dstport": 67})
         flows.append(
-            {"label": f"reply to {where} (UDP/67 \u2192 68)",
-             "sourceip": "any", "destinationip": dst,
+            {"label": f"{where} (UDP/67 \u2192 68)",
+             "sourceip": src, "destinationip": dst,
              "protocol": "udp", "srcport": 67, "dstport": 68})
         flows.append(
-            {"label": f"relay to {where} (UDP/67 \u2192 67)",
-             "sourceip": "any", "destinationip": dst,
+            {"label": f"{where} (UDP/67 \u2192 67)",
+             "sourceip": src, "destinationip": dst,
              "protocol": "udp", "srcport": 67, "dstport": 67})
     return flows
 
@@ -2950,17 +2979,15 @@ class ApDhcpAccessLists(_ApCheck):
     def run_ap(self, ctx: RunContext) -> CheckResult:
         hostname = ctx.state.get("xtr_hostname")
         ap_port = ctx.state.get("ap_port")
-        helpers = ctx.state.get("ap_svi_helpers") or []
-        svi_ip = ctx.state.get("ap_svi_address")
-        ap_ip = ctx.state.get("ap_ip")
-
         interfaces = []
         if ap_port:
             interfaces.append(ap_port)
 
-        # The relayed leg leaves through whatever CEF picks for the helper.
-        # Derived per helper, for the same reason the CAPWAP check derives
-        # per WLC: separate destinations can resolve onto separate uplinks.
+        # The relay leaves through whichever uplink CEF picks for each helper.
+        # The addresses are read here rather than taken from ApSviState, so
+        # this check does not depend on the gateway checks having run.
+        svi_ip, helpers = _dhcp_relay(ctx, hostname)
+
         unreadable = []
         for helper in helpers:
             try:
@@ -2977,7 +3004,7 @@ class ApDhcpAccessLists(_ApCheck):
                 "known, so there is no interface whose ACLs could be read.",
                 data={"interfaces": [], "errors": unreadable})
 
-        flows = _dhcp_flows(ap_ip, svi_ip, helpers)
+        flows = _dhcp_flows(svi_ip, helpers)
 
         try:
             names, denies, permits, unevaluated = _evaluate_acls(
@@ -2991,7 +3018,8 @@ class ApDhcpAccessLists(_ApCheck):
 
         unreadable.extend(unevaluated)
         data = {"interfaces": interfaces, "acls": names, "denies": denies,
-                "helpers": helpers, "unevaluated": unevaluated}
+                "helpers": helpers, "svi": svi_ip,
+                "unevaluated": unevaluated}
         for acl in names:
             record_pd_object(ctx, "acl_entry", radkit_hostname=hostname,
                              acl=acl, interfaces=list(interfaces))
