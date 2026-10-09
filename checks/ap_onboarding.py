@@ -1867,24 +1867,6 @@ class ApAccountingAttributes(_ApCheck):
         )
 
 
-def _record_pd(ctx, kind, objects):
-    """Record PD-eligible objects for the platform-dependent pass.
-
-    The manifest lists the object types whose hardware programming is verified
-    later (mac address, adjacency, route, fib entry, interface programming,
-    cts sgacl entry, acl entry, qos entry, copp drops). A check that touches
-    one records it here instead of verifying it inline, so step 6 knows what
-    to walk without re-deriving it.
-    """
-    if not objects:
-        return
-    store = ctx.state.setdefault("pd_objects", {})
-    bucket = store.setdefault(kind, [])
-    for obj in objects:
-        if obj not in bucket:
-            bucket.append(obj)
-
-
 class ApRouteToWlc(_ApCheck):
     """The Edge's route to each WLC's management address.
 
@@ -1963,10 +1945,10 @@ class ApRouteToWlc(_ApCheck):
                 data={"routes": routes, "errors": unreadable})
 
         ctx.state["ap_wlc_routes"] = routes
-        _record_pd(ctx, "route",
-                   [{"device": hostname, "prefix": r.get("prefix"),
-                     "vrf": "default"} for r in routes.values()
-                    if r.get("reachable")])
+        for r in routes.values():
+            if r.get("reachable"):
+                record_pd_object(ctx, "route", radkit_hostname=hostname,
+                                 prefix=r.get("prefix"), vrf="default")
 
         if any(not r.get("reachable") for r in routes.values()):
             return CheckResult(
@@ -2071,10 +2053,10 @@ class ApCefToWlc(_ApCheck):
                 data={"cef": entries, "errors": unreadable})
 
         ctx.state["ap_wlc_cef"] = entries
-        _record_pd(ctx, "fib entry",
-                   [{"device": hostname, "prefix": e.get("prefix"),
-                     "vrf": "default"} for e in entries.values()
-                    if e.get("prefix")])
+        for e in entries.values():
+            if e.get("prefix"):
+                record_pd_object(ctx, "fib_entry", radkit_hostname=hostname,
+                                 prefix=e.get("prefix"), vrf="default")
 
         if any(not e.get("forwarding") for e in entries.values()):
             return CheckResult(
@@ -2197,9 +2179,20 @@ class ApPhysicalPathToWlc(_ApCheck):
 
                 oper = str(intf.operstate)
                 line = str(intf.linestate or "")
+                # Every error counter the parser exposes, not a subset.
+                # Giants and runts in particular are what an MTU mismatch on a
+                # VXLAN-carrying uplink looks like, which is exactly the fault
+                # this check exists to catch -- reading only CRCs and drops
+                # called such a link "clean".
                 errs = {"crc_errors": _int0(intf.crcerrors),
                         "input_queue_drops": _int0(intf.iqdrops),
-                        "output_drops": _int0(intf.outputdrops)}
+                        "output_drops": _int0(intf.outputdrops),
+                        "giants": _int0(intf.giants),
+                        "runts": _int0(intf.runts),
+                        "overruns": _int0(intf.overruns),
+                        "unknown_protocol_drops": _int0(intf.unknownproto),
+                        "input_errors": _int0(intf.inerrors),
+                        "output_errors": _int0(intf.outerrors)}
                 is_up = oper.lower() == "up" and (not line or line.lower() == "up")
                 noisy = any(v for v in errs.values())
                 port_data[port] = dict(errs, oper_status=oper,
@@ -2238,10 +2231,11 @@ class ApPhysicalPathToWlc(_ApCheck):
                 data={"errors": unreadable})
 
         ctx.state["ap_wlc_physical_ports"] = ports_by_wlc
-        _record_pd(ctx, "interface programming",
-                   [{"device": hostname, "interface": p}
-                    for pd in ports_by_wlc.values()
-                    for p, d in pd.items() if d.get("readable", True)])
+        for pd in ports_by_wlc.values():
+            for port, d in pd.items():
+                if d.get("readable", True):
+                    record_pd_object(ctx, "IFM", radkit_hostname=hostname,
+                                     interface=port)
 
         if unreadable:
             lines.append("• Could not be read: " + "; ".join(unreadable))
@@ -2320,6 +2314,10 @@ class ApInterfaceStatus(_ApCheck):
                 "giants": _int0(intf.giants), "runts": _int0(intf.runts),
                 "input_queue_drops": _int0(intf.iqdrops),
                 "output_drops": _int0(intf.outputdrops),
+                "overruns": _int0(intf.overruns),
+                "unknown_protocol_drops": _int0(intf.unknownproto),
+                "input_errors": _int0(intf.inerrors),
+                "output_errors": _int0(intf.outerrors),
                 "in_rate_pkts": _int0(intf.inputpps),
                 "out_rate_pkts": _int0(intf.outputpps)}
 
@@ -2334,6 +2332,10 @@ class ApInterfaceStatus(_ApCheck):
         errors = {"CRC error": _int0(intf.crcerrors),
                   "giant": _int0(intf.giants),
                   "runt": _int0(intf.runts),
+                  "overrun": _int0(intf.overruns),
+                  "unknown protocol drop": _int0(intf.unknownproto),
+                  "input error": _int0(intf.inerrors),
+                  "output error": _int0(intf.outerrors),
                   "input queue drop": _int0(intf.iqdrops),
                   "output drop": _int0(intf.outputdrops)}
         seen = {k: v for k, v in errors.items() if v}

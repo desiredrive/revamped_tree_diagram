@@ -47,6 +47,10 @@ class Interfaces:
         self.crcerrors = 0
         self.giants = 0
         self.runts = 0
+        self.overruns = 0
+        self.unknownproto = 0
+        self.inerrors = 0
+        self.outerrors = 0
         self.inputpps = 0
         self.outputpps = 0
 
@@ -109,6 +113,13 @@ class Interfaces:
         self.crcerrors = counters.get('in_crc_errors', 0)
         self.giants = counters.get('in_giants', 0)
         self.runts = counters.get('in_runts', 0)
+        self.overruns = counters.get('in_overrun', 0)
+        # Genie's key is misspelled ("protocl"); verified against a live
+        # device rather than assumed, because the obvious spelling is absent
+        # and would silently read as zero.
+        self.unknownproto = counters.get('out_unknown_protocl_drops', 0)
+        self.inerrors = counters.get('in_errors', 0)
+        self.outerrors = counters.get('out_errors', 0)
 
         # Rate counters
         rate = counters.get('rate', {})
