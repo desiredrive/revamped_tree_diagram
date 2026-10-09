@@ -291,9 +291,26 @@ class IPCef:
                 # Empty next hop! (Special Adjacency???)
                 self.nexthops = None
         else:
-            rib_flag = cefpath['rib']
+            # No 'sources' key. The parser omits it for forms it has no regex
+            # for (e.g. "sources: LISP_FN, IPL"), so absence does NOT mean the
+            # prefix is connected -- reading cefpath['rib'] unguarded raised
+            # KeyError here for LISP-derived prefixes.
+            rib_flag = cefpath.get('rib') or ""
+            if not rib_flag and ifnums:
+                # 'rib' is unavailable but the adjacency is: derive next hops
+                # from ifnums exactly as the sources branch above does.
+                nhlist = []
+                for oif in (ifnums or {}):
+                    oif_name = next(iter(oif.keys()), None) if isinstance(oif, dict) else oif
+                    try:
+                        j = ifnums[oif].get("address")
+                        nexthop_format = {"nexthop": j, "oif": oif_name}
+                    except (KeyError, AttributeError, TypeError):
+                        nexthop_format = {"nexthop": None, "oif": oif_name}
+                    nhlist.append(nexthop_format)
+                self.nexthops = nhlist
             # CEF Type: Connected
-            if "C" in rib_flag:
+            elif "C" in rib_flag:
                 ipcef_cmd = "show ip cef {} {}".format(vrf_mode,self.ip)
                 ipcef_op = get_single_output_genie(self.hostname, ipcef_cmd, service)
                 if ipcef_op is not None:
@@ -310,6 +327,10 @@ class IPCef:
                                 nexthop_format = {'nexthop': j, 'oif': oif}
                                 nhlist.append(nexthop_format)
                     self.nexthops = nhlist
+            else:
+                # Neither sources, rib, nor ifnums. Callers iterate .nexthops,
+                # so leave it defined rather than unset.
+                self.nexthops = None
 
     def get_cef_detail(self, service):
 

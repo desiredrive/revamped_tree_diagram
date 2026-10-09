@@ -96,7 +96,13 @@ class Interfaces:
 
         # 5. Queues and Counters
         queues = interface_path.get('queues', {})
-        self.iiqdrops = queues.get('input_queue_drops', 0)
+        # Both spellings are set on purpose: `iqdrops` is the declared
+        # attribute and what cef.py and the AP checks read, while
+        # dhcp_troubleshooting and checks/dhcp read `iiqdrops`. Assigning only
+        # the doubled-i name left `iqdrops` at its 0 default, so input queue
+        # drops always reported as zero.
+        self.iqdrops = queues.get('input_queue_drops', 0)
+        self.iiqdrops = self.iqdrops
         self.outputdrops = queues.get('total_output_drop', 0)
 
         counters = interface_path.get('counters', {})
