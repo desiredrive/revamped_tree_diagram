@@ -2005,8 +2005,14 @@ class ApCefToWlc(_ApCheck):
             nexthops = getattr(cef, "nexthops", None) or []
             hops = [h.get("nexthop") for h in nexthops if h.get("nexthop")]
             oifs = [h.get("oif") for h in nexthops if h.get("oif")]
+            # The (address, interface) pairs are kept intact alongside the
+            # flattened lists: an adjacency is keyed on both together, so
+            # parallel lists would lose which next-hop sits on which port.
+            pairs = [(h.get("nexthop"), h.get("oif")) for h in nexthops
+                     if h.get("nexthop")]
             entries[mgmt_ip] = {"prefix": prefix, "nexthops": hops,
-                                "oifs": oifs, "sources": getattr(cef, "sources", None),
+                                "oifs": oifs, "pairs": pairs,
+                                "sources": getattr(cef, "sources", None),
                                 "is_mpls": bool(getattr(cef, "ismpls", False))}
 
             if not nexthops:
@@ -2055,8 +2061,14 @@ class ApCefToWlc(_ApCheck):
         ctx.state["ap_wlc_cef"] = entries
         for e in entries.values():
             if e.get("prefix"):
+                # No separate adjacency object: the PD pass entrypoint
+                # validate_route_with_adjacencies() takes only the prefix and
+                # derives the adjacencies itself, re-reading CEF and pairing
+                # each nexthop with its interface. Recording them here would
+                # queue the same hardware walk twice.
                 record_pd_object(ctx, "fib_entry", radkit_hostname=hostname,
                                  prefix=e.get("prefix"), vrf="default")
+
 
         if any(not e.get("forwarding") for e in entries.values()):
             return CheckResult(
