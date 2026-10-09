@@ -1950,14 +1950,23 @@ class ApRouteToWlc(_ApCheck):
                 + "\n".join(f"• {u}" for u in unreadable),
                 data={"errors": unreadable})
 
+        # A WLC whose route could not be read was not checked. Reporting the
+        # others as "every WLC" would state a clean result for a path nothing
+        # verified, so an unreadable route fails even when a sibling WLC reads
+        # fine -- the tool could not answer the question it was asked.
+        if unreadable:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"{hostname} could not be checked against every WLC:\n\n"
+                + "\n".join(lines
+                             + ["• Could not be read: " + "; ".join(unreadable)]),
+                data={"routes": routes, "errors": unreadable})
+
         ctx.state["ap_wlc_routes"] = routes
         _record_pd(ctx, "route",
                    [{"device": hostname, "prefix": r.get("prefix"),
                      "vrf": "default"} for r in routes.values()
                     if r.get("reachable")])
-
-        if unreadable:
-            lines.append("• Could not be read: " + "; ".join(unreadable))
 
         if any(not r.get("reachable") for r in routes.values()):
             return CheckResult(
@@ -2051,14 +2060,21 @@ class ApCefToWlc(_ApCheck):
                 + "\n".join(f"• {u}" for u in unreadable),
                 data={"errors": unreadable})
 
+        # As in the route check: a WLC whose CEF entry could not be read was
+        # not checked, so the others cannot be reported as "every WLC".
+        if unreadable:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"{hostname} could not be checked against every WLC:\n\n"
+                + "\n".join(lines
+                             + ["• Could not be read: " + "; ".join(unreadable)]),
+                data={"cef": entries, "errors": unreadable})
+
         ctx.state["ap_wlc_cef"] = entries
         _record_pd(ctx, "fib entry",
                    [{"device": hostname, "prefix": e.get("prefix"),
                      "vrf": "default"} for e in entries.values()
                     if e.get("prefix")])
-
-        if unreadable:
-            lines.append("• Could not be read: " + "; ".join(unreadable))
 
         if any(not e.get("forwarding") for e in entries.values()):
             return CheckResult(
@@ -2144,6 +2160,7 @@ class ApPhysicalPathToWlc(_ApCheck):
                 continue
             except BaseException as e:
                 unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
+                unverified.append(mgmt_ip)
                 continue
 
             # total_phys is a list per next-hop; flatten and de-duplicate
