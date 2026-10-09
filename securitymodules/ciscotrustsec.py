@@ -54,7 +54,10 @@ def cts_all_parser(output):
 def rbaclparser(aclop):
     aces=[]
     matches = ["#", "show", "ACEs:"]
-    for line in aclop.splitlines():
+    # None when the policy carries no named RBACL -- an implicit permit-all
+    # default, or a name the device does not resolve. Either way there are no
+    # ACEs to list, which is not the same as the lookup having failed.
+    for line in (aclop or "").splitlines():
         if not any(x  in line for x in matches):
             line = line.strip()
             if line != '':
@@ -160,10 +163,17 @@ class cts_endpoint_info():
         #CEF SGT Perspective (manual parsing)
         cefinternal_cmd = "show ip cef {} {} internal | i SGT".format(vrf_mode, self.endpoint_ip)
         cefinternal_op = radkit_cli.get_any_single_output(self.hostname, cefinternal_cmd, service)
+        # 0 is the real answer, not a placeholder: an endpoint CEF carries no
+        # SGT for is Unknown/SGT 0, which policy matches like any other group.
+        # The command returns nothing at all for such a prefix, so None here
+        # means "no SGT", not "lookup failed" -- reading it unguarded raised
+        # AttributeError for every unclassified endpoint.
         self.cefsgt = 0
-        for line in cefinternal_op.splitlines():
+        for line in (cefinternal_op or "").splitlines():
             if "RBAC" in line:
-                self.cefsgt = re.compile("(?<=SGT).*(?=S)").search(line).group().strip()
+                match = re.compile("(?<=SGT).*(?=S)").search(line)
+                if match:
+                    self.cefsgt = match.group().strip()
 
     def cts_class_method(self,interface, binding, service):
         #Binding format must be:     #Binding Format = {'ip': x.x.x.x, 'sgt': x, 'source' : }
@@ -341,6 +351,11 @@ class cts_rules():
                 self.rbacl = None
 
     def cts_rbac_rbacls(self, rbacl, service):
+        # cts_rbac_permissions sets self.rbacl to None for an implicit
+        # permit-all default, and callers pass it straight back here.
+        if not rbacl:
+            self.aces = []
+            return
         rbaclcmd = "show cts rbacl \"{}\" | se ACEs".format(rbacl)
         rbaclop = radkit_cli.get_any_single_output(self.hostname, rbaclcmd,service)
         aces = rbaclparser(rbaclop)
