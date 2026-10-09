@@ -29,6 +29,7 @@ from checks.ap_onboarding import (
     ApRouteToWlc,
     ApCefToWlc,
     ApPhysicalPathToWlc,
+    ApCapwapAccessLists,
     ApAuthTemplate,
     ApDeviceClassifier,
     ApAuthenticationSession,
@@ -218,6 +219,9 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApRouteToWlc(),
             ApCefToWlc(),
             ApPhysicalPathToWlc(),
+            # ACLs on that same CEF-derived path, for the AP's
+            # CAPWAP join to the controller.
+            ApCapwapAccessLists(),
             # What the switch reports to AAA about the AP, which is what
             # profiling policy matches on.
             ApAccountingAttributes(),
