@@ -31,6 +31,7 @@ from checks.ap_onboarding import (
     ApPhysicalPathToWlc,
     ApCapwapAccessLists,
     ApDhcpAccessLists,
+    ApTrustSecPolicy,
     ApAuthTemplate,
     ApDeviceClassifier,
     ApAuthenticationSession,
@@ -258,6 +259,11 @@ def build_check_chain(payload: dict) -> list[Check]:
             # yet.
             ApCapwapAccessLists(),
             ApDhcpAccessLists(),
+            # Below the ACLs: an SGACL denies traffic the access lists
+            # permit, and is invisible to them. Same prerequisites -- the
+            # AP's address for its SGT, the SVI for one of the two source
+            # groups -- so it runs alongside them.
+            ApTrustSecPolicy(),
             ApL3LispInstance(),
             ApL3LispDynamicEid(),
             ApL3LispDatabase(),
