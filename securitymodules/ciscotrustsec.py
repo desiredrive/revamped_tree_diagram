@@ -244,23 +244,32 @@ class cts_endpoint_info():
                 #Validate if the required VLAN is on the enforcement list
                 ctsvlanlistcmd = "show running-config | i cts role-based enforcement vlan"
                 ctsvlanlistop = radkit_cli.get_any_single_output(self.hostname, ctsvlanlistcmd,service)    
-                matches = ['#', ""]    
-                for i in ctsvlanlistop.splitlines():
-                    if not any(x in i for x in matches):
-                        vlan_list = i.split('vlan-list')[1]
-                        vlans_to_check = vlan
-                        allowed_vlans = set()
-                        parts = vlan_list.split(',')
-                        for part in parts:
+                # The empty string is a substring of every line, so the old
+                # ['#', ""] filter skipped all of them and the vlan-list was
+                # never read -- enforcingvlan stayed unset no matter which
+                # VLAN was asked about. Select the vlan-list line directly.
+                self.enforcingvlan = False
+                for line in (ctsvlanlistop or "").splitlines():
+                    line = line.strip()
+                    if (not line or line.startswith('#')
+                            or line.startswith('no ')
+                            or 'vlan-list' not in line):
+                        continue
+                    allowed_vlans = set()
+                    for part in line.split('vlan-list')[1].split(','):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        try:
                             if '-' in part:
                                 start, end = map(int, part.split('-'))
                                 allowed_vlans.update(range(start, end + 1))
                             else:
                                 allowed_vlans.add(int(part))
-                        self.enforcingvlan = False
-                        for i in allowed_vlans:
-                            if vlans_to_check == i:
-                                self.enforcingvlan = True        
+                        except ValueError:
+                            continue
+                    if int(vlan) in allowed_vlans:
+                        self.enforcingvlan = True
         else:
             self.vlanenforcement = False
         if vlan is None:
