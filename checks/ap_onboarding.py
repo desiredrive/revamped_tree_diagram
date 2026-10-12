@@ -4754,19 +4754,28 @@ class ApBorderCapwapAcls(_ApCheck):
     `acl_entry` is PD-eligible -- recorded for the later platform pass.
     """
 
-    def __init__(self, idx: int, node_id: str, hostname: str, mgmt: str):
+    def __init__(self, idx: int, node_id: str, hostname: str, mgmt: str,
+                 label: str = None):
         self.idx = idx
         self.target_node_id = node_id
+        # `hostname` is the RADKit inventory name, which every device query
+        # is keyed on; `label` is what Catalyst Center calls the border, and
+        # is the name the operator recognises. They are frequently different,
+        # so the one that is queried with is not the one that is shown.
         self.hostname = hostname
+        self.label = label or hostname
         self.mgmt = mgmt
-        self.name = f"Border CAPWAP ACLs [{hostname}]"
-        self.running_note = f"Evaluating CAPWAP ACLs on {hostname}…"
+        self.name = f"Border CAPWAP ACLs [{self.label}]"
+        self.running_note = f"Evaluating CAPWAP ACLs on {self.label}…"
 
     def run_ap(self, ctx: RunContext) -> CheckResult:
         ap_ip = ctx.state.get("ap_ip")
         wlcs = ctx.state.get("ap_wlc_candidates") or []
+        # Queries are keyed on the RADKit name; everything the operator
+        # reads carries the Catalyst Center name.
         host = self.hostname
-        data = {"border": host, "ap_ip": ap_ip}
+        shown = self.label
+        data = {"border": shown, "radkit_hostname": host, "ap_ip": ap_ip}
 
         if not ap_ip:
             return CheckResult(
@@ -4787,13 +4796,13 @@ class ApBorderCapwapAcls(_ApCheck):
             except BaseException as e:
                 unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
                 sections.append(
-                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {host}:"
+                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {shown}:"
                     f"\n\n  Path could not be resolved — {e}")
                 continue
 
             if not interfaces:
                 sections.append(
-                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {host}:"
+                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {shown}:"
                     f"\n\n  CEF resolves onto no physical interface, so no ACL "
                     f"on the path can be evaluated.")
                 unreadable.append(f"{mgmt_ip}: no CEF interface")
@@ -4830,7 +4839,7 @@ class ApBorderCapwapAcls(_ApCheck):
                 record_pd_object(ctx, "acl_entry", radkit_hostname=host,
                                  acl=acl, interfaces=list(interfaces))
 
-            header = f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {host}"
+            header = f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {shown}"
             path = ", ".join(interfaces)
             if not names:
                 sections.append(
@@ -4845,16 +4854,16 @@ class ApBorderCapwapAcls(_ApCheck):
         if blocked:
             return CheckResult(
                 CheckStatus.WARN,
-                f"An ACL on {host} is blocking the AP's CAPWAP join.\n\n"
+                f"An ACL on {shown} is blocking the AP's CAPWAP join.\n\n"
                 + body, data=dict(data, errors=unreadable))
         if unreadable:
             return CheckResult(
                 CheckStatus.WARN,
-                f"CAPWAP could not be fully evaluated on {host}.\n\n" + body,
+                f"CAPWAP could not be fully evaluated on {shown}.\n\n" + body,
                 data=dict(data, errors=unreadable))
         return CheckResult(
             CheckStatus.OK,
-            f"No ACL on {host} blocks the AP's CAPWAP join.\n\n" + body,
+            f"No ACL on {shown} blocks the AP's CAPWAP join.\n\n" + body,
             data=data)
 
 
@@ -5050,9 +5059,33 @@ class ApBorderDiscovery(_ApCheck):
             if status and status.lower() != "reachable":
                 lines.append(f"• {host} ({mgmt or '—'}) — {status}, not queried")
                 continue
-            lines.append(f"• {host} ({mgmt or '—'})")
+
+            # Catalyst Center names a border by its FQDN; RADKit's inventory
+            # is keyed on the management address, and the two rarely agree.
+            # Sending the CatC name straight to RADKit failed the lookup --
+            # "Device not found in RSA Inventory" -- for a border that was
+            # present and reachable all along, so the device name is resolved
+            # from the address here, exactly as the edge's is.
+            device = None
+            if mgmt:
+                try:
+                    from transport import get_transport
+                    names = get_transport().inventory_filter(
+                        ctx.service, "host", "^{}$".format(mgmt))
+                    device = names[0] if names else None
+                except BaseException:
+                    device = None
+            if not device:
+                lines.append(
+                    f"• {host} ({mgmt or '—'}) — not in the RADKit "
+                    f"inventory, not queried")
+                continue
+
+            shown = host if device == host else f"{host} as {device}"
+            lines.append(f"• {shown} ({mgmt})")
             followups.append(ApBorderCapwapAcls(
-                idx=idx, node_id=node_id, hostname=host, mgmt=mgmt or host))
+                idx=idx, node_id=node_id, hostname=device, mgmt=mgmt,
+                label=host))
 
         return CheckResult(
             CheckStatus.OK,
