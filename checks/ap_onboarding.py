@@ -2476,9 +2476,14 @@ class ApCapwapAccessLists(_ApCheck):
 
         body = "\n\n".join(sections)
 
+        # WARN, not FAIL. An ACL the parser cannot read is a gap in the
+        # diagnosis, not the tool being unable to continue -- and FAIL sets
+        # `ap_stop`, which silently skips every check below this one. One
+        # unparseable ACL name was blanking the SGACL and L3 LISP
+        # validations in every real run.
         if unreadable and not any(k != "ap_ip" for k in data):
             return CheckResult(
-                CheckStatus.FAIL,
+                CheckStatus.WARN,
                 f"Could not evaluate the ACLs toward any WLC from "
                 f"{hostname}.\n\n" + body,
                 data=dict(data, errors=unreadable))
@@ -2495,7 +2500,7 @@ class ApCapwapAccessLists(_ApCheck):
 
         if unreadable:
             return CheckResult(
-                CheckStatus.FAIL,
+                CheckStatus.WARN,
                 f"{hostname} could not be checked against every WLC.\n\n"
                 + body, data=dict(data, errors=unreadable))
 
@@ -3046,7 +3051,7 @@ class ApDhcpAccessLists(_ApCheck):
 
         if unreadable:
             return CheckResult(
-                CheckStatus.FAIL,
+                CheckStatus.WARN,
                 f"DHCP could not be fully evaluated on {hostname}.\n\n"
                 + body, data=dict(data, errors=unreadable))
 
