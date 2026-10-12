@@ -32,6 +32,7 @@ from checks.ap_onboarding import (
     ApCapwapAccessLists,
     ApDhcpAccessLists,
     ApTrustSecPolicy,
+    ApCefToAp,
     ApBorderDiscovery,
     ApAuthTemplate,
     ApDeviceClassifier,
@@ -253,6 +254,11 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApL2LispDatabase(),
             ApL2LispRegistration(),
             ApIpAddress(),
+            # Manifest line 64. The reverse direction of ApCefToWlc: not can
+            # the AP reach the controller, but can the Edge reach the AP --
+            # which is the direction the CAPWAP replies travel in. Needs the
+            # address ApIpAddress resolves.
+            ApCefToAp(),
             # Both ACL checks evaluate flows sourced from the AP's own
             # address, so they run after ApIpAddress resolves it. Placed
             # earlier they skipped every run, reporting "no address" for an

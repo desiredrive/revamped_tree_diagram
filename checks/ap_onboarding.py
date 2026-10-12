@@ -4858,6 +4858,132 @@ class ApBorderCapwapAcls(_ApCheck):
             data=data)
 
 
+class ApCefToAp(_ApCheck):
+    """The Edge's own CEF entry for the AP.
+
+    Manifest line 64. Every check above asks whether the AP can reach
+    something; this one asks whether the Edge can reach the AP, which is the
+    direction the CAPWAP replies and the DHCP offers travel in.
+
+    Three things make the entry a fabric entry rather than merely a route:
+
+      * `att` -- the prefix is attached, so the Edge resolves it locally
+        instead of handing it to a covering prefix out of the fabric.
+      * a LISP subblock -- the Edge treats the AP as a local EID, which is
+        what makes it register the address to the control plane. A host the
+        Edge forwards to correctly but does not hold as an EID is reachable
+        on this switch and nowhere else in the fabric.
+      * an adjacency out of the INFRA_VN SVI -- the AP resolves onto the
+        VLAN it onboards in, not onto some other interface.
+
+    `fib entry` is a PD-eligible object -- recorded for the later platform
+    pass, which re-reads CEF and derives the adjacencies itself.
+    """
+
+    name = "AP CEF entry"
+    target_node_id = "xtr"
+    running_note = "Reading the Edge's CEF entry for the AP"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        ap_ip = ctx.state.get("ap_ip")
+        if not ap_ip:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the AP's IP address is not known (see AP IP "
+                "Address).")
+
+        svi = ctx.state.get("ap_svi")
+        vlan = ctx.state.get("ap_infra_vlan")
+
+        from routingmodules.cef import IPCef
+        cef = IPCef(ap_ip, "default", hostname)
+        try:
+            cef.get_cef_internal(ctx.service)
+        except BaseException as e:
+            # A prefix the switch does not hold at all parses to nothing and
+            # raises here, which is itself the finding: the Edge has no
+            # forwarding entry for the AP.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} has no readable CEF entry for the AP {ap_ip} "
+                f"({type(e).__name__}: {e}). Without one the Edge cannot "
+                f"forward the controller's replies back to the AP.",
+                data={"error": str(e)})
+
+        prefix = getattr(cef, "prefix", None)
+        nexthops = getattr(cef, "nexthops", None) or []
+        pairs = [(h.get("nexthop"), h.get("oif")) for h in nexthops
+                 if h.get("nexthop")]
+
+        # IPCef keeps the next-hops but drops the flags and subblocks, and
+        # those are what say the entry is a fabric entry rather than just a
+        # route. Re-read the parsed output for them.
+        flags, has_lisp = [], False
+        from radkit_cli import get_single_output_genie
+        raw = get_single_output_genie(
+            hostname, "show ip cef  {} internal".format(ap_ip), ctx.service)
+        try:
+            entry = raw['vrf']['default']['address_family']['ipv4']['prefix']
+            entry = entry[list(entry)[0]]
+            flags = entry.get("flags") or []
+            has_lisp = "LISP" in (entry.get("subblocks") or {})
+        except (TypeError, KeyError, IndexError):
+            pass
+
+        attached = "att" in flags
+        data = {"prefix": prefix, "pairs": pairs, "flags": flags,
+                "lisp_eid": has_lisp, "attached": attached,
+                "sources": getattr(cef, "sources", None)}
+
+        if prefix:
+            record_pd_object(ctx, "fib_entry", radkit_hostname=hostname,
+                             prefix=prefix, vrf="default")
+
+        detail = ", ".join(f"{nh} out {oif}" for nh, oif in pairs) or "nothing"
+        lines = [f"• Prefix: {prefix or 'none'}",
+                 f"• Resolves to: {detail}",
+                 f"• Flags: {', '.join(flags) if flags else 'none'}",
+                 f"• LISP local EID: {'yes' if has_lisp else 'no'}"]
+        body = "\n".join(lines)
+
+        problems = []
+        if not nexthops:
+            problems.append(
+                "the entry resolves to no next-hop, so the Edge does not "
+                "forward to the AP at all")
+        if not attached:
+            problems.append(
+                "the prefix is not attached, so the Edge resolves it through "
+                "a covering prefix instead of locally")
+        if not has_lisp:
+            problems.append(
+                "the Edge does not hold the AP as a LISP EID, so it will not "
+                "register the address to the control plane and the AP is "
+                "reachable on this switch only")
+        # The SVI is only graded when one is known; an AP whose VLAN was never
+        # resolved is not evidence of a wrong interface.
+        oifs = [oif for _nh, oif in pairs if oif]
+        if svi and oifs and svi not in oifs:
+            problems.append(
+                f"the adjacency is out of {', '.join(oifs)}, not the "
+                f"INFRA_VN SVI {svi}")
+
+        if problems:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} forwards to the AP {ap_ip}, but "
+                + "; ".join(problems) + ":\n\n" + body,
+                data=data)
+
+        where = f" on {svi}" if svi else (f" in VLAN {vlan}" if vlan else "")
+        return CheckResult(
+            CheckStatus.OK,
+            f"{hostname} holds the AP {ap_ip} as an attached LISP EID"
+            f"{where}:\n\n" + body,
+            data=data)
+
+
 class ApBorderDiscovery(_ApCheck):
     """Draw the fabric site's borders and queue a CAPWAP ACL check on each.
 
