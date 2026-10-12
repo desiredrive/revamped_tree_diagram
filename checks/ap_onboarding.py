@@ -1867,7 +1867,8 @@ class ApAccountingAttributes(_ApCheck):
         )
 
 
-from checks.shared import _cef_interfaces, _evaluate_acls  # noqa: F401
+from checks.shared import (  # noqa: F401
+    _cef_interfaces, _evaluate_acls, render_acl_section)
 
 
 def _dhcp_relay(ctx, hostname):
@@ -2397,12 +2398,14 @@ class ApCapwapAccessLists(_ApCheck):
                 + ", then run this flow again.",
                 data={"ap_ip": None, "needs_dhcp": True, "vlan": vlan})
 
-        lines, data, blocked, unreadable = [], {"ap_ip": ap_ip}, [], []
+        sections, data, blocked, unreadable = [], {"ap_ip": ap_ip}, [], []
         for wlc_host, mgmt_ip, _node in wlcs:
             try:
                 interfaces = _cef_interfaces(ctx, hostname, mgmt_ip)
             except SystemExit as e:
-                lines.append(f"• {wlc_host} ({mgmt_ip}): {e}")
+                sections.append(
+                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}):\n\n"
+                    f"  Path could not be resolved — {e}")
                 unreadable.append(f"{mgmt_ip}: {e}")
                 continue
             except BaseException as e:
@@ -2410,9 +2413,10 @@ class ApCapwapAccessLists(_ApCheck):
                 continue
 
             if not interfaces:
-                lines.append(
-                    f"• {wlc_host} ({mgmt_ip}): CEF resolves onto no physical "
-                    f"interface, so no ACL on the path can be evaluated.")
+                sections.append(
+                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}):\n\n"
+                    f"  CEF resolves onto no physical interface, so no ACL "
+                    f"on the path can be evaluated.")
                 unreadable.append(f"{mgmt_ip}: no CEF interface")
                 continue
 
@@ -2425,14 +2429,17 @@ class ApCapwapAccessLists(_ApCheck):
             if ap_port and ap_port not in interfaces:
                 interfaces = list(interfaces) + [ap_port]
 
+            # The addresses are stated once in the section header, so a
+            # label carries only what varies per flow: which service and
+            # which direction.
             flows = []
             for port in (5246, 5247):
                 kind = "control" if port == 5246 else "data"
-                flows.append({"label": f"{ap_ip} → {mgmt_ip} UDP/{port} ({kind})",
+                flows.append({"label": f"CAPWAP {kind} (UDP/{port}), AP to WLC",
                               "sourceip": ap_ip, "destinationip": mgmt_ip,
                               "protocol": "udp", "srcport": 1024,
                               "dstport": port})
-                flows.append({"label": f"{mgmt_ip} → {ap_ip} UDP/{port} ({kind})",
+                flows.append({"label": f"CAPWAP {kind} (UDP/{port}), WLC to AP",
                               "sourceip": mgmt_ip, "destinationip": ap_ip,
                               "protocol": "udp", "srcport": port,
                               "dstport": 1024})
@@ -2445,7 +2452,8 @@ class ApCapwapAccessLists(_ApCheck):
                 continue
 
             if unevaluated:
-                unreadable.extend(f"{mgmt_ip}: {u}" for u in unevaluated)
+                unreadable.extend(f"{mgmt_ip}: {a} ({r})"
+                                  for a, _f, r in unevaluated)
 
             data[mgmt_ip] = {"interfaces": interfaces, "acls": names,
                              "denies": denies, "unevaluated": unevaluated}
@@ -2453,57 +2461,48 @@ class ApCapwapAccessLists(_ApCheck):
                 record_pd_object(ctx, "acl_entry", radkit_hostname=hostname,
                                  acl=acl, interfaces=list(interfaces))
 
-            if not names:
-                lines.append(
-                    f"• {wlc_host} ({mgmt_ip}): no ACL applied on "
-                    f"{', '.join(interfaces)}, so nothing there blocks CAPWAP.")
-            elif denies:
+            header = (f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip})")
+            path = ", ".join(interfaces)
+            if denies:
                 blocked.append(mgmt_ip)
-                lines.extend(f"• {d}" for d in denies)
+            if not names:
+                sections.append(
+                    f"{header}, via {path}:\n\n"
+                    f"  No ACL is applied, so nothing here blocks CAPWAP.")
             else:
-                detail = "; ".join(permits) if permits else \
-                    f"checked {', '.join(names)}"
-                lines.append(
-                    f"• {wlc_host} ({mgmt_ip}): CAPWAP is not blocked on "
-                    f"{', '.join(interfaces)} ({detail}).")
+                sections.append(render_acl_section(
+                    header, path, blocked=denies, permitted=permits,
+                    unread=unevaluated))
+
+        body = "\n\n".join(sections)
 
         if unreadable and not any(k != "ap_ip" for k in data):
             return CheckResult(
                 CheckStatus.FAIL,
                 f"Could not evaluate the ACLs toward any WLC from "
-                f"{hostname}:\n" + "\n".join(f"• {u}" for u in unreadable),
+                f"{hostname}.\n\n" + body,
                 data=dict(data, errors=unreadable))
 
         # A deny outranks an unreadable ACL: it is a concrete, actionable
-        # finding, so it is reported first with the gaps noted alongside it
-        # rather than being hidden behind a "could not read" failure.
+        # finding, so it is reported first. The gaps are already in each
+        # section's "Not evaluated" block, so they need no separate line.
         if blocked:
             return CheckResult(
                 CheckStatus.WARN,
                 f"An ACL on the path to the WLC is blocking the AP's CAPWAP "
-                f"join:\n\n" + "\n".join(
-                    lines + (["• Could not be read: " + "; ".join(unreadable)]
-                             if unreadable else [])),
+                f"join.\n\n" + body,
                 data=dict(data, errors=unreadable) if unreadable else data)
 
         if unreadable:
             return CheckResult(
                 CheckStatus.FAIL,
-                f"{hostname} could not be checked against every WLC:\n\n"
-                + "\n".join(lines
-                            + ["• Could not be read: " + "; ".join(unreadable)]),
-                data=dict(data, errors=unreadable))
-
-        if blocked:
-            return CheckResult(
-                CheckStatus.WARN,
-                f"An ACL on the path to the WLC is blocking the AP's CAPWAP "
-                f"join:\n\n" + "\n".join(lines), data=data)
+                f"{hostname} could not be checked against every WLC.\n\n"
+                + body, data=dict(data, errors=unreadable))
 
         return CheckResult(
             CheckStatus.OK,
             f"No ACL on the path from {hostname} blocks CAPWAP "
-            f"(UDP/5246 and UDP/5247):\n\n" + "\n".join(lines), data=data)
+            f"(UDP/5246 and UDP/5247).\n\n" + body, data=data)
 
 
 class ApInterfaceStatus(_ApCheck):

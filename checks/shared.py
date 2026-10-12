@@ -108,6 +108,14 @@ def _cef_interfaces(ctx, hostname, dst_ip):
     return intfs
 
 
+def _join(items):
+    """Join labels for prose: "a", "a and b", "a, b and c"."""
+    items = list(items)
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
 def _evaluate_acls(ctx, hostname, interfaces, flows):
     """Evaluate every ACL on `interfaces` against each flow in `flows`.
 
@@ -127,23 +135,66 @@ def _evaluate_acls(ctx, hostname, interfaces, flows):
         names.extend(getattr(acls, "aclnames", None) or [])
     names = sorted(set(names))
 
-    denies, permits, unevaluated = [], [], []
+    denies, permits = [], []
+    # Keyed by (acl, reason) so one unreadable ACL is reported once with the
+    # flows it affected, not once per flow. Four near-identical sentences
+    # repeating the same TypeError is noise that buries the actual finding.
+    reasons: dict = {}
     for acl in names:
         for flow in flows:
             ev = {k: v for k, v in flow.items() if k != "label"}
             try:
                 hit = acl_evaluation(ctx.service, hostname, acl, False, ev)
             except BaseException as e:
-                unevaluated.append(
-                    f"{acl} could not be evaluated against {flow['label']} "
-                    f"({type(e).__name__}: {e})")
+                reasons.setdefault(
+                    (acl, f"{type(e).__name__}: {e}"), []).append(flow["label"])
                 continue
             if not hit or len(hit) < 3:
-                unevaluated.append(
-                    f"{acl} returned no verdict for {flow['label']}")
+                reasons.setdefault(
+                    (acl, "no verdict returned"), []).append(flow["label"])
                 continue
+            # (flow, detail) pairs: the renderer puts the flow first and
+            # the ACL that decided it second, so a reader scans what broke
+            # before why.
             if hit[1] == "deny":
-                denies.append(f"{acl} denies {flow['label']} at sequence {hit[2]}")
+                denies.append((flow["label"], f"{acl}, sequence {hit[2]}"))
             elif hit[1] == "permit":
-                permits.append(f"{acl} permits {flow['label']} (sequence {hit[2]})")
+                permits.append((flow["label"], f"{acl}, sequence {hit[2]}"))
+    # (acl, flows, reason) triples. Flows that failed identically collapse
+    # to "all N flows" rather than being spelled out.
+    unevaluated = []
+    for (acl, reason), labels in reasons.items():
+        covered = (f"all {len(flows)} flows" if len(labels) == len(flows)
+                   else _join(labels))
+        unevaluated.append((acl, covered, reason))
     return names, denies, permits, unevaluated
+
+
+def render_acl_section(header, path, blocked=(), permitted=(), unread=()):
+    """Render one destination's ACL findings as an indented section.
+
+    A flat bullet list forced every line to repeat the addresses and the
+    interface, which buried the one line the reader acts on. Stating the
+    path once in a header and splitting blocked from not-evaluated keeps a
+    deny visible next to the gaps around it.
+
+    `blocked` and `permitted` are (flow, detail) pairs; `unread` is
+    (acl, flows, reason) triples.
+    """
+    out = [header + (f", via {path}:" if path else ":")]
+    if blocked:
+        out.append("")
+        out.append("  Blocked")
+        out += [f"    • {flow} — {detail}" for flow, detail in blocked]
+    if permitted and not blocked:
+        out.append("")
+        out.append("  Permitted")
+        out += [f"    • {flow} — {detail}" for flow, detail in permitted]
+    if unread:
+        out.append("")
+        out.append("  Not evaluated")
+        for acl, flows, reason in unread:
+            out.append(f"    • {acl} — {flows}")
+            if reason:
+                out.append(f"      {reason}")
+    return "\n".join(out)
