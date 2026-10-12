@@ -4737,3 +4737,202 @@ class ApTrustSecPolicy(_ApCheck):
             CheckStatus.OK,
             f"No SGACL enforced on {hostname} blocks the AP's traffic.\n\n"
             + "\n\n".join(sections), data=data)
+
+
+class ApBorderCapwapAcls(_ApCheck):
+    """CAPWAP ACLs on one border, for the AP's path to its controller.
+
+    The WLC sits outside the fabric, so the AP reaches it through a border --
+    `ApRouteToWlc` resolves a default route for exactly that reason. An ACL on
+    the border therefore drops the join as surely as one on the edge, and the
+    edge-side checks cannot see it.
+
+    Same evaluation as the edge: CEF on the border resolves the outgoing
+    interfaces toward the controller, and every ACL on them is asked about
+    both CAPWAP ports, both directions.
+
+    `acl_entry` is PD-eligible -- recorded for the later platform pass.
+    """
+
+    def __init__(self, idx: int, node_id: str, hostname: str, mgmt: str):
+        self.idx = idx
+        self.target_node_id = node_id
+        self.hostname = hostname
+        self.mgmt = mgmt
+        self.name = f"Border CAPWAP ACLs [{hostname}]"
+        self.running_note = f"Evaluating CAPWAP ACLs on {hostname}…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        ap_ip = ctx.state.get("ap_ip")
+        wlcs = ctx.state.get("ap_wlc_candidates") or []
+        host = self.hostname
+        data = {"border": host, "ap_ip": ap_ip}
+
+        if not ap_ip:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the AP has no known IPv4 address, so there is no "
+                "source address to evaluate the CAPWAP flow against.",
+                data=data)
+        if not wlcs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery).",
+                data=data)
+
+        sections, blocked, unreadable = [], [], []
+        for wlc_host, mgmt_ip, _node in wlcs:
+            try:
+                interfaces = _cef_interfaces(ctx, host, mgmt_ip)
+            except BaseException as e:
+                unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
+                sections.append(
+                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {host}:"
+                    f"\n\n  Path could not be resolved — {e}")
+                continue
+
+            if not interfaces:
+                sections.append(
+                    f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {host}:"
+                    f"\n\n  CEF resolves onto no physical interface, so no ACL "
+                    f"on the path can be evaluated.")
+                unreadable.append(f"{mgmt_ip}: no CEF interface")
+                continue
+
+            flows = []
+            for port in (5246, 5247):
+                kind = "control" if port == 5246 else "data"
+                flows.append({"label": f"CAPWAP {kind} (UDP/{port}), AP to WLC",
+                              "sourceip": ap_ip, "destinationip": mgmt_ip,
+                              "protocol": "udp", "srcport": 1024,
+                              "dstport": port})
+                flows.append({"label": f"CAPWAP {kind} (UDP/{port}), WLC to AP",
+                              "sourceip": mgmt_ip, "destinationip": ap_ip,
+                              "protocol": "udp", "srcport": port,
+                              "dstport": 1024})
+
+            try:
+                names, denies, permits, unevaluated = _evaluate_acls(
+                    ctx, host, interfaces, flows)
+            except BaseException as e:
+                unreadable.append(f"{mgmt_ip}: {type(e).__name__}: {e}")
+                continue
+
+            if unevaluated:
+                unreadable.extend(f"{mgmt_ip}: {a} ({r})"
+                                  for a, _f, r in unevaluated)
+            if denies:
+                blocked.append(mgmt_ip)
+
+            data[mgmt_ip] = {"interfaces": interfaces, "acls": names,
+                             "denies": denies, "unevaluated": unevaluated}
+            for acl in names:
+                record_pd_object(ctx, "acl_entry", radkit_hostname=host,
+                                 acl=acl, interfaces=list(interfaces))
+
+            header = f"AP {ap_ip} → WLC {wlc_host} ({mgmt_ip}), on {host}"
+            path = ", ".join(interfaces)
+            if not names:
+                sections.append(
+                    f"{header}, via {path}:\n\n"
+                    f"  No ACL is applied, so nothing here blocks CAPWAP.")
+            else:
+                sections.append(render_acl_section(
+                    header, path, blocked=denies, permitted=permits,
+                    unread=unevaluated))
+
+        body = "\n\n".join(sections)
+        if blocked:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"An ACL on {host} is blocking the AP's CAPWAP join.\n\n"
+                + body, data=dict(data, errors=unreadable))
+        if unreadable:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"CAPWAP could not be fully evaluated on {host}.\n\n" + body,
+                data=dict(data, errors=unreadable))
+        return CheckResult(
+            CheckStatus.OK,
+            f"No ACL on {host} blocks the AP's CAPWAP join.\n\n" + body,
+            data=data)
+
+
+class ApBorderDiscovery(_ApCheck):
+    """Draw the fabric site's borders and queue a CAPWAP ACL check on each.
+
+    Manifest line 62 asks for ACLs on the borders, not only on the edge. The
+    WLC is outside the fabric, so the AP's CAPWAP session crosses a border on
+    the way out -- an ACL there blocks the join invisibly to every edge-side
+    check.
+
+    Borders are resolved from Catalyst Center rather than inferred from the
+    edge's next-hop: the next-hop is an underlay address that may be a
+    transit node, while what matters is which devices terminate the fabric.
+    """
+
+    name = "Border Discovery"
+    target_node_id = "xtr"
+    running_note = "Listing the fabric site's borders…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        fabric_id = ctx.state.get("fabric_id")
+        catc = ctx.state.get("catc_name")
+        if not fabric_id or not catc:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the fabric site is not known, so its borders "
+                "cannot be listed.")
+
+        try:
+            from traffic_flows.iptransit import in_site_fabric_borders
+            borders = in_site_fabric_borders(0, fabric_id, catc,
+                                             ctx.service) or []
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"Could not list the fabric site's borders "
+                f"({type(e).__name__}: {e}), so ACLs on the AP's path out of "
+                f"the fabric were not evaluated.")
+
+        if not borders:
+            return CheckResult(
+                CheckStatus.WARN,
+                "Catalyst Center reports no border for this fabric site. The "
+                "WLC sits outside the fabric, so without a border the AP has "
+                "no path to its controller at all.",
+                data={"ap_border_none": True})
+
+        add_nodes, followups, lines = [], [], []
+        for idx, b in enumerate(borders, start=1):
+            host = (b.get("hostname") if isinstance(b, dict)
+                    else getattr(b, "hostname", None)) or f"border{idx}"
+            mgmt = ((b.get("mgmtip") if isinstance(b, dict)
+                     else getattr(b, "mgmtip", None)) or "").strip()
+            status = ((b.get("status") if isinstance(b, dict)
+                       else getattr(b, "status", None)) or "").strip()
+
+            node_id = f"apborder-{idx}"
+            add_nodes.append({
+                "id": node_id, "role": "border", "label": host,
+                "ip": mgmt or None, "connect_to": "xtr",
+                "edge_label": "fabric",
+            })
+
+            # An unreachable border cannot be queried; reporting "no ACL" for
+            # a box we could not talk to would be a false clean.
+            if status and status.lower() != "reachable":
+                lines.append(f"• {host} ({mgmt or '—'}) — {status}, not queried")
+                continue
+            lines.append(f"• {host} ({mgmt or '—'})")
+            followups.append(ApBorderCapwapAcls(
+                idx=idx, node_id=node_id, hostname=host, mgmt=mgmt or host))
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"The fabric site has {len(borders)} border"
+            f"{'s' if len(borders) != 1 else ''}, each asked whether an ACL "
+            f"on it blocks the AP's path to the controller:\n\n"
+            + "\n".join(lines),
+            data={"add_nodes": add_nodes, "queue_checks": followups},
+        )

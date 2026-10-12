@@ -32,6 +32,7 @@ from checks.ap_onboarding import (
     ApCapwapAccessLists,
     ApDhcpAccessLists,
     ApTrustSecPolicy,
+    ApBorderDiscovery,
     ApAuthTemplate,
     ApDeviceClassifier,
     ApAuthenticationSession,
@@ -264,6 +265,11 @@ def build_check_chain(payload: dict) -> list[Check]:
             # AP's address for its SGT, the SVI for one of the two source
             # groups -- so it runs alongside them.
             ApTrustSecPolicy(),
+            # Manifest line 62: the same ACL question on the borders. The WLC
+            # is outside the fabric, so the CAPWAP session crosses a border
+            # on the way out and an ACL there is invisible to every
+            # edge-side check above.
+            ApBorderDiscovery(),
             ApL3LispInstance(),
             ApL3LispDynamicEid(),
             ApL3LispDatabase(),
