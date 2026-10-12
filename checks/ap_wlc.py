@@ -202,6 +202,28 @@ def _infra_vn_l2_vnid(vnid_mapping: dict):
     return None
 
 
+def _infra_vn_subnet(vnid_mapping: dict):
+    """The INFRA_VN's network as an ip_network, or None.
+
+    Taken from the WLC's own IP Address and Subnet columns rather than from
+    the VN name: the name embeds the subnet by Catalyst Center convention,
+    not by guarantee.
+    """
+    l2 = (vnid_mapping or {}).get("l2_vnid") or {}
+    for v in l2.values():
+        if "INFRA_VN" not in (v.get("name") or ""):
+            continue
+        addr, mask = v.get("ip_address"), v.get("subnet")
+        if not addr or addr == "0.0.0.0" or not mask:
+            return None
+        try:
+            import ipaddress
+            return ipaddress.ip_network(f"{addr}/{mask}", strict=False)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def _infra_vn_lines(vnid_mapping: dict):
     """Render the INFRA_VN VNIDs, or return an error string for a hard stop.
 
@@ -886,6 +908,11 @@ class ApWlcInfraVn(_PerWlcCheck):
         l2_vnid = _infra_vn_l2_vnid(vnid_mapping)
         if l2_vnid is not None:
             ctx.state.setdefault("ap_infra_l2_vnid", l2_vnid)
+        # Published for ApSviState, which grades the edge's gateway against
+        # the subnet the controller advertises for this VN.
+        subnet = _infra_vn_subnet(vnid_mapping)
+        if subnet is not None:
+            ctx.state.setdefault("ap_infra_subnet", str(subnet))
         return CheckResult(CheckStatus.OK, "\n".join(lines))
 
 

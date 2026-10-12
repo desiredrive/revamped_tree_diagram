@@ -2884,6 +2884,25 @@ class ApSviState(_ApCheck):
         # path is built on it, and an SVI that is process switching is not
         # forwarding the AP's traffic the way the design expects.
         problems = []
+        # The gateway must sit inside the subnet the WLC advertises for the
+        # INFRA_VN. If it does not, the edge and the controller disagree about
+        # what the AP's segment is: the AP gets a lease from one range and a
+        # gateway from another, and every reachability check downstream fails
+        # for a reason that looks like routing.
+        infra_subnet = ctx.state.get("ap_infra_subnet")
+        if infra_subnet and prefix:
+            try:
+                import ipaddress
+                net = ipaddress.ip_network(infra_subnet, strict=False)
+                if ipaddress.ip_address(prefix) not in net:
+                    problems.append(
+                        f"{svi} is addressed {prefix}, which is outside the "
+                        f"INFRA_VN subnet {net} the controller advertises for "
+                        f"this VN. The edge and the WLC disagree about the "
+                        f"AP's segment, so the AP cannot be both addressed "
+                        f"and routed correctly")
+            except (ValueError, TypeError):
+                pass
         if not helpers:
             problems.append(
                 f"{svi} has no helper address, so a DHCP request from the AP "
@@ -2894,12 +2913,17 @@ class ApSviState(_ApCheck):
                 f"CEF is not enabled on {svi}. The fabric data path requires "
                 f"it, so the AP's traffic is not being forwarded as designed")
 
+        # WARN, not FAIL: these are findings about the fabric, and FAIL sets
+        # `ap_stop`, which skips every remaining validation. A missing helper
+        # or a gateway outside the INFRA_VN subnet is exactly the kind of
+        # fault where the LISP, ACL and SGACL results still matter.
         if problems:
             return CheckResult(
-                CheckStatus.FAIL,
+                CheckStatus.WARN,
                 body + "\n\n" + "\n\n".join(problems),
                 data={"svi": svi, "svi_vrf": vrf,
-                      "helper_addresses": helpers, "cef": cef},
+                      "helper_addresses": helpers, "cef": cef,
+                      "infra_subnet": ctx.state.get("ap_infra_subnet")},
             )
 
         return CheckResult(
