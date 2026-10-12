@@ -3015,7 +3015,7 @@ class ApDhcpAccessLists(_ApCheck):
                 f"{type(e).__name__}: {e}",
                 data={"interfaces": interfaces})
 
-        unreadable.extend(unevaluated)
+        unreadable.extend(f"{a} ({r})" for a, _f, r in unevaluated)
         data = {"interfaces": interfaces, "acls": names, "denies": denies,
                 "helpers": helpers, "svi": svi_ip,
                 "unevaluated": unevaluated}
@@ -3024,44 +3024,9 @@ class ApDhcpAccessLists(_ApCheck):
                              acl=acl, interfaces=list(interfaces))
 
         where = ", ".join(interfaces)
-        # Deduplicated: the same unparseable ACL fails once per flow, and a
-        # dozen identical lines say no more than one does.
-        gaps = []
-        if unreadable:
-            seen, reasons = set(), []
-            for u in unreadable:
-                acl = u.split(" could not be evaluated", 1)[0]
-                why = u.rsplit("(", 1)[-1].rstrip(")") if "(" in u else u
-                if (acl, why) not in seen:
-                    seen.add((acl, why))
-                    reasons.append(f"• {acl} could not be read: {why}")
-            gaps = ["Not every ACL could be evaluated:"] + reasons
-
-        # A deny outranks an unreadable ACL: it is the actionable finding.
-        if denies:
-            # Grouped by ACL and sequence: a single rule denying DHCP is hit
-            # by most of the flows, and naming it once is what the reader
-            # needs to go and fix it.
-            by_rule = {}
-            for d in denies:
-                acl = d.split(" denies ", 1)[0]
-                seq = d.rsplit("sequence ", 1)[-1].rstrip(")")
-                by_rule.setdefault((acl, seq), []).append(
-                    d.split(" denies ", 1)[-1].rsplit(" at sequence", 1)[0])
-            out = ["An ACL on the AP's path is blocking DHCP, so the AP "
-                   "cannot obtain an address.", ""]
-            for (acl, seq), labels in by_rule.items():
-                out.append(f"• {acl} denies DHCP at sequence {seq}:")
-                out += [f"    - {l}" for l in labels]
-            if gaps:
-                out += [""] + gaps
-            return CheckResult(CheckStatus.WARN, "\n".join(out), data=data)
-
-        if unreadable:
-            return CheckResult(
-                CheckStatus.FAIL,
-                f"DHCP could not be fully evaluated on {hostname}:\n\n"
-                + "\n".join(gaps), data=dict(data, errors=unreadable))
+        header = f"DHCP on the AP's segment (VLAN {ctx.state.get('ap_vlan')})"
+        if helpers:
+            header += f", relayed to {', '.join(helpers)}"
 
         if not names:
             return CheckResult(
@@ -3069,24 +3034,25 @@ class ApDhcpAccessLists(_ApCheck):
                 f"No ACL is applied on {where}, so nothing there blocks "
                 f"DHCP.", data=data)
 
-        # One line per ACL rather than one per flow. Every flow through a
-        # given ACL almost always lands on the same permit, so listing them
-        # individually repeats the same sequence number a dozen times and
-        # buries the one thing worth reading: which rule let DHCP through.
-        lines = [f"No ACL on the AP's path blocks DHCP.", ""]
-        for acl in names:
-            seqs = sorted({p.rsplit("sequence ", 1)[-1].rstrip(")")
-                           for p in permits if p.startswith(f"{acl} ")})
-            if seqs:
-                at = ("sequence " + seqs[0] if len(seqs) == 1
-                      else "sequences " + ", ".join(seqs))
-                lines.append(f"• {acl} — permits DHCP at {at}")
-            else:
-                lines.append(f"• {acl} — no rule matches DHCP")
-        lines += ["", f"Checked {len(flows)} DHCP flows "
-                      f"(bootpc/68 and bootps/67, both directions) "
-                      f"on {where}."]
-        return CheckResult(CheckStatus.OK, "\n".join(lines), data=data)
+        body = render_acl_section(header, where, blocked=denies,
+                                  permitted=permits, unread=unevaluated)
+
+        # A deny outranks an unreadable ACL: it is the actionable finding.
+        if denies:
+            return CheckResult(
+                CheckStatus.WARN,
+                "An ACL on the AP's path is blocking DHCP, so the AP cannot "
+                "obtain an address.\n\n" + body, data=data)
+
+        if unreadable:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"DHCP could not be fully evaluated on {hostname}.\n\n"
+                + body, data=dict(data, errors=unreadable))
+
+        return CheckResult(
+            CheckStatus.OK,
+            "No ACL on the AP's path blocks DHCP.\n\n" + body, data=data)
 
 
 class ApL2LispInstance(_ApCheck):
@@ -4586,7 +4552,7 @@ class ApTrustSecPolicy(_ApCheck):
                 "cannot be resolved and no policy can be evaluated.",
                 data=data)
 
-        lines, denies = [], []
+        sections, denies = [], []
         try:
             from securitymodules.ciscotrustsec import (
                 cts_endpoint_info, cts_rules)
@@ -4654,9 +4620,10 @@ class ApTrustSecPolicy(_ApCheck):
                                      "is_default": default}
 
                 if not rbacl:
-                    lines.append(
-                        f"• From {where}, {pair}: no policy is defined, so "
-                        f"the traffic is permitted.")
+                    sections.append(
+                        f"From {where} — {pair}:\n\n"
+                        f"  No policy is defined, so the traffic is "
+                        f"permitted.")
                     continue
 
                 # The default rule's "policy" is an action -- "Permit IP" or
@@ -4669,15 +4636,15 @@ class ApTrustSecPolicy(_ApCheck):
                 if default and action.startswith(("permit", "deny")):
                     if action.startswith("deny"):
                         denies.append(src_ip)
-                        lines.append(
-                            f"• From {where}, {pair}: no specific policy, "
-                            f"and the default rule is {rbacl} — all traffic "
-                            f"to the AP is denied.")
+                        sections.append(
+                            f"From {where} — {pair}:\n\n"
+                            f"  No specific policy. The default rule is "
+                            f"{rbacl} — all traffic to the AP is denied.")
                     else:
-                        lines.append(
-                            f"• From {where}, {pair}: no specific policy, "
-                            f"and the default rule is {rbacl}, which permits "
-                            f"the AP's traffic.")
+                        sections.append(
+                            f"From {where} — {pair}:\n\n"
+                            f"  No specific policy. The default rule is "
+                            f"{rbacl}, which permits the AP's traffic.")
                     continue
 
                 record_pd_object(ctx, "cts_sgacl_entry",
@@ -4701,27 +4668,16 @@ class ApTrustSecPolicy(_ApCheck):
                     if not hit or len(hit) < 3:
                         unreadable.append(f"{label} (no verdict returned)")
                     elif hit[1] == "deny":
-                        blocked.append(f"{label} at sequence {hit[2]}")
+                        blocked.append((label, f"sequence {hit[2]}"))
                     else:
-                        allowed.append(f"{label} at sequence {hit[2]}")
+                        allowed.append((label, f"sequence {hit[2]}"))
 
                 if blocked:
                     denies.append(src_ip)
-                    lines.append(
-                        f"• From {where}, {pair} is governed by {kind}, "
-                        f"which denies:")
-                    lines += [f"    - {b}" for b in blocked]
-                    if allowed:
-                        lines.append(
-                            f"    It permits: {', '.join(allowed)}.")
-                else:
-                    lines.append(
-                        f"• From {where}, {pair} is governed by {kind}, "
-                        f"which permits the AP's traffic"
-                        + (f": {', '.join(allowed)}." if allowed else "."))
-                if unreadable:
-                    lines.append(
-                        f"    Could not be read: {'; '.join(unreadable)}.")
+                sections.append(render_acl_section(
+                    f"From {where} — {pair}, {kind}", None,
+                    blocked=blocked, permitted=allowed,
+                    unread=[(rbacl, u, "") for u in unreadable]))
         except SystemExit as e:
             return CheckResult(
                 CheckStatus.FAIL,
@@ -4737,9 +4693,9 @@ class ApTrustSecPolicy(_ApCheck):
             return CheckResult(
                 CheckStatus.WARN,
                 f"An SGACL enforced on {hostname} is blocking traffic the AP "
-                f"needs:\n\n" + "\n".join(lines), data=data)
+                f"needs.\n\n" + "\n\n".join(sections), data=data)
 
         return CheckResult(
             CheckStatus.OK,
-            f"No SGACL enforced on {hostname} blocks the AP's traffic:\n\n"
-            + "\n".join(lines), data=data)
+            f"No SGACL enforced on {hostname} blocks the AP's traffic.\n\n"
+            + "\n\n".join(sections), data=data)
