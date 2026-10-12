@@ -242,12 +242,31 @@ def _infra_vn_lines(vnid_mapping: dict):
             [],
         )
 
-    return "", [
+    # The network address and mask the WLC already reports for this VNID.
+    # The VN
+    # name embeds the subnet too (172_19_5_0-INFRA_VN), but that is a display
+    # label: parsing it would break on any site whose naming differs. These
+    # come from the parser's own fields.
+    addr = attrs.get("ip_address")
+    mask = attrs.get("subnet")
+    subnet = ""
+    if addr and addr != "0.0.0.0":
+        try:
+            import ipaddress
+            net = ipaddress.ip_network(f"{addr}/{mask}", strict=False)
+            subnet = str(net)
+        except (ValueError, TypeError):
+            subnet = f"{addr}/{mask}" if mask else addr
+
+    lines = [
         "• INFRA VN VNIDs",
         f"    Layer 2: {l2_vnid}, Name: ({name})",
         f"    Layer 3: {l3_vnid}, Name: ({name})",
-        f"    CP Name: \"{attrs.get('control_plane_name')}\"",
     ]
+    if subnet:
+        lines.append(f"    Subnet: {subnet}")
+    lines.append(f"    CP Name: \"{attrs.get('control_plane_name')}\"")
+    return "", lines
 
 
 class ApWlcProfile(_ApCheck):
