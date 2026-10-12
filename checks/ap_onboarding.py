@@ -2883,26 +2883,40 @@ class ApSviState(_ApCheck):
         # CEF is required rather than merely desirable here: the fabric data
         # path is built on it, and an SVI that is process switching is not
         # forwarding the AP's traffic the way the design expects.
-        problems = []
-        # The gateway must sit inside the subnet the WLC advertises for the
-        # INFRA_VN. If it does not, the edge and the controller disagree about
-        # what the AP's segment is: the AP gets a lease from one range and a
-        # gateway from another, and every reachability check downstream fails
-        # for a reason that looks like routing.
+        # Terminal, before the softer faults below. The gateway must sit
+        # inside the subnet the WLC advertises for the INFRA_VN; if it does
+        # not, the AP is offered a lease from one range and a gateway from
+        # another, so nothing it sends is ever routed and it can never reach
+        # fabric status. Every LISP, ACL and SGACL result after this would
+        # describe traffic that cannot leave the VLAN.
         infra_subnet = ctx.state.get("ap_infra_subnet")
         if infra_subnet and prefix:
             try:
                 import ipaddress
                 net = ipaddress.ip_network(infra_subnet, strict=False)
-                if ipaddress.ip_address(prefix) not in net:
-                    problems.append(
-                        f"{svi} is addressed {prefix}, which is outside the "
-                        f"INFRA_VN subnet {net} the controller advertises for "
-                        f"this VN. The edge and the WLC disagree about the "
-                        f"AP's segment, so the AP cannot be both addressed "
-                        f"and routed correctly")
+                outside = ipaddress.ip_address(prefix) not in net
             except (ValueError, TypeError):
-                pass
+                outside = False
+                net = infra_subnet
+            if outside:
+                ctx.state["ap_stop"] = (
+                    f"{svi} on {hostname} is addressed outside the INFRA_VN "
+                    f"subnet {net}")
+                return CheckResult(
+                    CheckStatus.FAIL,
+                    body + f"\n\n{svi} is addressed {prefix}, which is "
+                    f"outside the INFRA_VN subnet {net} the controller "
+                    f"advertises for this VN. The edge and the WLC disagree "
+                    f"about the AP's segment: the AP is offered a lease from "
+                    f"one range and a gateway from another, so its traffic is "
+                    f"never routed and it can never reach fabric status. "
+                    f"Correct the INFRA_VN addressing in Catalyst Center and "
+                    f"re-provision.",
+                    data={"svi": svi, "svi_address": prefix,
+                          "infra_subnet": str(net)},
+                )
+
+        problems = []
         if not helpers:
             problems.append(
                 f"{svi} has no helper address, so a DHCP request from the AP "
@@ -2913,17 +2927,12 @@ class ApSviState(_ApCheck):
                 f"CEF is not enabled on {svi}. The fabric data path requires "
                 f"it, so the AP's traffic is not being forwarded as designed")
 
-        # WARN, not FAIL: these are findings about the fabric, and FAIL sets
-        # `ap_stop`, which skips every remaining validation. A missing helper
-        # or a gateway outside the INFRA_VN subnet is exactly the kind of
-        # fault where the LISP, ACL and SGACL results still matter.
         if problems:
             return CheckResult(
-                CheckStatus.WARN,
+                CheckStatus.FAIL,
                 body + "\n\n" + "\n\n".join(problems),
                 data={"svi": svi, "svi_vrf": vrf,
-                      "helper_addresses": helpers, "cef": cef,
-                      "infra_subnet": ctx.state.get("ap_infra_subnet")},
+                      "helper_addresses": helpers, "cef": cef},
             )
 
         return CheckResult(
