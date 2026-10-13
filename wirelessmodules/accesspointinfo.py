@@ -493,3 +493,169 @@ def control_session_for(rows, ap_name):
         if (row.get("local_port") or "").strip().lower() == CAPWAP_CONTROL_PORT:
             return row
     return None
+
+
+_FABRIC_STATUS = re.compile(r"^Fabric Status\s*:\s*(?P<status>\S+)\s*$", re.I)
+
+_CP_ROW = re.compile(
+    r"^(?P<name>\S.*?)\s{2,}"
+    r"(?P<ip_address>\d{1,3}(?:\.\d{1,3}){3})\s{2,}"
+    r"(?P<key>\S+)\s{2,}"
+    r"(?P<status>\S+)\s*$"
+)
+
+_VNID_ROW = re.compile(
+    r"^\s*(?P<name>\S+)\s{2,}"
+    r"(?P<l2_vnid>\d+)\s{2,}"
+    r"(?P<l3_vnid>\d+)\s{2,}"
+    r"(?:(?P<ip_address>\d{1,3}(?:\.\d{1,3}){3})\s{2,})?"
+    r"(?P<subnet>\d{1,3}(?:\.\d{1,3}){3})\s{2,}"
+    r"(?P<control_plane_name>\S.*?)\s*$"
+)
+
+#: The L3 instance an AP onboards in. Fixed by SD-Access, not per-deployment.
+INFRA_VN_L3_VNID = "4097"
+
+#: What the control-plane table prints for a session that is established.
+CP_STATUS_UP = "up"
+
+
+def parse_wireless_fabric_summary(text):
+    """`show wireless fabric summary` as (summary, unreadable).
+
+    There is no Genie parser for this command.
+
+    `summary` is a dict with:
+      fabric_status       the controller-wide status, as printed, or ""
+      control_planes      list of {name, ip_address, key, status}
+      vnids               list of {name, l2_vnid, l3_vnid, ip_address,
+                                   subnet, control_plane_name}
+
+    Both lists are in the order printed. The VNID mapping is emitted as
+    several tables, each repeating its header, so rows are accumulated across
+    all of them rather than stopping at the end of the first -- the INFRA_VN
+    row is in the last table on the lab controller.
+
+    The two tables are told apart by shape, not by which header was last
+    seen: a control-plane row ends in a status word, a VNID row carries two
+    integer VNIDs. Headers that scroll off or wrap therefore cannot
+    misattribute a row.
+
+    Safe on anything: unparseable input yields empty lists rather than
+    raising.
+    """
+    summary = {"fabric_status": "", "control_planes": [], "vnids": []}
+    unreadable = 0
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        status = _FABRIC_STATUS.match(stripped)
+        if status:
+            summary["fabric_status"] = status.group("status").strip()
+            continue
+        if (set(stripped) <= set("- ")
+                or stripped.startswith("Control-plane")
+                or stripped.startswith("Fabric VNID Mapping")
+                or stripped.startswith("Name")
+                or stripped.endswith("#")
+                or "#show " in stripped):
+            continue
+        vnid = _VNID_ROW.match(line)
+        if vnid:
+            summary["vnids"].append(
+                {k: (v or "").strip() for k, v in vnid.groupdict().items()})
+            continue
+        cp = _CP_ROW.match(line)
+        if cp:
+            summary["control_planes"].append(
+                {k: v.strip() for k, v in cp.groupdict().items()})
+            continue
+        unreadable += 1
+    return summary, unreadable
+
+
+def control_planes_named(summary, name):
+    """Every control-plane row matching `name`, in the order printed.
+
+    One name resolves to several addresses -- a control-plane group is a pair
+    on the lab controller -- so the caller gets the list, not a single row.
+    An empty list means the name the AP is configured against does not exist
+    on this controller.
+    """
+    want = (name or "").strip()
+    if not want:
+        return []
+    return [row for row in (summary or {}).get("control_planes", [])
+            if row.get("name") == want]
+
+
+def vnid_for_l3(summary, l3_vnid=INFRA_VN_L3_VNID):
+    """The VNID-mapping row carrying `l3_vnid`, or None.
+
+    Most rows print an L3-VNID of 0: they are L2-only mappings with no
+    subnet. The INFRA_VN row is the one with a real L3 instance, and it is
+    the row that says which subnet an AP is expected to hold an address in.
+    """
+    want = str(l3_vnid).strip()
+    for row in (summary or {}).get("vnids", []):
+        if (row.get("l3_vnid") or "").strip() == want:
+            return row
+    return None
+
+
+def subnet_contains(ip_address, network, netmask):
+    """Whether `ip_address` falls inside `network`/`netmask`.
+
+    Returns None when any of the three cannot be read as an address, so a
+    caller can tell "outside the subnet" from "could not be compared" -- the
+    first is a finding about the AP, the second about the output.
+    """
+    import ipaddress
+
+    try:
+        addr = ipaddress.IPv4Address((ip_address or "").strip())
+        net = ipaddress.IPv4Network(
+            f"{(network or '').strip()}/{(netmask or '').strip()}",
+            strict=False)
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError,
+            ValueError):
+        return None
+    return addr in net
+
+
+#: `Control plane name` prints with one fewer space before its colon than its
+#: neighbours, so these match on the label and the colon, never on a column.
+_AP_RLOC = re.compile(r"^RLOC\s*:\s*(?P<rloc>\S+)\s*$", re.I)
+_AP_CP_NAME = re.compile(r"^Control plane name\s*:\s*(?P<name>\S.*?)\s*$", re.I)
+_AP_FABRIC_STATUS = re.compile(
+    r"^Fabric status\s*:\s*(?P<status>\S.*?)\s*$", re.I)
+
+
+def parse_ap_fabric_fields(text):
+    """The three fabric lines of `show ap name <ap> config general`.
+
+    Returns {fabric_status, rloc, control_plane_name}, each "" when absent.
+
+    Genie parses this command but captures only `fabric_status` of the three:
+    it has no capture for RLOC or the control-plane name, so those have to be
+    read from the raw output. Taking all three here keeps them from being
+    read two different ways.
+    """
+    found = {"fabric_status": "", "rloc": "", "control_plane_name": ""}
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        status = _AP_FABRIC_STATUS.match(stripped)
+        if status:
+            found["fabric_status"] = status.group("status").strip()
+            continue
+        rloc = _AP_RLOC.match(stripped)
+        if rloc:
+            found["rloc"] = rloc.group("rloc").strip()
+            continue
+        cp = _AP_CP_NAME.match(stripped)
+        if cp:
+            found["control_plane_name"] = cp.group("name").strip()
+    return found

@@ -378,6 +378,11 @@ class ApWlcApStateProfile(_ApCheck):
             queued.append(ApWlcApDtls(hostname, node))
             queued.append(ApWlcApCountry(hostname, node))
             queued.append(ApWlcApState(hostname, node))
+            # After the AP's state: the control-plane set it is configured
+            # against, which is what the registration checks below resolve.
+            # Runs last of the per-controller checks because an AP that is
+            # not registered has already stopped the run by here.
+            queued.append(ApWlcFabricControlPlane(hostname, node))
         # Last: every controller has been looked at by the time this runs.
         queued.append(ApWlcApStateVerdict())
         plural = "" if len(candidates) == 1 else "s"
@@ -2138,3 +2143,186 @@ class ApWlcApStateVerdict(_ApCheck):
             f"follow examine the path it would use to get there -- the access "
             f"port, the INFRA_VN VLAN, the route to the controller and the "
             f"access lists along it.")
+
+
+class ApWlcFabricControlPlane(_PerWlcCheck):
+    """The control-plane set this AP is configured against, resolved to
+    addresses.
+
+    First of the block that follows step 5: the AP's radio MAC reaches the
+    edge's access tunnel only after the controller registers it to a control
+    plane, so everything below here is a consequence of this resolving.
+
+    Two commands on the controller:
+
+      `show ap name <name> config general`   the AP's own fabric status, its
+                                             RLOC, and the *name* of the
+                                             control-plane group it uses.
+
+      `show wireless fabric summary`         that name resolved to addresses,
+                                             and the subnet the L3 instance
+                                             expects the AP to be addressed
+                                             in.
+
+    Three faults end the run rather than being noted, which departs from the
+    manifest's rule that a fabric fault is a warning. The departure is the
+    same one ApWlcApState makes for an unregistered AP, and for the same
+    reason: each of the three means this AP has no control plane at all, so
+    every check below would report an absence that restates this one fault
+    instead of adding to it.
+    """
+
+    aspect = "fabric control plane"
+    running_note = "resolving the AP's control-plane set"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import (
+            CP_STATUS_UP,
+            INFRA_VN_L3_VNID,
+            control_planes_named,
+            parse_ap_fabric_fields,
+            parse_wireless_fabric_summary,
+            subnet_contains,
+            vnid_for_l3,
+        )
+
+        service = ctx.service
+        if service is None:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        name = _resolve_ap_name(ctx, self.hostname, service)
+        if not name:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — the AP is not joined to {self.hostname}, so this "
+                f"controller holds no fabric configuration for it.")
+
+        # Genie parses this command but captures only fabric_status of the
+        # three fields wanted here, so it is read raw.
+        try:
+            raw_cfg = get_any_single_output(
+                self.hostname, f"show ap name {name} config general", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"Could not read {name}'s configuration on {self.hostname}: "
+                f"{type(e).__name__}: {e}.")
+
+        fields = parse_ap_fabric_fields(raw_cfg)
+        fabric_status = fields["fabric_status"]
+        rloc = fields["rloc"]
+        cp_name = fields["control_plane_name"]
+
+        # Rule 1. Not fabric-enabled: no control plane applies, and no access
+        # tunnel is ever built for this AP.
+        if fabric_status and fabric_status.lower() != "enabled":
+            ctx.state["ap_stop"] = (
+                f"{name} is not fabric-enabled on {self.hostname} "
+                f"(fabric status {fabric_status}).")
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"{name} has fabric status {fabric_status} on "
+                f"{self.hostname}.\n\n"
+                f"The AP is not operating as a fabric AP, so it registers to "
+                f"no control plane and the edge builds no access tunnel for "
+                f"it. Everything validated below depends on that "
+                f"registration.")
+
+        try:
+            raw_fabric = get_any_single_output(
+                self.hostname, "show wireless fabric summary", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"Could not read the fabric summary on {self.hostname}: "
+                f"{type(e).__name__}: {e}.")
+
+        summary, _unreadable = parse_wireless_fabric_summary(raw_fabric)
+
+        # Rule 2. The name the AP carries has to exist on the controller.
+        planes = control_planes_named(summary, cp_name)
+        if not planes:
+            ctx.state["ap_stop"] = (
+                f"Control plane {cp_name or '(none)'} is not configured on "
+                f"{self.hostname}.")
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"{name} is configured against control plane "
+                f"{cp_name or '(none)'}, which {self.hostname} does not "
+                f"have.\n\n"
+                f"The LISP control plane for VNI {INFRA_VN_L3_VNID} on this "
+                f"controller is configured with a name the fabric does not "
+                f"resolve, so the AP registers nowhere.")
+
+        # Rule 3. The L3 instance has to expect the AP where it actually is.
+        ap_ip = (ctx.state.get("ap_ip") or "").strip()
+        vnid = vnid_for_l3(summary, INFRA_VN_L3_VNID)
+        if vnid is None:
+            ctx.state["ap_stop"] = (
+                f"{self.hostname} has no L3-VNID {INFRA_VN_L3_VNID} mapping.")
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"{self.hostname} maps no fabric VNID to L3 instance "
+                f"{INFRA_VN_L3_VNID}.\n\n"
+                f"That instance is the INFRA_VN an AP onboards in. Without "
+                f"it the controller has no subnet to place the AP in and no "
+                f"control plane to register it to.")
+
+        inside = subnet_contains(ap_ip, vnid.get("ip_address"),
+                                 vnid.get("subnet"))
+        if ap_ip and inside is False:
+            ctx.state["ap_stop"] = (
+                f"{ap_ip} is outside the L3-VNID {INFRA_VN_L3_VNID} subnet "
+                f"on {self.hostname}.")
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"{name} holds {ap_ip}, which is outside "
+                f"{vnid.get('ip_address')}/{vnid.get('subnet')} -- the "
+                f"subnet L3-VNID {INFRA_VN_L3_VNID} maps on "
+                f"{self.hostname}.\n\n"
+                f"The AP is addressed outside the INFRA_VN the controller "
+                f"expects it in, so the control plane has no instance to "
+                f"register it under.")
+
+        # Resolved. Publish what the rest of the block runs on.
+        addresses = [p["ip_address"] for p in planes]
+        ctx.state["ap_cp_set"] = addresses
+        ctx.state["ap_cp_name"] = cp_name
+        ctx.state["ap_wlc_rloc"] = rloc
+        ctx.state["ap_infra_l3_vnid"] = INFRA_VN_L3_VNID
+
+        down = [p for p in planes
+                if (p.get("status") or "").strip().lower() != CP_STATUS_UP]
+        lines = [
+            f"{name} is fabric-enabled on {self.hostname} and resolves to "
+            f"{len(planes)} control plane{'' if len(planes) == 1 else 's'}.",
+            "",
+            "  Fabric",
+            f"    Fabric status:      {fabric_status or '—'}",
+            f"    RLOC:               {rloc or '—'}",
+            f"    Control plane name: {cp_name or '—'}",
+            "",
+            f"  L3-VNID {INFRA_VN_L3_VNID}",
+            f"    Mapping:            {vnid.get('name') or '—'}",
+            f"    Subnet:             {vnid.get('ip_address') or '—'}"
+            f" / {vnid.get('subnet') or '—'}",
+            f"    AP address:         {ap_ip or '— (not resolved)'}",
+            "",
+            "  Control planes",
+        ]
+        for plane in planes:
+            lines.append(f"    {plane['ip_address']:<16} {plane.get('status')}")
+
+        # A control plane that is down is a fabric fault, not a tool one: the
+        # manifest's warn-and-continue rule applies, because the other plane
+        # of the pair may still be carrying the registration.
+        if down:
+            return CheckResult(
+                CheckStatus.WARN,
+                "\n".join(lines) + "\n\n"
+                + f"{len(down)} of these is not Up, so the AP may be "
+                  f"registering to fewer control planes than the fabric "
+                  f"intends.")
+        return CheckResult(CheckStatus.OK, "\n".join(lines),
+                           data={"control_planes": addresses})
