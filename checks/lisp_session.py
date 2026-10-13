@@ -444,6 +444,10 @@ class LispPerMapServerSession(_SessionCheck):
         data = {"map_server": self.map_server, "state": state,
                 "messages_in": msgs_in, "messages_out": msgs_out,
                 "errors": seen}
+        # Recorded so the verdict at the end of the flow can see every
+        # map-server at once. Each check only ever knows about its own.
+        ctx.state.setdefault(
+            "lisp_session_states", {})[self.map_server] = state
 
         if state.lower() != "up":
             # WARN, not FAIL: a down session is a finding about the fabric, and
@@ -733,6 +737,12 @@ def lisp_session_checks(target: LispSessionTarget, map_servers=None):
         else:
             ms = host = mgmt = server
         checks.append(LispInterCpSession(target, host, mgmt, peers=rlocs))
+
+    # Last: the flow's own conclusion. Every session still down by here means
+    # the troubleshooting is exhausted, and that is where the flow stops --
+    # not at the first down session, which would discard the checks that
+    # explain it.
+    checks.append(LispSessionVerdict(target, map_servers=servers))
 
     return checks
 
@@ -1673,3 +1683,72 @@ class LispSessionTrustSec(_SessionCheck):
             f"The TrustSec policy on {host} permits the session between "
             f"{src} and {dst}, with no drops counted:\n\n"
             + "\n".join(lines), data=data)
+
+
+class LispSessionVerdict(_SessionCheck):
+    """What the session flow established, once every map-server has been walked.
+
+    The per-map-server checks each report their own session and continue, so
+    that the checks explaining *why* a session is down still run. That is
+    right for each one individually, and leaves nobody looking at the whole:
+    a flow where every session is still down has said everything it can say,
+    and the checks below it would each report an absence caused by this.
+
+    So this is where the flow stops -- at the end, after the troubleshooting,
+    rather than at the first down session.
+    """
+
+    name = "LISP Session — Verdict"
+    running_note = "Weighing up the session flow."
+
+    def __init__(self, target, map_servers=None):
+        super().__init__(target)
+        self.map_servers = list(map_servers or [])
+
+    def run_session(self, ctx: RunContext) -> CheckResult:
+        t = self.target
+        self.target_node_id = t.xtr_node_id
+        states = ctx.state.get("lisp_session_states") or {}
+        if not states:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no map-server session was read, so there is "
+                "nothing to weigh up.")
+
+        up = [ms for ms, state in states.items()
+              if (state or "").strip().lower() == "up"]
+        down = [(ms, state) for ms, state in states.items()
+                if (state or "").strip().lower() != "up"]
+
+        if not up:
+            listed = ", ".join(f"{ms} ({state})" for ms, state in down)
+            return self._stop(
+                ctx,
+                f"every LISP session from {t.xtr_hostname} is still down "
+                f"after the session flow",
+                f"Every LISP session from {t.xtr_hostname} is still down "
+                f"after troubleshooting each one — {listed}.\n\n"
+                f"The flow has established what it can: no registration for "
+                f"{t.label} can leave {t.xtr_hostname} while this holds, so "
+                f"every check below would report an absence that this one "
+                f"fault already explains. The session state is what to fix.",
+                data={"lisp_sessions_down": down},
+            )
+
+        if down:
+            listed = ", ".join(f"{ms} ({state})" for ms, state in down)
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{len(up)} of {len(states)} LISP session(s) from "
+                f"{t.xtr_hostname} came back up; still down: {listed}.\n\n"
+                f"{t.label} can register through the session(s) that are up, "
+                f"so the flow continues — but a control plane whose session "
+                f"is down holds no record of it.",
+                data={"lisp_sessions_up": up, "lisp_sessions_down": down})
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"Every LISP session from {t.xtr_hostname} is up "
+            f"({', '.join(up)}), so the registration path for {t.label} is "
+            f"not the fault.",
+            data={"lisp_sessions_up": up})
