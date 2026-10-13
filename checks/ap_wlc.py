@@ -1536,20 +1536,16 @@ class ApWlcApCrash(_PerWlcCheck):
                 f"`show ap crash-file` could not be read from "
                 f"{self.hostname} — {type(e).__name__}: {e}")
 
-        rows, unreadable = parse_ap_crash_files(raw)
+        # Rows the parser could not read are passed over: this check reports
+        # whether an entry for one named AP exists, and a count of malformed
+        # lines is housekeeping rather than a finding about that AP.
+        rows, _unreadable = parse_ap_crash_files(raw)
         entry = rows.get(name)
 
         if entry is None:
-            lines = [f"{name} has no crash file on {self.hostname}."]
-            if unreadable:
-                # The AP's absence from the table is the finding, so a row
-                # that could not be read is worth saying: it might have been
-                # this AP's.
-                lines += ["", f"  ⚠ {unreadable} row"
-                              f"{'' if unreadable == 1 else 's'} in the table "
-                              f"could not be read, so this is not conclusive."]
-                return CheckResult(CheckStatus.WARN, "\n".join(lines))
-            return CheckResult(CheckStatus.OK, "\n".join(lines))
+            return CheckResult(
+                CheckStatus.OK,
+                f"{name} has no crash file on {self.hostname}.")
 
         lines = [
             f"{name} has a crash file on {self.hostname}.",

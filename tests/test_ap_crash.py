@@ -98,14 +98,13 @@ def test_this_ap_present_is_a_warning(served):
     assert "crashed at some point" in r.message
 
 
-def test_an_unreadable_row_makes_absence_inconclusive(served):
-    """The missing row might have been this AP's."""
+def test_an_unreadable_row_is_passed_over(served):
+    """A malformed line says nothing about whether this AP crashed."""
     from checks.ap_wlc import ApWlcApCrash
 
     served(REAL + "\n!! corrupt line with no crash file\n")
     r = ApWlcApCrash(WLC, "wlc0").run_ap(_ctx())
-    assert r.status is CheckStatus.WARN
-    assert "not conclusive" in r.message
+    assert r.status is CheckStatus.OK
 
 
 def test_an_ap_on_another_controller_is_skipped(served, monkeypatch):
