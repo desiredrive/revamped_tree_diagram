@@ -321,6 +321,7 @@ class ApWlcProfile(_ApCheck):
             queued.append(ApWlcInfraVn(hostname, node))
             # Manifest step 5: the AP's own state on this controller.
             queued.append(ApWlcApState(hostname, node))
+            queued.append(ApWlcApUptime(hostname, node))
         # Last: every collection has been attempted by the time these run.
         queued.append(ApWlcCollectionVerdict())
         queued.append(ApWlcApStateVerdict())
@@ -1172,6 +1173,146 @@ class ApWlcApState(_PerWlcCheck):
 
         return CheckResult(status, "\n".join(lines),
                            data={"ap_name": name, "state": state})
+
+
+def _not_found_message(cdp_name, ap_mac, wlc, rows, unreadable, expected):
+    """The soft-warn text for an AP absent from `show ap uptime`."""
+    who = f"AP {cdp_name} with MAC {ap_mac}" if cdp_name else f"AP {ap_mac}"
+    lines = [f"The AP Uptime information for {who} was not found under "
+             f"`show ap uptime` on {wlc}."]
+    # A row the parser refused, or an AP the device counted but did not
+    # print, is a different situation from a genuinely absent AP, and the
+    # reader cannot tell them apart unless it is said.
+    notes = []
+    if unreadable:
+        notes.append(
+            f"{unreadable} row{'' if unreadable == 1 else 's'} in the output "
+            f"could not be read, so the AP may be among them.")
+    if expected is not None and len(rows) != expected:
+        notes.append(
+            f"The controller reported {expected} AP"
+            f"{'' if expected == 1 else 's'} but {len(rows)} "
+            f"{'was' if len(rows) == 1 else 'were'} read.")
+    if notes:
+        lines += [""] + [f"  ⚠ {n}" for n in notes]
+    return "\n".join(lines)
+
+
+def _uptime_message(name, row, uptime_seconds):
+    """The found-AP reading, warning when the association is recent."""
+    ap_up = row.get("ap_up_time") or "—"
+    assoc_up = row.get("association_up_time") or "—"
+    lines = [
+        f"{name} is up on the controller.",
+        "",
+        f"  AP name           {name}",
+        f"  Ethernet MAC      {row.get('ethernet_mac') or '—'}",
+        f"  Radio MAC         {row.get('radio_mac') or '—'}",
+        f"  AP uptime         {ap_up}",
+        f"  Association time  {assoc_up}",
+    ]
+
+    assoc_seconds = uptime_seconds(assoc_up)
+    if assoc_seconds is None:
+        # The duration is reported either way; only the flap verdict is
+        # withheld, because guessing it is what would be unsafe.
+        return CheckResult(
+            CheckStatus.OK,
+            "\n".join(lines + [
+                "",
+                "  ⚠ The association time could not be read as a duration, "
+                "so it was not graded.",
+            ]))
+
+    if assoc_seconds < _RECENT_ASSOCIATION:
+        ap_seconds = uptime_seconds(ap_up)
+        # Only claim the AP did not reload when its own uptime proves it.
+        # If that could not be read, the association is still recent and
+        # worth reporting -- the cause is simply not established.
+        reloaded = (ap_seconds is not None
+                    and ap_seconds < _RECENT_ASSOCIATION)
+        if reloaded:
+            note = (f"The AP associated {assoc_up} ago and its own uptime is "
+                    f"{ap_up}, so it reloaded rather than flapped.")
+        else:
+            note = (f"The AP flapped recently but did not reload: it "
+                    f"associated {assoc_up} ago while its uptime is {ap_up}.")
+        return CheckResult(CheckStatus.WARN,
+                           "\n".join(lines + ["", f"  ⚠ {note}"]))
+
+    return CheckResult(CheckStatus.OK, "\n".join(lines))
+
+#: An association younger than this means the AP re-joined the controller
+#: recently. Ten minutes is the manifest's figure.
+_RECENT_ASSOCIATION = 10 * 60
+
+
+class ApWlcApUptime(_PerWlcCheck):
+    """How long the AP has been up, and how long it has been associated.
+
+    The two durations answer different questions, and the gap between them is
+    the finding. An AP whose uptime is days but whose association is minutes
+    did not reload -- it dropped its CAPWAP session and came back. That is a
+    flap, and it is invisible in `show ap summary`, which reports such an AP
+    as Registered exactly like one that has been up for a month.
+
+    `show ap uptime` has no Genie parser, so the table is read by
+    `parse_ap_uptime`. Soft throughout: this is a supplementary reading, and
+    not finding the AP here says nothing that the registration checks have not
+    already said better.
+    """
+
+    aspect = "AP Uptime"
+    running_note = "Reading the AP's uptime and association time…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        from checks.shared import normalize_mac
+
+        service = ctx.service
+        if not service:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        ap_mac = normalize_mac(ctx.payload.get("mac"))
+        if not ap_mac:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no AP MAC was supplied, so there is nothing to "
+                "look up.")
+
+        # The name CDP saw on the wire, used only to make the message
+        # readable: the lookup itself is on the MAC.
+        cdp_name = ((ctx.state.get("ap_cdp_neighbor") or {}).get("device_id")
+                    or "").strip()
+
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import (
+            parse_ap_uptime, uptime_seconds,
+        )
+
+        try:
+            raw = get_any_single_output(
+                self.hostname, "show ap uptime", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"`show ap uptime` could not be read from {self.hostname} — "
+                f"{type(e).__name__}: {e}")
+
+        rows, unreadable, expected = parse_ap_uptime(raw)
+
+        name, row = None, None
+        for candidate, fields in rows.items():
+            if normalize_mac(fields.get("ethernet_mac")) == ap_mac:
+                name, row = candidate, fields
+                break
+
+        if not row:
+            return CheckResult(
+                CheckStatus.WARN,
+                _not_found_message(cdp_name, ap_mac, self.hostname,
+                                   rows, unreadable, expected))
+
+        return _uptime_message(name, row, uptime_seconds)
 
 
 class ApWlcCollectionVerdict(_ApCheck):

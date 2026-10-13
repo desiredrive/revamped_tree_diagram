@@ -28,6 +28,47 @@ class AccessPointInfo:
         self.rloc = rloc
 
 
+#: Each unit IOS prints in an uptime, and its length in seconds.
+_UPTIME_UNITS = {
+    "second": 1, "seconds": 1, "sec": 1, "secs": 1,
+    "minute": 60, "minutes": 60, "min": 60, "mins": 60,
+    "hour": 3600, "hours": 3600, "hr": 3600, "hrs": 3600,
+    "day": 86400, "days": 86400,
+    "week": 604800, "weeks": 604800,
+}
+
+_UPTIME_PART = re.compile(r"(\d+)\s+([A-Za-z]+)")
+
+
+def uptime_seconds(text):
+    """An IOS uptime string as whole seconds, or None if it is not one.
+
+    "11 hours 26 minutes 42 seconds" -> 41202.
+
+    None rather than a guess whenever anything is unrecognised: an unknown
+    unit, or no number/unit pair at all. The caller uses this to decide
+    whether an AP associated recently enough to call it a flap, and a
+    mis-read duration would put that warning on a perfectly stable AP -- or,
+    worse, withhold it from one that is flapping. Declining to answer is the
+    only safe failure here, and the caller reports the raw string instead.
+    """
+    if not text:
+        return None
+    parts = _UPTIME_PART.findall(text)
+    if not parts:
+        return None
+    total = 0
+    for value, unit in parts:
+        scale = _UPTIME_UNITS.get(unit.lower())
+        if scale is None:
+            # One unrecognised unit makes the whole duration untrustworthy:
+            # dropping it would silently under-count and could turn a stable
+            # AP into a reported flap.
+            return None
+        total += int(value) * scale
+    return total
+
+
 #: One `show ap uptime` row. Anchored on the two MACs rather than on column
 #: positions: the AP name column is padded to a fixed width, but a name longer
 #: than that width pushes every later column right, and IOS does not truncate
