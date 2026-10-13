@@ -1149,14 +1149,14 @@ class ApWlcApState(_PerWlcCheck):
         lines = [
             f"{name} is joined to {self.hostname}.",
             "",
-            f"  State         {state or '—'}",
-            f"  Model         {row.get('ap_model') or '—'}",
-            f"  Ethernet MAC  {row.get('ethernet_mac') or '—'}",
-            f"  Radio MAC     {radio_mac or '—'}",
-            f"  IP address    {ap_ip or '—'}",
-            f"  Country       {row.get('country') or '—'}"
-            f"   Regulatory domain {row.get('regulatory_domain') or '—'}",
-            f"  Location      {row.get('location') or '—'}",
+            f"  State:         {state or '—'}",
+            f"  Model:         {row.get('ap_model') or '—'}",
+            f"  Ethernet MAC:  {row.get('ethernet_mac') or '—'}",
+            f"  Radio MAC:     {radio_mac or '—'}",
+            f"  IP address:    {ap_ip or '—'}",
+            f"  Country:       {row.get('country') or '—'}"
+            f"   Regulatory domain: {row.get('regulatory_domain') or '—'}",
+            f"  Location:      {row.get('location') or '—'}",
         ]
 
         # The tags and profiles are the half of step 5 the summary cannot
@@ -1177,18 +1177,18 @@ class ApWlcApState(_PerWlcCheck):
             lines += [
                 "",
                 "  Tags and profiles",
-                f"    Site tag        {cfg.get('site_tag_name') or '—'}",
-                f"    Policy tag      {cfg.get('policy_tag_name') or '—'}",
-                f"    RF tag          {cfg.get('rf_tag_name') or '—'}",
-                f"    AP-join profile {cfg.get('ap_join_profile') or '—'}",
-                f"    Flex profile    {cfg.get('flex_profile') or '—'}",
+                f"    Site tag:        {cfg.get('site_tag_name') or '—'}",
+                f"    Policy tag:      {cfg.get('policy_tag_name') or '—'}",
+                f"    RF tag:          {cfg.get('rf_tag_name') or '—'}",
+                f"    AP-join profile: {cfg.get('ap_join_profile') or '—'}",
+                f"    Flex profile:    {cfg.get('flex_profile') or '—'}",
                 "",
                 "  Mode and administration",
-                f"    AP mode         {cfg.get('ap_mode') or '—'}"
-                f"   submode {cfg.get('ap_submode') or '—'}",
-                f"    Admin state     {cfg.get('administrative_state') or '—'}"
-                f"   operation {cfg.get('operation_state') or '—'}",
-                f"    Primary WLC     {cfg.get('primary_cisco_controller_name') or '—'}"
+                f"    AP mode:         {cfg.get('ap_mode') or '—'}"
+                f"   submode: {cfg.get('ap_submode') or '—'}",
+                f"    Admin state:     {cfg.get('administrative_state') or '—'}"
+                f"   operation: {cfg.get('operation_state') or '—'}",
+                f"    Primary WLC:     {cfg.get('primary_cisco_controller_name') or '—'}"
                 f" ({cfg.get('primary_cisco_controller_ip_address') or '—'})",
             ]
 
@@ -1307,11 +1307,11 @@ def _uptime_message(name, row, uptime_seconds):
     lines = [
         f"{name} is up on the controller.",
         "",
-        f"  AP name           {name}",
-        f"  Ethernet MAC      {row.get('ethernet_mac') or '—'}",
-        f"  Radio MAC         {row.get('radio_mac') or '—'}",
-        f"  AP uptime         {ap_up}",
-        f"  Association time  {assoc_up}",
+        f"  AP name:           {name}",
+        f"  Ethernet MAC:      {row.get('ethernet_mac') or '—'}",
+        f"  Radio MAC:         {row.get('radio_mac') or '—'}",
+        f"  AP uptime:         {ap_up}",
+        f"  Association time:  {assoc_up}",
     ]
 
     assoc_seconds = uptime_seconds(assoc_up)
@@ -1521,7 +1521,7 @@ class ApWlcApCountry(_PerWlcCheck):
                           "State), so it was not graded against this list."]
             return CheckResult(CheckStatus.OK, "\n".join(lines))
 
-        lines += ["", f"  AP country  {ap_country}"]
+        lines += ["", f"  AP country:  {ap_country}"]
         if ap_country.upper() in countries:
             return CheckResult(CheckStatus.OK, "\n".join(lines))
 

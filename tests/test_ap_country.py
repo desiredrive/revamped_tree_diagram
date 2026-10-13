@@ -140,7 +140,7 @@ def test_country_grades_even_when_it_runs_before_ap_state(served, monkeypatch):
         service=object(), payload={"mac": "b811.4b0e.2630"}, state={})
     r = ApWlcApCountry(WLC, "wlc0").run_ap(ctx)
     assert r.status is CheckStatus.OK
-    assert "AP country  MX" in r.message
+    assert "AP country:  MX" in r.message
     assert "not graded" not in r.message
 
 
