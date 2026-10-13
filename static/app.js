@@ -944,6 +944,9 @@ function showTopology(payload) {
       // it for the same reason: the hops between two fabric nodes are not a
       // cable, and the ones this run looked at are drawn as their own edges.
       { selector: 'edge[label = "IP Underlay"]', style: {
+          // Straight, unlike the two session edges: the base `edge` rule is
+          // bezier, so this has to say so rather than leave it out.
+          'curve-style': 'straight',
           'line-style': 'dotted',
           'line-color': '#708aba',
           'width': 3,
@@ -956,11 +959,20 @@ function showTopology(payload) {
       // because these edges are built from a node's `connect_to` rather than
       // an `add_edges` spec, so there is no flag to carry.
       { selector: 'edge[label = "LISP Session"]', style: {
+          // Bowed like the CAPWAP tunnel, but in the opposite direction: both
+          // can hang off the same node, and two curves bowed the same way
+          // would sit on top of each other.
+          'curve-style': 'unbundled-bezier',
+          'control-point-distances': [110],
+          'control-point-weights': [0.5],
           'line-style': 'dotted',
           'line-color': '#7095ba',
           'width': 3,
           'color': '#3d5a7a',
           'font-size': '10px',
+          // Upright, like the CAPWAP label: autorotate from the base rule
+          // would tilt it to the steepest part of the bow.
+          'text-rotation': 'none',
       }},
       { selector: 'edge[capwap = "true"]', style: {
           // Bowed away from the physical path so the tunnel reads as going
