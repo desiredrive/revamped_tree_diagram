@@ -320,9 +320,11 @@ class ApWlcProfile(_ApCheck):
             queued.append(ApWlcControlPlanes(hostname, node))
             queued.append(ApWlcInfraVn(hostname, node))
             # Manifest step 5: the AP's own state on this controller.
-            queued.append(ApWlcApState(hostname, node))
+            # Ordered as the operator reads them: uptime, then the
+            # controller's country configuration, then the AP's own config.
             queued.append(ApWlcApUptime(hostname, node))
             queued.append(ApWlcApCountry(hostname, node))
+            queued.append(ApWlcApState(hostname, node))
         # Last: every collection has been attempted by the time these run.
         queued.append(ApWlcCollectionVerdict())
         queued.append(ApWlcApStateVerdict())
@@ -1317,6 +1319,42 @@ class ApWlcApUptime(_PerWlcCheck):
         return _uptime_message(name, row, uptime_seconds)
 
 
+
+def _ap_country_direct(ctx, wlc_hostname, service):
+    """The AP's own country, read from the controller without ApWlcApState.
+
+    Returns "" when the AP cannot be resolved -- the caller then shows the
+    controller's list and says it did not grade, which is honest about what
+    was and was not established.
+    """
+    from checks.shared import normalize_mac
+
+    ap_mac = normalize_mac(ctx.payload.get("mac"))
+    if not ap_mac:
+        return ""
+    name = ctx.state.get("ap_wlc_ap_name")
+    if not name:
+        from radkit_cli import get_single_output_genie
+        try:
+            parsed = get_single_output_genie(
+                wlc_hostname, "show ap summary", service)
+        except BaseException:
+            return ""
+        rows = _ap_summary_rows(parsed)
+        if not rows:
+            return ""
+        name, _row = _find_ap_by_ethernet_mac(rows, ap_mac)
+        if not name:
+            return ""
+    cfg, _error = _ap_config_general(wlc_hostname, name, service)
+    if not cfg:
+        return ""
+    country = (cfg.get("country_code") or "").strip()
+    if country:
+        ctx.state.setdefault("ap_wlc_country", {})[wlc_hostname] = country
+    return country
+
+
 class ApWlcApCountry(_PerWlcCheck):
     """Is the AP's own country configured on the controller it joined?
 
@@ -1340,6 +1378,12 @@ class ApWlcApCountry(_PerWlcCheck):
 
         ap_country = ((ctx.state.get("ap_wlc_country") or {})
                       .get(self.hostname) or "").strip()
+        if not ap_country:
+            # This check is ordered ahead of the one that normally publishes
+            # the country, so it resolves its own rather than grade nothing.
+            # Only when that has not already happened: on the usual ordering
+            # this costs no extra device call.
+            ap_country = _ap_country_direct(ctx, self.hostname, service)
 
         from radkit_cli import get_any_single_output
         from wirelessmodules.accesspointinfo import parse_wireless_country

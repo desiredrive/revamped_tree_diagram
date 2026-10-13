@@ -115,3 +115,49 @@ def test_without_the_aps_country_the_list_still_shows(served):
     assert r.status is CheckStatus.OK
     assert "MX  Mexico" in r.message
     assert "not graded" in r.message
+
+
+def test_country_grades_even_when_it_runs_before_ap_state(served, monkeypatch):
+    """This check is ordered ahead of the one that publishes the country.
+
+    It therefore resolves the AP itself rather than grading nothing. Without
+    this it would silently degrade to listing the controller's countries.
+    """
+    import checks.ap_wlc as mod
+    from checks.ap_wlc import ApWlcApCountry
+
+    served(REAL)
+    monkeypatch.setattr(mod, "_ap_summary_rows",
+                        lambda p: {"AP-002": {"ethernet_mac": "b811.4b0e.2630"}})
+    monkeypatch.setattr(mod, "_ap_config_general",
+                        lambda h, n, s: ({"country_code": "MX"}, None))
+    import radkit_cli
+    monkeypatch.setattr(radkit_cli, "get_single_output_genie",
+                        lambda h, c, s, **k: {"ap_name": {}})
+
+    # No ap_wlc_country in state: ApWlcApState has not run yet.
+    ctx = types.SimpleNamespace(
+        service=object(), payload={"mac": "b811.4b0e.2630"}, state={})
+    r = ApWlcApCountry(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.OK
+    assert "AP country  MX" in r.message
+    assert "not graded" not in r.message
+
+
+def test_country_without_a_resolvable_ap_lists_but_does_not_grade(served,
+                                                                  monkeypatch):
+    """A MAC that matches no AP must not silently grade as present."""
+    import checks.ap_wlc as mod
+    from checks.ap_wlc import ApWlcApCountry
+
+    served(REAL)
+    monkeypatch.setattr(mod, "_ap_summary_rows", lambda p: {})
+    import radkit_cli
+    monkeypatch.setattr(radkit_cli, "get_single_output_genie",
+                        lambda h, c, s, **k: {"ap_name": {}})
+
+    ctx = types.SimpleNamespace(
+        service=object(), payload={"mac": "dead.beef.0001"}, state={})
+    r = ApWlcApCountry(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.OK
+    assert "not graded" in r.message
