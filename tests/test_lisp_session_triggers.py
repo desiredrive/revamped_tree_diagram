@@ -152,3 +152,67 @@ def test_an_unreadable_session_state_does_not_invent_a_fault(monkeypatch):
 
 def boom_error():
     return RuntimeError("device unreachable")
+
+
+# --------------------------------------------------------------------------
+# Consistency: the trigger that decides whether to run the flow and the check
+# that reports session state inside it must read the same fact the same way.
+# --------------------------------------------------------------------------
+
+
+class _Etr:
+    """An ETR with the attribute surface the session reader walks."""
+
+    def __init__(self, peers, loopback="172.19.1.68"):
+        self.global_lisp_sessions = types.SimpleNamespace(peers=peers)
+        self.profiled_device = types.SimpleNamespace(loopback=loopback)
+
+
+def test_the_trigger_and_the_flow_read_session_state_identically():
+    """Duplicated logic in the two places drifts, and the drift is silent:
+    the flow runs saying every session is down and then reports them up, or
+    declines to run on state it would have called a fault."""
+    from checks.lisp_session import peer_session_states
+
+    etr = _Etr({"172.19.1.64": [{"state": "Up"}],
+                "172.19.1.65": [{"state": "Down"}]})
+    up, down = peer_session_states(etr)
+    assert up == [("172.19.1.64", "Up")]
+    assert down == [("172.19.1.65", "Down")]
+
+
+def test_state_is_compared_case_insensitively():
+    """LispGlobalSession compared `state == "Up"` exactly while the trigger
+    lowercased. A state of "up" counted as down in one and up in the other."""
+    from checks.lisp_session import peer_session_states
+
+    up, down = peer_session_states(_Etr({"172.19.1.64": [{"state": "up"}],
+                                         "172.19.1.65": [{"state": " Up "}]}))
+    assert len(up) == 2 and not down
+
+
+def test_the_switches_own_rloc_is_not_a_peer():
+    from checks.lisp_session import peer_session_states
+
+    etr = _Etr({"172.19.1.68": [{"state": "Down"}],
+                "172.19.1.64": [{"state": "Up"}]})
+    up, down = peer_session_states(etr)
+    assert up == [("172.19.1.64", "Up")]
+    assert not down
+
+
+def test_an_unreadable_row_counts_as_not_up():
+    """An unreadable session is not evidence of a healthy one."""
+    from checks.lisp_session import peer_session_states
+
+    for rows in ([], [{}], None, "nonsense"):
+        up, down = peer_session_states(_Etr({"172.19.1.64": rows}))
+        assert not up
+        assert down == [("172.19.1.64", "unknown")]
+
+
+def test_an_etr_with_no_sessions_reads_empty():
+    from checks.lisp_session import peer_session_states
+
+    assert peer_session_states(_Etr({})) == ([], [])
+    assert peer_session_states(types.SimpleNamespace()) == ([], [])

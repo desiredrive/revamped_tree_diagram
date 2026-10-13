@@ -4458,7 +4458,10 @@ class ApLispSessionTrigger(_ApCheck):
         because they could not be read would be a false finding.
         """
         try:
-            from checks.lisp_session import LispSessionTarget, _profile_xtr
+            from checks.lisp_session import (
+                LispSessionTarget, _profile_xtr, peer_session_states)
+            # The same scope the queued flow uses, so the ETR profiled here
+            # is the one it reads rather than a second profile of the switch.
             probe = LispSessionTarget(
                 eid=ctx.state.get("ap_ip"),
                 xtr_hostname=ctx.state.get("xtr_hostname"),
@@ -4468,20 +4471,9 @@ class ApLispSessionTrigger(_ApCheck):
         except BaseException:
             return []
 
-        peers = getattr(
-            getattr(etr, "global_lisp_sessions", None), "peers", None) or {}
-        own_rloc = getattr(
-            getattr(etr, "profiled_device", None), "loopback", None)
-        down = []
-        for peer, rows in peers.items():
-            if peer == own_rloc:
-                continue          # the switch's session to itself is not a peer
-            try:
-                state = rows[0]["state"]
-            except (KeyError, IndexError, TypeError):
-                state = "unknown"
-            if str(state).strip().lower() != "up":
-                down.append((peer, state))
+        # Read through the flow's own reader: this decision and the session
+        # state the flow reports have to be the same fact.
+        _up, down = peer_session_states(etr)
         return down
 
 

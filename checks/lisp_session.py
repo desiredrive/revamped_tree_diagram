@@ -105,6 +105,35 @@ class _SessionCheck(Check):
         return CheckResult(CheckStatus.FAIL, message, data=data or {})
 
 
+def peer_session_states(etr):
+    """This ETR's LISP peers as (up, down), each a list of (peer, state).
+
+    The single reader of session state for the whole flow. The trigger that
+    decides whether to run the flow and the check that reports session state
+    inside it have to agree -- if they drift, the flow runs saying every
+    session is down and then reports them up, or declines to run on state it
+    would have reported as a fault.
+
+    The switch's session to its own RLOC is not a peer and is skipped; a row
+    whose state cannot be read counts as not up, because an unreadable
+    session is not evidence of a healthy one.
+    """
+    peers = getattr(
+        getattr(etr, "global_lisp_sessions", None), "peers", None) or {}
+    own_rloc = getattr(getattr(etr, "profiled_device", None), "loopback", None)
+    up, down = [], []
+    for peer, rows in peers.items():
+        if peer == own_rloc:
+            continue
+        try:
+            state = rows[0]["state"]
+        except (KeyError, IndexError, TypeError):
+            state = "unknown"
+        (up if str(state).strip().lower() == "up" else down).append(
+            (peer, state))
+    return up, down
+
+
 def _profile_xtr(ctx: RunContext, target: LispSessionTarget):
     """The profiled ETR, built once per run and cached in ctx.state.
 
@@ -349,19 +378,9 @@ class LispGlobalSession(_SessionCheck):
                 f"Could not read the LISP session state from "
                 f"{t.xtr_hostname} ({type(e).__name__}: {e}).")
 
-        peers = getattr(getattr(etr, "global_lisp_sessions", None), "peers", None) or {}
         etr_rloc = getattr(etr.profiled_device, "loopback", None)
         ctx.state[t.key("_lisp_session_etr_rloc")] = etr_rloc
-
-        up, down = [], []
-        for peer, rows in peers.items():
-            if peer == etr_rloc:
-                continue          # the switch's session to itself is not a peer
-            try:
-                state = rows[0]["state"]
-            except (KeyError, IndexError, TypeError):
-                state = "unknown"
-            (up if state == "Up" else down).append((peer, state))
+        up, down = peer_session_states(etr)
 
         if not up:
             listed = ", ".join(f"{p} ({s})" for p, s in down) or "none"
