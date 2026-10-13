@@ -289,3 +289,45 @@ def test_unregistered_ap_draws_no_link(patched, monkeypatch):
                         lambda h, c, s, **k: downed)
     r = ApWlcApState(WLC, "wlc0").run_ap(_ctx())
     assert "add_edges" not in (r.data or {})
+
+
+def test_non_default_flex_profile_stops_the_run(patched, monkeypatch):
+    """A flex profile switches traffic locally at the AP.
+
+    That bypasses the VXLAN access tunnel this flow exists to validate, so
+    every check of the tunnel below would measure a path the AP is not using.
+    """
+    import checks.ap_wlc as mod
+    from checks.ap_wlc import ApWlcApState
+
+    monkeypatch.setattr(mod, "_ap_config_general", lambda h, n, s: (
+        {"ap_mode": "Local", "administrative_state": "Enabled",
+         "flex_profile": "FP_branch_local"}, None))
+    ctx = _ctx()
+    r = ApWlcApState(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.FAIL
+    assert "FP_branch_local" in r.message
+    assert "ap_stop" in ctx.state
+
+
+def test_default_flex_profile_passes(patched):
+    """The lab AP carries default-flex-profile and must not be flagged."""
+    from checks.ap_wlc import ApWlcApState
+
+    r = ApWlcApState(WLC, "wlc0").run_ap(_ctx())
+    assert r.status is CheckStatus.OK
+    # The field is still printed; what must be absent is the fault marker.
+    assert "✖" not in r.message
+
+
+def test_flex_profile_failure_outranks_the_warnings(patched, monkeypatch):
+    """A FAIL must not be collected into the WARN list and downgraded."""
+    import checks.ap_wlc as mod
+    from checks.ap_wlc import ApWlcApState
+
+    # Both a flex-profile fault and a mode fault: the FAIL has to win.
+    monkeypatch.setattr(mod, "_ap_config_general", lambda h, n, s: (
+        {"ap_mode": "FlexConnect", "administrative_state": "Enabled",
+         "flex_profile": "FP_branch_local"}, None))
+    r = ApWlcApState(WLC, "wlc0").run_ap(_ctx())
+    assert r.status is CheckStatus.FAIL

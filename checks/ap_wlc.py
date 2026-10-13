@@ -1239,6 +1239,28 @@ class ApWlcApState(_PerWlcCheck):
             flag(f"The controller has this AP at {ap_ip}, but {source} on the "
                  f"edge has {sisf_ip}.")
 
+        # A fabric AP carries its traffic in the VXLAN access tunnel, which is
+        # what the flex profile would override: a non-default one switches
+        # traffic locally at the AP instead, so the tunnel this flow exists to
+        # validate is bypassed and every check of it below would be measuring
+        # a path the AP is not using. Returned rather than collected with the
+        # warnings below, which would downgrade it.
+        flex = ((cfg or {}).get("flex_profile") or "").strip()
+        if flex and flex.lower() != _DEFAULT_FLEX_PROFILE:
+            ctx.state["ap_stop"] = (
+                f"AP {name} has flex profile {flex}, not "
+                f"{_DEFAULT_FLEX_PROFILE}.")
+            return CheckResult(
+                CheckStatus.FAIL,
+                "\n".join(lines + [
+                    "",
+                    f"  ✖ The AP's flex profile is {flex}, not "
+                    f"{_DEFAULT_FLEX_PROFILE}. A fabric AP must carry its "
+                    f"traffic in the VXLAN access tunnel; a flex profile "
+                    f"switches it locally at the AP instead, so the tunnel "
+                    f"this flow validates is bypassed.",
+                ]))
+
         # Local is the mode an AP onboards in on a fabric edge. Anything else
         # is a different design, and the checks above and below it are reading
         # a topology the AP is not actually using.
@@ -1344,6 +1366,10 @@ def _uptime_message(name, row, uptime_seconds):
 #: An association younger than this means the AP re-joined the controller
 #: recently. Ten minutes is the manifest's figure.
 _RECENT_ASSOCIATION = 10 * 60
+
+#: The flex profile a fabric AP is expected to carry. Anything else switches
+#: traffic locally at the AP rather than through the VXLAN access tunnel.
+_DEFAULT_FLEX_PROFILE = "default-flex-profile"
 
 
 class ApWlcApUptime(_PerWlcCheck):
