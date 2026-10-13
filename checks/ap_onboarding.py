@@ -4374,11 +4374,17 @@ class ApLispSessionTrigger(_ApCheck):
 
     def run_ap(self, ctx: RunContext) -> CheckResult:
         missing = ctx.state.get("ap_cp_reg_missing") or []
-        if not missing:
+        # Trigger 1: a session that is down is its own reason to run the
+        # flow. A registration can still be cached on a control plane whose
+        # session has since gone down, so waiting for the record to go
+        # missing would leave the fault unexamined until it does.
+        down = self._down_sessions(ctx)
+        if not missing and not down:
             return CheckResult(
                 CheckStatus.SKIP,
                 "Skipped — every reachable control plane holds the AP's "
-                "registration, so there is nothing to explain.",
+                "registration and every LISP session is up, so there is "
+                "nothing to explain.",
             )
 
         ip = ctx.state.get("ap_ip")
@@ -4411,17 +4417,72 @@ class ApLispSessionTrigger(_ApCheck):
             pairs.append((rlocs.get(host) or host, host,
                           mgmts.get(host) or host))
 
+        # Trigger 1 names its control planes by RLOC -- the peer address the
+        # session is to -- not by hostname, so they are mapped back to the
+        # CP they belong to. A peer that matches no known CP is still walked
+        # under its own address: a session down to something the fabric does
+        # not account for is itself worth the flow.
+        if not pairs:
+            by_rloc = {rloc: host for host, rloc in rlocs.items()}
+            for peer, _state in down:
+                host = by_rloc.get(peer, peer)
+                pairs.append((peer, host, mgmts.get(host) or peer))
+
         checks = lisp_session_checks(target, map_servers=pairs)
-        names = ", ".join(missing)
+        if missing:
+            names = ", ".join(missing)
+            why = (f"{names} {'does' if len(missing) == 1 else 'do'} not hold "
+                   f"a registration for {ip}")
+        else:
+            names = ", ".join(f"{peer} ({state})" for peer, state in down)
+            why = (f"the LISP session to {names} is not up, though the "
+                   f"registration for {ip} is still held")
         return CheckResult(
             CheckStatus.WARN,
-            f"{names} {'does' if len(missing) == 1 else 'do'} not hold a "
-            f"registration for {ip}, so the LISP session flow runs to say "
-            f"why: the switch's own database and map-server configuration, "
-            f"its sessions, and each control plane's configuration and "
-            f"counters.",
+            f"{why}, so the LISP session flow runs to say why: the switch's "
+            f"own database and map-server configuration, its sessions, and "
+            f"each control plane's configuration and counters.",
             data={"queue_checks": checks},
         )
+
+    @staticmethod
+    def _down_sessions(ctx):
+        """The Edge's LISP peers whose session is not up, as (peer, state).
+
+        Read through the same cached ETR the queued flow uses, so asking the
+        question costs no extra round-trip and the flow below sees exactly
+        the state this decision was made on.
+
+        A read that fails returns nothing: the registration side of the
+        trigger still stands on its own, and reporting sessions as down
+        because they could not be read would be a false finding.
+        """
+        try:
+            from checks.lisp_session import LispSessionTarget, _profile_xtr
+            probe = LispSessionTarget(
+                eid=ctx.state.get("ap_ip"),
+                xtr_hostname=ctx.state.get("xtr_hostname"),
+                catc_name=ctx.state.get("catc_name"))
+            etr = _profile_xtr(ctx, probe)
+            etr.global_lisp_session(ctx.service)
+        except BaseException:
+            return []
+
+        peers = getattr(
+            getattr(etr, "global_lisp_sessions", None), "peers", None) or {}
+        own_rloc = getattr(
+            getattr(etr, "profiled_device", None), "loopback", None)
+        down = []
+        for peer, rows in peers.items():
+            if peer == own_rloc:
+                continue          # the switch's session to itself is not a peer
+            try:
+                state = rows[0]["state"]
+            except (KeyError, IndexError, TypeError):
+                state = "unknown"
+            if str(state).strip().lower() != "up":
+                down.append((peer, state))
+        return down
 
 
 class ApCpDiscovery(_ApCheck):

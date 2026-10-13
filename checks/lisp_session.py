@@ -59,6 +59,17 @@ class LispSessionTarget:
         self.xtr_node_id = xtr_node_id
         # How to name the EID in output ("the AP's address", "the client").
         self.label = label or f"EID {eid}"
+        # Everything this flow caches in ctx.state is scoped to the device
+        # whose sessions are being walked. The flow runs more than once in a
+        # single AP run -- the edge registers the AP's address, the
+        # controller registers its radio MAC -- and without this the second
+        # run reads the first's profiled device, its session states and its
+        # stop reason, and reports the wrong box's fabric.
+        self.scope = xtr_hostname or "xtr"
+
+    def key(self, name):
+        """A ctx.state key private to this target's device."""
+        return f"{name}::{self.scope}"
 
     @property
     def isl3(self):
@@ -80,7 +91,7 @@ class _SessionCheck(Check):
         self.target = target
 
     def run(self, ctx: RunContext) -> CheckResult:
-        stop = ctx.state.get(STOP_KEY)
+        stop = ctx.state.get(self.target.key(STOP_KEY))
         if stop:
             return CheckResult(CheckStatus.SKIP, f"Skipped — {stop}")
         return self.run_session(ctx)
@@ -90,7 +101,7 @@ class _SessionCheck(Check):
 
     def _stop(self, ctx: RunContext, reason: str, message: str, data=None):
         """Record why the flow cannot continue, and fail with the explanation."""
-        ctx.state[STOP_KEY] = reason
+        ctx.state[self.target.key(STOP_KEY)] = reason
         return CheckResult(CheckStatus.FAIL, message, data=data or {})
 
 
@@ -101,7 +112,7 @@ def _profile_xtr(ctx: RunContext, target: LispSessionTarget):
     device. Profiling costs a Catalyst Center roundtrip plus CLI, so it is done
     once and reused rather than per check.
     """
-    cached = ctx.state.get("_lisp_session_etr")
+    cached = ctx.state.get(target.key("_lisp_session_etr"))
     if cached is not None:
         return cached
     from traffic_flows.lispsessiontroubleshooting import ETRDevice
@@ -134,7 +145,7 @@ def _profile_xtr(ctx: RunContext, target: LispSessionTarget):
         etr.existing_profiled(shim)
     else:
         etr.device_profiler(target.catc_name, ctx.service)
-    ctx.state["_lisp_session_etr"] = etr
+    ctx.state[target.key("_lisp_session_etr")] = etr
     return etr
 
 
@@ -340,7 +351,7 @@ class LispGlobalSession(_SessionCheck):
 
         peers = getattr(getattr(etr, "global_lisp_sessions", None), "peers", None) or {}
         etr_rloc = getattr(etr.profiled_device, "loopback", None)
-        ctx.state["_lisp_session_etr_rloc"] = etr_rloc
+        ctx.state[t.key("_lisp_session_etr_rloc")] = etr_rloc
 
         up, down = [], []
         for peer, rows in peers.items():
@@ -447,7 +458,7 @@ class LispPerMapServerSession(_SessionCheck):
         # Recorded so the verdict at the end of the flow can see every
         # map-server at once. Each check only ever knows about its own.
         ctx.state.setdefault(
-            "lisp_session_states", {})[self.map_server] = state
+            t.key("lisp_session_states"), {})[self.map_server] = state
 
         if state.lower() != "up":
             # WARN, not FAIL: a down session is a finding about the fabric, and
@@ -1708,7 +1719,7 @@ class LispSessionVerdict(_SessionCheck):
     def run_session(self, ctx: RunContext) -> CheckResult:
         t = self.target
         self.target_node_id = t.xtr_node_id
-        states = ctx.state.get("lisp_session_states") or {}
+        states = ctx.state.get(t.key("lisp_session_states")) or {}
         if not states:
             return CheckResult(
                 CheckStatus.SKIP,

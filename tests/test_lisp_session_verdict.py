@@ -22,9 +22,11 @@ def _target():
 
 
 def _ctx(states):
+    """State keyed the way the flow keys it: private to this target's device."""
+    key = _target().key("lisp_session_states")
     return types.SimpleNamespace(
         service=object(), payload={},
-        state={"lisp_session_states": states} if states is not None else {})
+        state={key: states} if states is not None else {})
 
 
 def test_every_session_down_stops_the_flow():
@@ -32,7 +34,7 @@ def test_every_session_down_stops_the_flow():
     ctx = _ctx({"172.19.1.64": "Down", "172.19.1.65": "Down"})
     r = LispSessionVerdict(_target()).run_session(ctx)
     assert r.status is CheckStatus.FAIL
-    assert ctx.state[STOP_KEY]
+    assert ctx.state[_target().key(STOP_KEY)]
     assert "172.19.1.64" in r.message and "172.19.1.65" in r.message
 
 
@@ -42,7 +44,7 @@ def test_one_session_up_continues():
     ctx = _ctx({"172.19.1.64": "Up", "172.19.1.65": "Down"})
     r = LispSessionVerdict(_target()).run_session(ctx)
     assert r.status is CheckStatus.WARN
-    assert not ctx.state.get(STOP_KEY)
+    assert not ctx.state.get(_target().key(STOP_KEY))
     assert "172.19.1.65" in r.message
 
 
@@ -50,7 +52,7 @@ def test_all_up_passes():
     ctx = _ctx({"172.19.1.64": "Up", "172.19.1.65": "Up"})
     r = LispSessionVerdict(_target()).run_session(ctx)
     assert r.status is CheckStatus.OK
-    assert not ctx.state.get(STOP_KEY)
+    assert not ctx.state.get(_target().key(STOP_KEY))
 
 
 def test_the_stop_comes_after_the_troubleshooting_not_before():
@@ -75,7 +77,7 @@ def test_states_unread_skip_rather_than_stopping():
         ctx = _ctx(states)
         r = LispSessionVerdict(_target()).run_session(ctx)
         assert r.status is CheckStatus.SKIP
-        assert not ctx.state.get(STOP_KEY)
+        assert not ctx.state.get(_target().key(STOP_KEY))
 
 
 def test_unknown_state_counts_as_not_up():
@@ -83,7 +85,7 @@ def test_unknown_state_counts_as_not_up():
     ctx = _ctx({"172.19.1.64": "unknown", "172.19.1.65": "Init"})
     r = LispSessionVerdict(_target()).run_session(ctx)
     assert r.status is CheckStatus.FAIL
-    assert ctx.state[STOP_KEY]
+    assert ctx.state[_target().key(STOP_KEY)]
 
 
 def test_the_stop_makes_later_session_checks_skip():
@@ -95,3 +97,34 @@ def test_the_stop_makes_later_session_checks_skip():
     LispSessionVerdict(_target()).run_session(ctx)
     later = LispGlobalSession(_target()).run(ctx)
     assert later.status is CheckStatus.SKIP
+
+
+def test_two_runs_of_the_flow_do_not_share_state():
+    """The flow runs more than once in a single AP run: the edge registers
+    the AP's address, the controller registers its radio MAC.
+
+    Unscoped, the second run reads the first's profiled device, its session
+    states and its stop reason -- and reports the wrong box's fabric as the
+    fault. Each of those is silent: the output looks like a finding.
+    """
+    edge = LispSessionTarget(eid="172.19.5.10", xtr_hostname="Edge2",
+                             catc_name="catc", iid=4097, af="ipv4")
+    wlc = LispSessionTarget(eid="3891.b70f.2600", xtr_hostname="WLCv",
+                            catc_name="catc", iid=8188, af="ethernet")
+
+    assert edge.key("lisp_session_states") != wlc.key("lisp_session_states")
+    assert edge.key(STOP_KEY) != wlc.key(STOP_KEY)
+
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={
+        edge.key("lisp_session_states"): {"172.19.1.64": "Down",
+                                          "172.19.1.65": "Down"},
+        wlc.key("lisp_session_states"): {"172.19.1.64": "Up",
+                                         "172.19.1.65": "Up"},
+    })
+
+    # The edge's sessions are all down, so its flow stops.
+    assert LispSessionVerdict(edge).run_session(ctx).status is CheckStatus.FAIL
+    # The controller's are up, and must be unaffected by the edge's stop.
+    assert LispSessionVerdict(wlc).run_session(ctx).status is CheckStatus.OK
+    assert ctx.state.get(edge.key(STOP_KEY))
+    assert not ctx.state.get(wlc.key(STOP_KEY))
