@@ -1260,8 +1260,21 @@ class ApWlcApState(_PerWlcCheck):
         if notes:
             lines += [""] + [f"  ⚠ {n}" for n in notes]
 
+        # Registered means the CAPWAP control session exists, so draw it.
+        # Only here: the earlier returns are an AP that is absent from this
+        # controller or not registered on it, and in neither case is there a
+        # tunnel to show. The edge is the one piece of the AP's state that is
+        # not about a single node, which is why it goes on the canvas rather
+        # than into the message.
         return CheckResult(status, "\n".join(lines),
-                           data={"ap_name": name, "state": state})
+                           data={"ap_name": name, "state": state,
+                                 "add_edges": [{
+                                     "source": "ap",
+                                     "target": self.target_node_id,
+                                     "label": "CAPWAP Control",
+                                     "id_prefix": "capwap",
+                                     "capwap": True,
+                                 }]})
 
 
 def _not_found_message(cdp_name, ap_mac, wlc, rows, unreadable, expected):

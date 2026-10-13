@@ -940,6 +940,20 @@ function showTopology(payload) {
           'line-color': '#2563eb',
           'width': 2,
       }},
+      { selector: 'edge[capwap = "true"]', style: {
+          // Bowed away from the physical path so the tunnel reads as going
+          // over the topology rather than through it.
+          'curve-style': 'unbundled-bezier',
+          'control-point-distances': [-110],
+          'control-point-weights': [0.5],
+          'line-style': 'dashed',
+          'line-dash-pattern': [8, 4],
+          'line-color': '#7c3aed',
+          'width': 3,
+          'color': '#5b21b6',
+          'font-size': '10px',
+          'text-rotation': 'none',
+      }},
       { selector: 'edge[rfBand = "good"]',   style: { 'color': '#16a34a' } },
       { selector: 'edge[rfBand = "normal"]', style: { 'color': '#0f172a' } },
       { selector: 'edge[rfBand = "bad"]',    style: { 'color': '#dc2626' } },
@@ -1730,6 +1744,10 @@ function addEdges(edges) {
         source: sourceId,
         target: targetId,
         label: spec.label || '',
+        // The CAPWAP tunnel is drawn differently from a wired link: it is an
+        // overlay between the AP and its controller, not a cable, and the
+        // hops it crosses are already on the canvas as their own edges.
+        capwap: spec.capwap ? 'true' : undefined,
       },
     });
   });

@@ -261,3 +261,31 @@ def test_controller_with_no_aps_is_distinguished_from_a_bad_parse():
     assert _ap_summary_rows({"ap_neighbor_count": 0}) == {}
     assert _ap_summary_rows({"something_else": 1}) is None
     assert _ap_summary_rows("not parsed at all") is None
+
+
+def test_registered_ap_draws_the_capwap_control_link(patched):
+    """The CAPWAP session is the one part of the AP's state that is not about
+    a single node, so it goes on the canvas as an edge."""
+    from checks.ap_wlc import ApWlcApState
+
+    r = ApWlcApState(WLC, "wlc0").run_ap(_ctx())
+    edges = r.data["add_edges"]
+    assert len(edges) == 1
+    assert edges[0]["source"] == "ap"
+    assert edges[0]["target"] == "wlc0"
+    assert edges[0]["label"] == "CAPWAP Control"
+    assert edges[0]["capwap"] is True
+
+
+def test_unregistered_ap_draws_no_link(patched, monkeypatch):
+    """There is no tunnel to show when the AP never registered."""
+    import copy
+    import radkit_cli
+    from checks.ap_wlc import ApWlcApState
+
+    downed = copy.deepcopy(AP_SUMMARY)
+    downed["ap_name"]["AP-002"]["state"] = "Downloading"
+    monkeypatch.setattr(radkit_cli, "get_single_output_genie",
+                        lambda h, c, s, **k: downed)
+    r = ApWlcApState(WLC, "wlc0").run_ap(_ctx())
+    assert "add_edges" not in (r.data or {})
