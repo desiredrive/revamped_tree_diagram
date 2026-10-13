@@ -1307,7 +1307,13 @@ function applyNodeLabel(nodeId) {
   if (n.empty()) return;
   const base = n.data('baseLabel') || n.data('label') || '';
   const rloc = n.data('rloc');
-  const tags = n.data('tags') || [];
+  // Tags carry the roles merged in later; the role the node was CREATED with
+  // is in data('role') and was never shown. A device that is both a Border
+  // and a CP therefore read as whichever one happened to arrive second --
+  // the badge said "B+C" while the text underneath said just "[CP]".
+  const tags = (n.data('tags') || []).slice();
+  const ownTag = ROLE_TAG[n.data('role')];
+  if (ownTag && !tags.includes(ownTag)) tags.unshift(ownTag);
   let label = base;
   if (rloc) label += '\nRLOC: ' + rloc;
   if (tags.length) label += '\n[' + tags.join(', ') + ']';
