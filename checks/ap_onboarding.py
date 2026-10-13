@@ -5031,10 +5031,16 @@ class ApVlanAccessMap(_ApCheck):
                     denies.append(mgmt_ip)
                 if unread:
                     unreadable.extend(unread)
+                # "dropped by" in the header asserted the outcome before
+                # the flows below had been read, so a map that dropped
+                # nothing still announced a drop. The header names what was
+                # evaluated; the verdict belongs to the lines under it.
                 sections.append(render_acl_section(
-                    f"AP {ap_ip} ↔ WLC {wlc_host} ({mgmt_ip}), dropped by "
+                    f"AP {ap_ip} ↔ WLC {wlc_host} ({mgmt_ip}), against "
                     f"{acl} on VLAN {vlan}",
-                    None, blocked=blocked, permitted=allowed, unread=unread))
+                    None, blocked=blocked, permitted=allowed, unread=unread,
+                    blocked_label="Dropped by the access-map",
+                    permitted_label="Not dropped"))
 
         body = "\n\n".join(sections)
         if implicit_deny:

@@ -170,7 +170,8 @@ def _evaluate_acls(ctx, hostname, interfaces, flows):
     return names, denies, permits, unevaluated
 
 
-def render_acl_section(header, path, blocked=(), permitted=(), unread=()):
+def render_acl_section(header, path, blocked=(), permitted=(), unread=(),
+                       blocked_label="Blocked", permitted_label="Permitted"):
     """Render one destination's ACL findings as an indented section.
 
     A flat bullet list forced every line to repeat the addresses and the
@@ -180,15 +181,20 @@ def render_acl_section(header, path, blocked=(), permitted=(), unread=()):
 
     `blocked` and `permitted` are (flow, detail) pairs; `unread` is
     (acl, flows, reason) triples.
+
+    The two group labels are overridable because not every access list
+    permits and denies. A VACL's lists are match lists: a flow they do not
+    match is not "permitted" by anything, it simply falls through to the
+    next sequence, and calling that a permit overstates what was checked.
     """
     out = [header + (f", via {path}:" if path else ":")]
     if blocked:
         out.append("")
-        out.append("  Blocked")
+        out.append("  " + blocked_label)
         out += [f"    • {flow} — {detail}" for flow, detail in blocked]
     if permitted and not blocked:
         out.append("")
-        out.append("  Permitted")
+        out.append("  " + permitted_label)
         out += [f"    • {flow} — {detail}" for flow, detail in permitted]
     if unread:
         out.append("")
