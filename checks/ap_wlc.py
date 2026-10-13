@@ -319,20 +319,59 @@ class ApWlcProfile(_ApCheck):
             queued.append(ApWlcFabricEnabled(hostname, node))
             queued.append(ApWlcControlPlanes(hostname, node))
             queued.append(ApWlcInfraVn(hostname, node))
-            # Manifest step 5: the AP's own state on this controller.
-            # Ordered as the operator reads them: uptime, then the
-            # controller's country configuration, then the AP's own config.
-            queued.append(ApWlcApUptime(hostname, node))
-            queued.append(ApWlcApCountry(hostname, node))
-            queued.append(ApWlcApState(hostname, node))
-        # Last: every collection has been attempted by the time these run.
+        # Last: every collection has been attempted by the time this runs.
         queued.append(ApWlcCollectionVerdict())
-        queued.append(ApWlcApStateVerdict())
         plural = "" if len(candidates) == 1 else "s"
         return CheckResult(
             CheckStatus.OK,
             f"Validating {len(candidates)} Fabric WLC{plural}; each controller's "
             "results appear on its own node.",
+            data={"queue_checks": queued},
+        )
+
+
+class ApWlcApStateProfile(_ApCheck):
+    """Fan out the manifest's step 5: what each controller believes about this AP.
+
+    Separate from `ApWlcProfile`, which runs at step 2, because this half has
+    to run after the wired validations. Step 2 answers "are these controllers
+    healthy", which everything downstream is built on -- `ApInfraVnVlan` takes
+    the AP's onboarding VLAN from the L2 instance it reads. Step 5 answers
+    "did this AP join", which is a conclusion about the wired path, not an
+    input to it: a controller that has never heard of the AP tells you
+    nothing until you know whether the port, the VLAN, the ACLs and the LISP
+    registrations between them are sound.
+
+    Running late also makes the uptime line readable. It names the AP as CDP
+    saw it on the wire, and `ap_cdp_neighbor` is published by the step-3 edge
+    checks -- so queued at step 2 the name was always empty.
+    """
+
+    name = "WLC AP State"
+    target_node_id = "xtr"
+    running_note = "Checking the AP's state on each controller…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        candidates = ctx.state.get("ap_wlc_candidates") or []
+        if not candidates:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery).",
+            )
+        queued = []
+        for hostname, mgmt_ip, node in candidates:
+            # Ordered as the operator reads them: uptime, then the
+            # controller's country configuration, then the AP's own config.
+            queued.append(ApWlcApUptime(hostname, node))
+            queued.append(ApWlcApCountry(hostname, node))
+            queued.append(ApWlcApState(hostname, node))
+        # Last: every controller has been looked at by the time this runs.
+        queued.append(ApWlcApStateVerdict())
+        plural = "" if len(candidates) == 1 else "s"
+        return CheckResult(
+            CheckStatus.OK,
+            f"Looking the AP up on {len(candidates)} Fabric WLC{plural}; each "
+            "controller's results appear on its own node.",
             data={"queue_checks": queued},
         )
 

@@ -52,7 +52,11 @@ from checks.ap_onboarding import (
     ApL3LispRegistration,
     ApCpDiscovery,
 )
-from checks.ap_wlc import ApWlcDiscovery, ApWlcProfile
+from checks.ap_wlc import (
+    ApWlcDiscovery,
+    ApWlcProfile,
+    ApWlcApStateProfile,
+)
 from checks.profile import (
     ResolveCatcName,
     ProfileXtrNetworkDevice,
@@ -292,6 +296,12 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApL3LispDatabase(),
             ApL3LispRegistration(),
             ApCpDiscovery(),
+            # Manifest step 5, last: what each controller believes about this
+            # AP. Deliberately after the wired validations -- "the WLC has
+            # never heard of this AP" is a conclusion drawn from the port, the
+            # VLAN, the ACLs and the LISP registrations above, not a finding
+            # that stands on its own. Its collection half ran back at step 2.
+            ApWlcApStateProfile(),
         ]
     if scenario == "dhcp":
         return [
