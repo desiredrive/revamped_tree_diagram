@@ -1476,11 +1476,36 @@ const ROLE_OFFSET = {
   'underlay-unknown': { dx: -340, dy:  -80 },
   fabric:          { dx: -440, dy:  200 },
   wlc:             { dx:    0, dy: -320 },
-  'access-point':  { dx: -240, dy: -220 },
+  // The AP hangs straight off the Edge on the horizontal, so the link that
+  // matters most in this scenario reads as one clean line rather than a
+  // diagonal competing with the fabric nodes above and below it.
+  'access-point':  { dx: -360, dy:    0 },
   // Spawned by WirelessFabricEdgeEtr when the wireless endpoint roamed off
   // the user-supplied XTR — placed to the right of the original.
   xtr:             { dx:  360, dy:    0 },
 };
+
+// Borders are placed on an arc to the RIGHT of the Edge, spread evenly rather
+// than stacked: they are peers of one another, and stacking them vertically
+// implied a hierarchy between them that does not exist. Right also matches the
+// direction traffic leaves the fabric, with the AP on the left where it
+// enters. The arc is centred on the horizontal, so a single border sits level
+// with the Edge and two straddle it symmetrically.
+const BORDER_ARC_RADIUS = 380;
+const BORDER_ARC_SPREAD = 100;  // total degrees the fan occupies
+
+function borderArcPosition(parent, index, total) {
+  const span = total > 1 ? BORDER_ARC_SPREAD : 0;
+  const step = total > 1 ? span / (total - 1) : 0;
+  // Centred on 0 degrees (straight right).
+  const deg = -span / 2 + step * index;
+  const rad = deg * Math.PI / 180;
+  const p = parent.position();
+  return {
+    x: p.x + BORDER_ARC_RADIUS * Math.cos(rad),
+    y: p.y - BORDER_ARC_RADIUS * Math.sin(rad),
+  };
+}
 
 // Vertical step used when two nodes would land on the same spot. Must exceed a
 // node's icon plus its label block, or staggered nodes still overlap.
@@ -1536,6 +1561,13 @@ function addNodes(nodes) {
   // by exact equality.
   const occupied = new Set();
   const ipIndex = new Map();  // ip -> existing node id
+  // Borders are laid out as a set, so the fan needs to know how many there
+  // are before placing the first one. Counted across this batch, which is how
+  // Border Discovery delivers them.
+  const borderTotal = nodes.filter(
+    n => n && n.role === 'border' && n.id && cy.getElementById(n.id).empty()
+  ).length;
+  let borderSeen = 0;
   cy.nodes().forEach(n => {
     const p = n.position();
     occupied.add([p.x, p.y]);
@@ -1614,14 +1646,24 @@ function addNodes(nodes) {
     // Need *some* reference point for positioning; bail if XTR isn't there yet.
     if (parent.empty()) return;
     const role = spec.role || 'unknown';
-    const offset = ROLE_OFFSET[role] || { dx: 200, dy: 0 };
-    let x = parent.position().x + offset.dx;
-    let y = parent.position().y + offset.dy;
+    let x, y;
+    if (role === 'border' && borderTotal > 0) {
+      const p = borderArcPosition(parent, borderSeen++, borderTotal);
+      x = p.x; y = p.y;
+    } else {
+      const offset = ROLE_OFFSET[role] || { dx: 200, dy: 0 };
+      x = parent.position().x + offset.dx;
+      y = parent.position().y + offset.dy;
+    }
     // Stagger if something is already near this slot. Exact-coordinate matching
     // is not enough -- two nodes a few px apart still overlap once their labels
     // are drawn -- so treat anything within the stagger box as a collision.
+    // Arc-placed borders are already spread so they cannot overlap each
+    // other; letting the stagger push them down would undo the even spacing
+    // that is the whole point of the fan.
+    const onArc = role === 'border' && borderTotal > 0;
     let guard = 0;
-    while (guard++ < 40 && [...occupied].some(([ox, oy]) =>
+    while (!onArc && guard++ < 40 && [...occupied].some(([ox, oy]) =>
              Math.abs(ox - x) < 200 && Math.abs(oy - y) < STAGGER_Y)) {
       y += STAGGER_Y;
     }
