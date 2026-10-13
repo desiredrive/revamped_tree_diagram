@@ -363,6 +363,9 @@ class ApWlcApStateProfile(_ApCheck):
             # Ordered as the operator reads them: uptime, then the
             # controller's country configuration, then the AP's own config.
             queued.append(ApWlcApUptime(hostname, node))
+            # Next to the uptime it qualifies: a recent association means more
+            # when you know whether the AP has ever fallen over.
+            queued.append(ApWlcApCrash(hostname, node))
             queued.append(ApWlcApCountry(hostname, node))
             queued.append(ApWlcApState(hostname, node))
         # Last: every controller has been looked at by the time this runs.
@@ -1443,6 +1446,37 @@ class ApWlcApUptime(_PerWlcCheck):
 
 
 
+def _resolve_ap_name(ctx, wlc_hostname, service):
+    """This AP's name on `wlc_hostname`, or "" if it is not joined to it.
+
+    Prefers the name `ApWlcApState` published, and falls back to resolving it
+    from `show ap summary`. The fallback is what makes the per-WLC checks
+    independent of the order they are queued in: whichever runs first pays for
+    the lookup, and the rest read it from state.
+
+    The lookup is on the Ethernet MAC, which is what the run was started with.
+    """
+    from checks.shared import normalize_mac
+
+    name = ctx.state.get("ap_wlc_ap_name")
+    if name:
+        return name
+    ap_mac = normalize_mac(ctx.payload.get("mac"))
+    if not ap_mac:
+        return ""
+    from radkit_cli import get_single_output_genie
+    try:
+        parsed = get_single_output_genie(
+            wlc_hostname, "show ap summary", service)
+    except BaseException:
+        return ""
+    rows = _ap_summary_rows(parsed)
+    if not rows:
+        return ""
+    name, _row = _find_ap_by_ethernet_mac(rows, ap_mac)
+    return name or ""
+
+
 def _ap_country_direct(ctx, wlc_hostname, service):
     """The AP's own country, read from the controller without ApWlcApState.
 
@@ -1450,25 +1484,9 @@ def _ap_country_direct(ctx, wlc_hostname, service):
     controller's list and says it did not grade, which is honest about what
     was and was not established.
     """
-    from checks.shared import normalize_mac
-
-    ap_mac = normalize_mac(ctx.payload.get("mac"))
-    if not ap_mac:
-        return ""
-    name = ctx.state.get("ap_wlc_ap_name")
+    name = _resolve_ap_name(ctx, wlc_hostname, service)
     if not name:
-        from radkit_cli import get_single_output_genie
-        try:
-            parsed = get_single_output_genie(
-                wlc_hostname, "show ap summary", service)
-        except BaseException:
-            return ""
-        rows = _ap_summary_rows(parsed)
-        if not rows:
-            return ""
-        name, _row = _find_ap_by_ethernet_mac(rows, ap_mac)
-        if not name:
-            return ""
+        return ""
     cfg, _error = _ap_config_general(wlc_hostname, name, service)
     if not cfg:
         return ""
@@ -1476,6 +1494,79 @@ def _ap_country_direct(ctx, wlc_hostname, service):
     if country:
         ctx.state.setdefault("ap_wlc_country", {})[wlc_hostname] = country
     return country
+
+
+class ApWlcApCrash(_PerWlcCheck):
+    """Has this AP ever written a crash file to the controller?
+
+    Historical, not current state: the file stays in bootflash after the AP
+    recovers, so an entry does not mean the AP is crashing now. It means that
+    any flap this run is investigating has a crash behind it at least once,
+    which is the difference between an AP that is being disconnected and one
+    that is falling over on its own. That is why it is a warning rather than
+    a fault -- it narrows the cause, it does not establish one.
+    """
+
+    aspect = "AP Crash"
+    running_note = "Checking for AP crash files…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        service = ctx.service
+        if service is None:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        name = _resolve_ap_name(ctx, self.hostname, service)
+        if not name:
+            # Not a finding about crashes: the AP is not on this controller,
+            # which ApWlcApState and its verdict already report.
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — the AP is not joined to {self.hostname}, so it "
+                f"has no crash files here.")
+
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import parse_ap_crash_files
+
+        try:
+            raw = get_any_single_output(
+                self.hostname, "show ap crash-file", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"`show ap crash-file` could not be read from "
+                f"{self.hostname} — {type(e).__name__}: {e}")
+
+        rows, unreadable = parse_ap_crash_files(raw)
+        entry = rows.get(name)
+
+        if entry is None:
+            lines = [f"{name} has no crash file on {self.hostname}."]
+            if unreadable:
+                # The AP's absence from the table is the finding, so a row
+                # that could not be read is worth saying: it might have been
+                # this AP's.
+                lines += ["", f"  ⚠ {unreadable} row"
+                              f"{'' if unreadable == 1 else 's'} in the table "
+                              f"could not be read, so this is not conclusive."]
+                return CheckResult(CheckStatus.WARN, "\n".join(lines))
+            return CheckResult(CheckStatus.OK, "\n".join(lines))
+
+        lines = [
+            f"{name} has a crash file on {self.hostname}.",
+            "",
+            f"  AP name:     {name}",
+            f"  Crash file:  {entry['crash_file']}",
+        ]
+        if entry.get("mac"):
+            lines.append(f"  MAC:         {entry['mac']}")
+        lines += [
+            "",
+            f"  ⚠ This AP crashed at some point. Any flap event seen in this "
+            f"run has a crash behind it rather than the AP simply being "
+            f"disconnected. The file stays on the controller after the AP "
+            f"recovers, so this does not mean it is crashing now.",
+        ]
+        return CheckResult(CheckStatus.WARN, "\n".join(lines))
 
 
 class ApWlcApCountry(_PerWlcCheck):

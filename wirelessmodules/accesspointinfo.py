@@ -202,3 +202,60 @@ def parse_wireless_country(text):
             "bands": entry["bands"].strip(),
         }
     return countries, unreadable
+
+
+#: One `show ap crash-file` row. The crash filename is the anchor: it always
+#: ends in .crash and never contains a space, while the AP name column is
+#: padded to a width a longer name overruns. The four Radio Slot columns that
+#: follow are usually empty and are not captured -- a radio crash is a
+#: separate concern from the AP crashing, and nothing here grades them.
+_AP_CRASH_ROW = re.compile(
+    r"^(?P<ap_name>\S.*?)\s+(?P<crash_file>\S+\.crash)\b"
+)
+
+#: The MAC a crash filename embeds, undotted: NAME_4800b33aea80.crash. It is
+#: the only identifier in this table that survives an AP being renamed, which
+#: is why the lookup prefers it over the name column.
+_CRASH_FILE_MAC = re.compile(r"_([0-9a-fA-F]{12})\.crash$")
+
+
+def parse_ap_crash_files(text):
+    """`show ap crash-file` as (rows, unreadable).
+
+    There is no Genie parser for this command.
+
+    `rows` maps AP name -> {crash_file, mac}, where `mac` is the undotted MAC
+    embedded in the filename, or "" when the filename does not carry one.
+    `unreadable` counts lines that looked like data but did not match.
+
+    An empty dict with no unreadable rows is the healthy answer: no AP on this
+    controller has crashed. That is why a row is never half-recovered -- an
+    entry with a blank filename is indistinguishable from a real crash once it
+    is in the dict, and this check's whole output is whether an entry exists.
+
+    Safe on anything: unparseable input yields ({}, 0) rather than raising.
+    """
+    rows = {}
+    unreadable = 0
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # The echoed command, the file-location line, the column header, the
+        # rule under it and the trailing prompt are structure, not data.
+        if (stripped.startswith("AP Name")
+                or stripped.startswith("File Location")
+                or set(stripped) <= set("- ")
+                or stripped.endswith("#")
+                or "#show " in stripped):
+            continue
+        match = _AP_CRASH_ROW.match(line)
+        if not match:
+            unreadable += 1
+            continue
+        name = match.group("ap_name").strip()
+        crash_file = match.group("crash_file").strip()
+        mac = _CRASH_FILE_MAC.search(crash_file)
+        rows[name] = {"crash_file": crash_file,
+                      "mac": (mac.group(1).lower() if mac else "")}
+    return rows, unreadable
