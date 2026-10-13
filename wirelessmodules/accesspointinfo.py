@@ -329,3 +329,99 @@ def parse_ap_discovery_stats(text):
         mac = entry.pop("ethernet_mac").strip().lower()
         rows[mac] = {k: v.strip() for k, v in entry.items()}
     return rows, unreadable, expected
+
+
+#: One `show wireless stats ap history` row.
+#:
+#: The Disconnect Reason and Disconnect Count columns are separated by a
+#: single space on some rows ("DTLS close alert from peer 1"), so the
+#: two-space column boundary used elsewhere in this module does not work
+#: here. The count is anchored instead: it is the trailing integer, and the
+#: reason is whatever precedes it. On a Joined row both are "NA".
+_AP_HISTORY_ROW = re.compile(
+    r"^(?P<ap_name>\S.*?)\s+"
+    r"(?P<radio_mac>[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"
+    r"(?P<event>Joined|Disjoined)\s+"
+    r"(?P<time>\d{2}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<recent_disconnect_time>NA|\d{2}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<disconnect_reason>\S.*?)\s+"
+    r"(?P<disconnect_count>NA|\d+)\s*$"
+)
+
+#: A disconnect that is a planned image upgrade rather than a fault. The AP
+#: drops to load new software and comes back; counting it as a flap would put
+#: a warning on every controller upgrade.
+_BENIGN_DISCONNECTS = {"image download success"}
+
+
+def parse_ap_history(text):
+    """`show wireless stats ap history` as (rows, unreadable).
+
+    There is no Genie parser for this command.
+
+    `rows` is a list of dicts in the order the controller printed them, which
+    is newest first. Each has ap_name, radio_mac, event ("Joined" or
+    "Disjoined"), time, recent_disconnect_time, disconnect_reason and
+    disconnect_count, every value as the device printed it.
+
+    Unlike the other tables in this module this one holds many rows per AP --
+    it is a log, not a snapshot -- so it is returned as a list rather than
+    keyed into a dict. The caller filters it to the AP it cares about.
+
+    Safe on anything: unparseable input yields ([], 0) rather than raising.
+    """
+    rows = []
+    unreadable = 0
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (stripped.startswith("AP Name")
+                or set(stripped) <= set("- ")
+                or stripped.endswith("#")
+                or "#show " in stripped):
+            continue
+        match = _AP_HISTORY_ROW.match(line)
+        if not match:
+            unreadable += 1
+            continue
+        entry = {k: v.strip() for k, v in match.groupdict().items()}
+        entry["ap_name"] = entry["ap_name"].strip()
+        rows.append(entry)
+    return rows, unreadable
+
+
+def disjoins_for(rows, ap_name=None, radio_mac=None, limit=10):
+    """The most recent `limit` Disjoined rows, newest first.
+
+    Filtered to one AP when `ap_name` or `radio_mac` is given. Rows whose
+    reason is a planned image upgrade are dropped: the AP disconnects to load
+    new software and rejoins, and counting that as a flap would put a warning
+    on every controller upgrade.
+    """
+    out = []
+    want_mac = (radio_mac or "").strip().lower()
+    want_name = (ap_name or "").strip()
+    for row in rows:
+        if row.get("event") != "Disjoined":
+            continue
+        if want_name and row.get("ap_name") != want_name:
+            continue
+        if want_mac and (row.get("radio_mac") or "").lower() != want_mac:
+            continue
+        if (row.get("disconnect_reason") or "").strip().lower() in _BENIGN_DISCONNECTS:
+            continue
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def disjoins_by_day(disjoins):
+    """Map calendar day (the date as printed) -> number of disjoins on it."""
+    counts = {}
+    for row in disjoins:
+        day = (row.get("time") or "").split()[0] if row.get("time") else ""
+        if day:
+            counts[day] = counts.get(day, 0) + 1
+    return counts

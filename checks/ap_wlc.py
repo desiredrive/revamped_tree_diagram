@@ -369,6 +369,10 @@ class ApWlcApStateProfile(_ApCheck):
             # Before the join itself: a discovery failure is the earlier
             # stage, and explains a join that never followed.
             queued.append(ApWlcApDiscovery(hostname, node))
+            # After discovery, and needing the radio MAC ApWlcApState saves:
+            # this table is keyed on the AP name and radio MAC, not the
+            # Ethernet MAC the rest of the chain uses.
+            queued.append(ApWlcApHistory(hostname, node))
             queued.append(ApWlcApCountry(hostname, node))
             queued.append(ApWlcApState(hostname, node))
         # Last: every controller has been looked at by the time this runs.
@@ -1641,6 +1645,93 @@ class ApWlcApDiscovery(_PerWlcCheck):
         success = (entry.get("last_success_time") or "").strip()
         if success:
             lines.append(f"  Last success:  {success}")
+        return CheckResult(CheckStatus.WARN, "\n".join(lines))
+
+
+#: More disjoins than this on one calendar day is reported as flapping. One
+#: or two in a day is ordinary -- an AP reloads, a switch port is bounced,
+#: someone upgrades a stack -- but a third means something is recurring.
+_DISJOINS_PER_DAY = 2
+
+#: How far back to look. The controller keeps more, but the older entries
+#: describe a configuration that may no longer exist.
+_DISJOIN_WINDOW = 10
+
+
+class ApWlcApHistory(_PerWlcCheck):
+    """The AP's recent join and disjoin history on this controller.
+
+    A log rather than a snapshot, and the only check here that can say an AP
+    is flapping rather than merely down right now. Reported against calendar
+    days: a single disjoin is ordinary and says nothing, while several on one
+    day is a pattern.
+
+    Planned image upgrades are not counted. The AP disconnects to load new
+    software and rejoins, which is a disconnect but not a fault.
+    """
+
+    aspect = "AP History"
+    running_note = "Reading the AP's join history…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        service = ctx.service
+        if service is None:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        name = _resolve_ap_name(ctx, self.hostname, service)
+        radio_mac = (ctx.state.get("ap_wlc_radio_mac") or "").strip()
+        if not name and not radio_mac:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — the AP could not be identified on "
+                f"{self.hostname}.")
+
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import (
+            parse_ap_history, disjoins_for, disjoins_by_day,
+        )
+
+        try:
+            raw = get_any_single_output(
+                self.hostname, "show wireless stats ap history", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"`show wireless stats ap history` could not be read from "
+                f"{self.hostname} — {type(e).__name__}: {e}")
+
+        rows, _unreadable = parse_ap_history(raw)
+        disjoins = disjoins_for(rows, ap_name=name, radio_mac=radio_mac,
+                                limit=_DISJOIN_WINDOW)
+        who = name or radio_mac
+
+        if not disjoins:
+            return CheckResult(
+                CheckStatus.OK,
+                f"{who} has no recorded disjoins on {self.hostname}.")
+
+        lines = [
+            f"The last {len(disjoins)} disjoin"
+            f"{'' if len(disjoins) == 1 else 's'} for {who} on "
+            f"{self.hostname}:",
+            "",
+        ]
+        for row in disjoins:
+            lines.append(f"  {row['time']}   {row['disconnect_reason']}")
+
+        by_day = disjoins_by_day(disjoins)
+        busy = {d: n for d, n in by_day.items() if n > _DISJOINS_PER_DAY}
+        if not busy:
+            return CheckResult(CheckStatus.OK, "\n".join(lines))
+
+        worst = ", ".join(f"{n} on {d}" for d, n in sorted(
+            busy.items(), key=lambda kv: kv[1], reverse=True))
+        lines += [
+            "",
+            f"  ⚠ The AP flapped: {worst}. More than "
+            f"{_DISJOINS_PER_DAY} disjoins in one day is a recurring fault "
+            f"rather than an isolated disconnect.",
+        ]
         return CheckResult(CheckStatus.WARN, "\n".join(lines))
 
 
