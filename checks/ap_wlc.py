@@ -373,6 +373,9 @@ class ApWlcApStateProfile(_ApCheck):
             # this table is keyed on the AP name and radio MAC, not the
             # Ethernet MAC the rest of the chain uses.
             queued.append(ApWlcApHistory(hostname, node))
+            # The session the join rides on, after the history that explains
+            # a session that keeps dropping.
+            queued.append(ApWlcApDtls(hostname, node))
             queued.append(ApWlcApCountry(hostname, node))
             queued.append(ApWlcApState(hostname, node))
         # Last: every controller has been looked at by the time this runs.
@@ -1733,6 +1736,88 @@ class ApWlcApHistory(_PerWlcCheck):
             f"rather than an isolated disconnect.",
         ]
         return CheckResult(CheckStatus.WARN, "\n".join(lines))
+
+
+class ApWlcApDtls(_PerWlcCheck):
+    """The DTLS session carrying this AP's CAPWAP control traffic.
+
+    CAPWAP control runs inside DTLS, so no session means no control channel.
+    Reported as a warning rather than a failure, per the manifest's rule that
+    a fabric fault does not stop the run: the checks around this one still
+    explain the path the AP was trying to use.
+
+    The version, ciphersuite and peer port are reported as they are. The peer
+    address is graded, because it is the one field that can disagree with
+    something: a live session to an address the edge no longer associates
+    with this AP means one of the two is stale.
+    """
+
+    aspect = "AP DTLS"
+    running_note = "Checking the AP's DTLS session…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        service = ctx.service
+        if service is None:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        name = _resolve_ap_name(ctx, self.hostname, service)
+        if not name:
+            # Absence from this controller is ApWlcApState's finding.
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — the AP is not joined to {self.hostname}.")
+
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import (
+            parse_dtls_connections, control_session_for,
+        )
+
+        try:
+            raw = get_any_single_output(
+                self.hostname, "show wireless dtls connections", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"`show wireless dtls connections` could not be read from "
+                f"{self.hostname} — {type(e).__name__}: {e}")
+
+        rows, _unreadable = parse_dtls_connections(raw)
+        session = control_session_for(rows, name)
+
+        if session is None:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{name} holds no DTLS session on {self.hostname}.\n\n"
+                f"CAPWAP control runs inside DTLS, so the AP has no control "
+                f"channel to this controller. The checks around this one "
+                f"still have findings worth having about the path it was "
+                f"trying to use.")
+
+        lines = [
+            f"{name} holds a DTLS control session on {self.hostname}.",
+            "",
+            f"  Peer IP:      {session.get('peer_ip') or '—'}",
+            f"  Peer port:    {session.get('peer_port') or '—'}",
+            f"  Version:      {session.get('version') or '—'}",
+            f"  Ciphersuite:  {session.get('ciphersuite') or '—'}",
+        ]
+
+        # The address the live session is actually to, against what the edge
+        # switch witnessed. ApWlcApState grades the controller's record of
+        # the AP; this grades the session itself, which can differ.
+        peer_ip = (session.get("peer_ip") or "").strip()
+        sisf_ip = (ctx.state.get("ap_ip") or "").strip()
+        if peer_ip and sisf_ip and peer_ip != sisf_ip:
+            source = ctx.state.get("ap_ip_source") or "the edge switch"
+            return CheckResult(
+                CheckStatus.WARN,
+                "\n".join(lines + [
+                    "",
+                    f"  ⚠ The DTLS session is to {peer_ip}, but {source} on "
+                    f"the edge has this AP at {sisf_ip}.",
+                ]))
+
+        return CheckResult(CheckStatus.OK, "\n".join(lines))
 
 
 class ApWlcApCountry(_PerWlcCheck):

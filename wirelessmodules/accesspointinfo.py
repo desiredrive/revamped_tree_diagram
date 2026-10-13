@@ -425,3 +425,71 @@ def disjoins_by_day(disjoins):
         if day:
             counts[day] = counts.get(day, 0) + 1
     return counts
+
+
+#: One `show wireless dtls connections` row. Anchored on the IP and the
+#: numeric peer port, which have fixed shapes; the AP name column is padded to
+#: a width a longer name overruns, and the ciphersuite is free text that runs
+#: to the end of the line.
+#:
+#: An AP has one row per DTLS session: Capwap_Ctrl for the control session,
+#: and Capwap_Data as well when client traffic is tunnelled to the controller.
+_DTLS_ROW = re.compile(
+    r"^(?P<ap_name>\S.*?)\s+"
+    r"(?P<local_port>\S+)\s+"
+    r"(?P<peer_ip>\d{1,3}(?:\.\d{1,3}){3})\s+"
+    r"(?P<peer_port>\d+)\s+"
+    r"(?P<version>\S+)\s+"
+    r"(?P<ciphersuite>\S.*?)\s*$"
+)
+
+#: The local port of the CAPWAP control session -- the one that has to exist
+#: for an AP to be joined at all.
+CAPWAP_CONTROL_PORT = "capwap_ctrl"
+
+
+def parse_dtls_connections(text):
+    """`show wireless dtls connections` as (rows, unreadable).
+
+    There is no Genie parser for this command.
+
+    `rows` is a list of dicts in the order printed, each with ap_name,
+    local_port, peer_ip, peer_port, version and ciphersuite, every value as
+    the device printed it. A list rather than a dict keyed on the AP name:
+    one AP can hold several sessions, and the caller picks the one it wants.
+
+    Safe on anything: unparseable input yields ([], 0) rather than raising.
+    """
+    rows = []
+    unreadable = 0
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (stripped.startswith("AP Name")
+                or set(stripped) <= set("- ")
+                or stripped.endswith("#")
+                or "#show " in stripped):
+            continue
+        match = _DTLS_ROW.match(line)
+        if not match:
+            unreadable += 1
+            continue
+        rows.append({k: v.strip() for k, v in match.groupdict().items()})
+    return rows, unreadable
+
+
+def control_session_for(rows, ap_name):
+    """The CAPWAP control session for `ap_name`, or None.
+
+    The control session is the one an AP must hold to be joined. A data
+    session may or may not be present alongside it depending on how the AP
+    tunnels client traffic, so its absence means nothing on its own.
+    """
+    want = (ap_name or "").strip()
+    for row in rows:
+        if want and row.get("ap_name") != want:
+            continue
+        if (row.get("local_port") or "").strip().lower() == CAPWAP_CONTROL_PORT:
+            return row
+    return None
