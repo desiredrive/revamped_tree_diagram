@@ -1492,7 +1492,7 @@ const ROLE_OFFSET = {
 // enters. The arc is centred on the horizontal, so a single border sits level
 // with the Edge and two straddle it symmetrically.
 const BORDER_ARC_RADIUS = 380;
-const BORDER_ARC_SPREAD = 100;  // total degrees the fan occupies
+const BORDER_ARC_SPREAD = 60;   // total degrees the fan occupies
 
 function borderArcPosition(parent, index, total) {
   const span = total > 1 ? BORDER_ARC_SPREAD : 0;
