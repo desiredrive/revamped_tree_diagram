@@ -366,6 +366,9 @@ class ApWlcApStateProfile(_ApCheck):
             # Next to the uptime it qualifies: a recent association means more
             # when you know whether the AP has ever fallen over.
             queued.append(ApWlcApCrash(hostname, node))
+            # Before the join itself: a discovery failure is the earlier
+            # stage, and explains a join that never followed.
+            queued.append(ApWlcApDiscovery(hostname, node))
             queued.append(ApWlcApCountry(hostname, node))
             queued.append(ApWlcApState(hostname, node))
         # Last: every controller has been looked at by the time this runs.
@@ -1562,6 +1565,82 @@ class ApWlcApCrash(_PerWlcCheck):
             f"disconnected. The file stays on the controller after the AP "
             f"recovers, so this does not mean it is crashing now.",
         ]
+        return CheckResult(CheckStatus.WARN, "\n".join(lines))
+
+
+class ApWlcApDiscovery(_PerWlcCheck):
+    """The AP's last failed discovery attempt on this controller, if any.
+
+    Reports only a failure. An AP that has never failed discovery, or that is
+    not in the table at all, produces nothing worth saying: a successful
+    discovery is already evident from the AP being joined, which the checks
+    around this one establish directly.
+
+    The controller keeps one failure per AP -- the most recent -- so this is a
+    single event, not a history.
+    """
+
+    aspect = "AP Discovery"
+    running_note = "Checking AP discovery failures…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        service = ctx.service
+        if service is None:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        from checks.shared import normalize_mac
+        ap_mac = normalize_mac(ctx.payload.get("mac"))
+        if not ap_mac:
+            return CheckResult(CheckStatus.SKIP,
+                               "Skipped — no AP MAC was supplied.")
+
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import (
+            parse_ap_discovery_stats, NO_DISCOVERY_FAILURE,
+        )
+
+        try:
+            raw = get_any_single_output(
+                self.hostname, "show wireless stats ap discovery", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"`show wireless stats ap discovery` could not be read from "
+                f"{self.hostname} — {type(e).__name__}: {e}")
+
+        rows, _unreadable, _expected = parse_ap_discovery_stats(raw)
+        entry = rows.get(ap_mac.lower())
+
+        if entry is None:
+            # The AP has sent no discovery request to this controller. Not a
+            # finding here: whether it should have is what ApWlcApState and
+            # its site-wide verdict answer.
+            return CheckResult(
+                CheckStatus.OK,
+                f"No discovery failure is recorded for {ap_mac} on "
+                f"{self.hostname}.")
+
+        failure = (entry.get("last_failure_type") or "").strip()
+        if not failure or failure.lower() == NO_DISCOVERY_FAILURE:
+            return CheckResult(
+                CheckStatus.OK,
+                f"The AP has no recorded discovery failure on "
+                f"{self.hostname}.")
+
+        lines = [
+            f"The AP last failed discovery on {self.hostname}.",
+            "",
+            f"  Failure type:  {failure}",
+            f"  Failure time:  {entry.get('last_failure_time') or '—'}",
+            # The address the AP held at the time, which is what makes the
+            # failure actionable: a discovery failure from an address the AP
+            # no longer has is a different problem from one at its current
+            # address.
+            f"  IP address:    {entry.get('ip_address') or '—'}",
+        ]
+        success = (entry.get("last_success_time") or "").strip()
+        if success:
+            lines.append(f"  Last success:  {success}")
         return CheckResult(CheckStatus.WARN, "\n".join(lines))
 
 

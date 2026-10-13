@@ -259,3 +259,73 @@ def parse_ap_crash_files(text):
         rows[name] = {"crash_file": crash_file,
                       "mac": (mac.group(1).lower() if mac else "")}
     return rows, unreadable
+
+
+#: One `show wireless stats ap discovery` row. Anchored on the two MACs, which
+#: have a fixed shape, rather than on column positions: the IP column is wide
+#: and the timestamp columns are not padded consistently across releases.
+#:
+#: The last three fields are kept as the device printed them. "None" and "NA"
+#: are literal strings the controller writes for an AP that has never failed
+#: discovery, not empty columns, and the caller tests for them by name.
+_AP_DISCOVERY_ROW = re.compile(
+    r"^(?P<radio_mac>[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"
+    r"(?P<ethernet_mac>[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"
+    r"(?P<ip_address>\S+)\s+"
+    r"(?P<last_success_time>\S+\s+\S+|\S+)\s+"
+    r"(?P<last_failure_type>\S.*?)\s{2,}"
+    r"(?P<last_failure_time>\S.*?)\s*$"
+)
+
+#: The count the controller prints above the table.
+_AP_DISCOVERY_COUNT = re.compile(
+    r"^\s*Discovery requests received from total number of APs\s*:\s*(\d+)\s*$"
+)
+
+#: What the controller writes when an AP has never failed discovery.
+NO_DISCOVERY_FAILURE = "none"
+
+
+def parse_ap_discovery_stats(text):
+    """`show wireless stats ap discovery` as (rows, unreadable, expected).
+
+    There is no Genie parser for this command.
+
+    `rows` maps the Ethernet MAC -> {radio_mac, ip_address, last_success_time,
+    last_failure_type, last_failure_time}, every value as the device printed
+    it. Keyed on the Ethernet MAC because that is what the rest of the AP
+    chain keys on -- it is the MAC the edge switch sees on the wire.
+
+    `expected` is the AP count printed above the table, or None if absent.
+
+    The controller keeps only the LAST failure per AP, not a history. An AP
+    that failed discovery ten times shows one row with its most recent
+    failure, so nothing here can report a sequence.
+
+    Safe on anything: unparseable input yields ({}, 0, None) rather than
+    raising.
+    """
+    rows = {}
+    unreadable = 0
+    expected = None
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        count = _AP_DISCOVERY_COUNT.match(line)
+        if count:
+            expected = int(count.group(1))
+            continue
+        if (stripped.startswith("AP Radio MAC")
+                or set(stripped) <= set("- ")
+                or stripped.endswith("#")
+                or "#show " in stripped):
+            continue
+        match = _AP_DISCOVERY_ROW.match(line)
+        if not match:
+            unreadable += 1
+            continue
+        entry = match.groupdict()
+        mac = entry.pop("ethernet_mac").strip().lower()
+        rows[mac] = {k: v.strip() for k, v in entry.items()}
+    return rows, unreadable, expected
