@@ -26,3 +26,74 @@ class AccessPointInfo:
             except ValueError:
                 rloc = None
         self.rloc = rloc
+
+
+#: One `show ap uptime` row. Anchored on the two MACs rather than on column
+#: positions: the AP name column is padded to a fixed width, but a name longer
+#: than that width pushes every later column right, and IOS does not truncate
+#: it. Anchoring on the MACs -- which have a fixed, unambiguous shape -- means
+#: a long name shifts nothing that matters.
+#:
+#: Both uptimes are left as the device wrote them ("11 hours 26 minutes 42
+#: seconds"). Converting to seconds here would mean guessing at unit spellings
+#: this lab has not shown us, and a wrong number is worse than a string.
+_AP_UPTIME_ROW = re.compile(
+    r"^(?P<ap_name>\S.*?)\s+"
+    r"(?P<ethernet_mac>[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"
+    r"(?P<radio_mac>[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"
+    r"(?P<ap_up_time>\S.*?)\s{2,}"
+    r"(?P<association_up_time>\S.*?)\s*$"
+)
+
+#: The count IOS prints above the table, used only as a cross-check.
+_AP_COUNT = re.compile(r"^\s*Number of APs:\s*(\d+)\s*$")
+
+
+def parse_ap_uptime(text):
+    """`show ap uptime` as (rows, unreadable, expected).
+
+    There is no Genie parser for this command, so the table is read here.
+
+    `rows` maps AP name -> {ethernet_mac, radio_mac, ap_up_time,
+    association_up_time}, with every value exactly as the device printed it.
+    `unreadable` counts lines that looked like data but did not match, and
+    `expected` is the "Number of APs" IOS prints, or None if it was absent.
+
+    Nothing is inferred. A line that does not match is counted, never
+    half-read into a row: a partially-recovered row is indistinguishable from
+    a complete one once it is in the dict, and an AP reported with a blank
+    uptime reads as a fault that is really a parsing gap. The caller compares
+    `len(rows)` against `expected` and says so when they disagree, which is
+    the only way a silently-dropped AP becomes visible.
+
+    Safe on anything: unparseable input yields ({}, 0, None) rather than
+    raising, because this runs inside a check whose job is to report, and a
+    traceback from a cosmetic CLI change would take the whole step down.
+    """
+    rows = {}
+    unreadable = 0
+    expected = None
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        count = _AP_COUNT.match(line)
+        if count:
+            expected = int(count.group(1))
+            continue
+        # The echoed command, the column header, the rule under it and the
+        # trailing prompt are all structure, not data, and none of them should
+        # count as a row we failed to read.
+        if (stripped.startswith("AP Name")
+                or set(stripped) <= set("- ")
+                or stripped.endswith("#")
+                or "#show " in stripped):
+            continue
+        match = _AP_UPTIME_ROW.match(line)
+        if not match:
+            unreadable += 1
+            continue
+        entry = match.groupdict()
+        name = entry.pop("ap_name").strip()
+        rows[name] = {k: v.strip() for k, v in entry.items()}
+    return rows, unreadable, expected
