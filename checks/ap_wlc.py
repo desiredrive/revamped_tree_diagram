@@ -1367,8 +1367,10 @@ def _uptime_message(name, row, uptime_seconds):
 #: recently. Ten minutes is the manifest's figure.
 _RECENT_ASSOCIATION = 10 * 60
 
-#: The flex profile a fabric AP is expected to carry. Anything else switches
-#: traffic locally at the AP rather than through the VXLAN access tunnel.
+#: The only flex profile an SDA controller can use, in every deployment --
+#: not a lab default or a site convention. A fabric AP carries its traffic in
+#: the VXLAN access tunnel, and any other profile switches it locally at the
+#: AP instead, so there is no site-specific value this could legitimately be.
 _DEFAULT_FLEX_PROFILE = "default-flex-profile"
 
 
