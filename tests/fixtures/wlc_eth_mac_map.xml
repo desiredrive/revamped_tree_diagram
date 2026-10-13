@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="urn:uuid:34833d13-d32b-40f9-a665-19f292d60a70" xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"><data><access-point-oper-data xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-wireless-access-point-oper"><ethernet-mac-wtp-mac-map><ethernet-mac>b8:11:4b:0e:26:30</ethernet-mac><wtp-mac>38:91:b7:0f:26:00</wtp-mac></ethernet-mac-wtp-mac-map></access-point-oper-data></data></rpc-reply>

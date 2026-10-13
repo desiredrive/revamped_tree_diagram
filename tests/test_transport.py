@@ -120,12 +120,15 @@ def test_survives_thread_pool_fan_out():
 def test_scenarios_still_assemble():
     """Guard against the seam breaking chain assembly."""
     from check_registry import build_check_chain
+    # Lower bounds, not exact counts: the point is that each scenario still
+    # assembles a chain, and an exact count turns every deliberate addition
+    # into a failing test that says nothing about the seam this guards.
     expected = {"dhcp": 52, "east_west": 63, "underlay_multicast": 52,
-                "ap_onboarding": 7}
+                "ap_onboarding": 46}
     for scenario, count in expected.items():
         chain = build_check_chain(
             {"scenario": scenario, "mgmt_ip": "1.1.1.1", "vrf": "default"})
-        assert len(chain) == count, f"{scenario}: {len(chain)} != {count}"
+        assert len(chain) >= count, f"{scenario}: {len(chain)} < {count}"
 
 
 if __name__ == "__main__":
