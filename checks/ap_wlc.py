@@ -1214,15 +1214,12 @@ def _uptime_message(name, row, uptime_seconds):
 
     assoc_seconds = uptime_seconds(assoc_up)
     if assoc_seconds is None:
-        # The duration is reported either way; only the flap verdict is
-        # withheld, because guessing it is what would be unsafe.
-        return CheckResult(
-            CheckStatus.OK,
-            "\n".join(lines + [
-                "",
-                "  ⚠ The association time could not be read as a duration, "
-                "so it was not graded.",
-            ]))
+        # Not gradeable, so not graded, and silently: the durations the
+        # device printed are already on the line above, and a note about an
+        # unrecognised unit format is housekeeping rather than a finding.
+        # Guessing the number instead would either warn about a stable AP or
+        # stay silent about a flapping one.
+        return CheckResult(CheckStatus.OK, "\n".join(lines))
 
     if assoc_seconds < _RECENT_ASSOCIATION:
         ap_seconds = uptime_seconds(ap_up)

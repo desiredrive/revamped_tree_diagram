@@ -127,18 +127,19 @@ def test_unreadable_rows_are_surfaced_when_the_ap_is_missing(served):
     assert "could not be read" in r.message
 
 
-def test_an_ungradeable_association_is_reported_but_not_graded(served):
-    """A duration we cannot read must not produce a flap verdict.
+def test_an_ungradeable_association_is_passed_over_silently(served):
+    """A duration we cannot read produces no verdict and no note.
 
-    Warning on a stable AP, or staying silent on a flapping one, are both
-    worse than declining to grade and saying so.
+    The durations themselves are still reported. Guessing the number would
+    either warn about a stable AP or stay silent about a flapping one.
     """
     from checks.ap_wlc import ApWlcApUptime
 
     served(_output("5 days 0 hours 0 minutes", "2 fortnights"))
     r = ApWlcApUptime(WLC, "wlc0").run_ap(_ctx())
     assert r.status is CheckStatus.OK
-    assert "not graded" in r.message
+    assert "2 fortnights" in r.message
+    assert "⚠" not in r.message
 
 
 def test_no_mac_supplied_skips(served):
