@@ -4739,6 +4739,186 @@ class ApTrustSecPolicy(_ApCheck):
             + "\n\n".join(sections), data=data)
 
 
+class ApWlcTrustSecPolicy(_ApCheck):
+    """SGACL policy governing the AP's traffic toward the controller.
+
+    Manifest line 67, and the other half of `ApTrustSecPolicy`. That check
+    fixes the AP as the destination group because an Edge enforces TrustSec
+    on egress; this one asks the reverse pair -- the AP as source, each WLC
+    as destination -- which is the direction the CAPWAP join request and the
+    AP's DHCP discover actually travel in. A policy can deny one direction
+    and permit the other, so the return path being clean says nothing about
+    this one.
+
+    Both SGTs come from CEF rather than the sgt-map, for the same reason as
+    the AP-side check: CEF is what the forwarding plane consults, and an
+    endpoint with no SGT in CEF is SGT 0 (Unknown), which policy matches
+    like any other group.
+
+    Enforcement is read first and the policy is not evaluated when it is
+    off. The decision belongs to `cts_enforcement`; this only reads it.
+
+    `cts_sgacl_entry` is PD-eligible -- recorded for the later platform pass.
+    """
+
+    name = "AP TrustSec Policy to WLC"
+    target_node_id = "xtr"
+    running_note = "Evaluating the SGACL policy on the AP's traffic to the WLC."
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        ap_ip = ctx.state.get("ap_ip")
+        vlan = ctx.state.get("ap_vlan")
+        wlcs = ctx.state.get("ap_wlc_candidates") or []
+        data = {"ap_ip": ap_ip, "vlan": vlan}
+
+        if not ap_ip:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the AP has no known IPv4 address, so its SGT "
+                "cannot be resolved and no policy can be evaluated.",
+                data=data)
+        if not wlcs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery).",
+                data=data)
+
+        sections, denies = [], []
+        try:
+            from securitymodules.ciscotrustsec import (
+                cts_endpoint_info, cts_rules)
+            from securitymodules.accesslists import acl_evaluation
+
+            enf = cts_endpoint_info(None, None, hostname)
+            enf.cts_enforcement(vlan, None, ctx.service)
+            glob = getattr(enf, "globalenforcement", False) is True
+            per_vlan = getattr(enf, "enforcingvlan", False) is True
+            data.update({"global_enforcement": glob,
+                         "vlan_enforcement": per_vlan})
+
+            if not (glob and per_vlan):
+                why = ("TrustSec enforcement is disabled globally"
+                       if not glob else
+                       f"VLAN {vlan} is not in the CTS enforcement vlan-list")
+                return CheckResult(
+                    CheckStatus.OK,
+                    f"No SGACL is enforced on the AP's traffic to the "
+                    f"controller: {why} on {hostname}. Any policy configured "
+                    f"for these groups is not applied, so it cannot be "
+                    f"dropping traffic.",
+                    data=data)
+
+            # Source is always the AP here: this is the outbound direction.
+            src = cts_endpoint_info(ap_ip, "default", hostname)
+            src.cts_sgt_mapping(ctx.service)
+            sgt = getattr(src, "cefsgt", 0)
+            data["ap_sgt"] = sgt
+
+            # What the AP needs to send: the CAPWAP join and its own DHCP
+            # discover. Ports are the mirror of the AP-side check's.
+            flows = [
+                ("CAPWAP control (UDP/5246)", "udp", 65535, 5246),
+                ("CAPWAP data (UDP/5247)", "udp", 65535, 5247),
+                ("DHCP from the client (UDP/67)", "udp", 68, 67),
+            ]
+
+            for wlc_host, mgmt_ip, _node in wlcs:
+                dst = cts_endpoint_info(mgmt_ip, "default", hostname)
+                dst.cts_sgt_mapping(ctx.service)
+                dgt = getattr(dst, "cefsgt", 0)
+
+                rules = cts_rules(hostname)
+                rules.cts_rbac_permissions(sgt, dgt, ctx.service)
+                rbacl = getattr(rules, "rbacl", None)
+                default = bool(getattr(rules, "isdefaultrule", False))
+                pair = f"SGT {sgt} → SGT {dgt}"
+                where = f"the WLC {wlc_host} ({mgmt_ip})"
+                data[str(mgmt_ip)] = {"sgt": dgt, "rbacl": rbacl,
+                                      "is_default": default}
+
+                if not rbacl:
+                    sections.append(
+                        f"To {where} — {pair}:\n\n"
+                        f"  No policy is defined, so the traffic is "
+                        f"permitted.")
+                    continue
+
+                # The default rule's "policy" is an action -- "Permit IP" or
+                # "Deny IP" -- not the name of an access list. Sent to the
+                # ACL evaluator it resolves to nothing and every flow comes
+                # back denied by the implicit deny, reporting a permit-all
+                # rule as blocking everything. The action is the verdict.
+                action = str(rbacl).strip().lower()
+                if default and action.startswith(("permit", "deny")):
+                    if action.startswith("deny"):
+                        denies.append(mgmt_ip)
+                        sections.append(
+                            f"To {where} — {pair}:\n\n"
+                            f"  No specific policy. The default rule is "
+                            f"{rbacl} — all the AP's traffic to this "
+                            f"controller is denied.")
+                    else:
+                        sections.append(
+                            f"To {where} — {pair}:\n\n"
+                            f"  No specific policy. The default rule is "
+                            f"{rbacl}, which permits the AP's traffic.")
+                    continue
+
+                record_pd_object(ctx, "cts_sgacl_entry",
+                                 radkit_hostname=hostname, rbacl=rbacl,
+                                 sgt=sgt, dgt=dgt, vlan=vlan)
+
+                kind = ("the default rule" if default else f"RBACL {rbacl}")
+                blocked, allowed, unreadable = [], [], []
+                for label, proto, sport, dport in flows:
+                    ev = {"sourceip": ap_ip, "destinationip": mgmt_ip,
+                          "protocol": proto, "srcport": sport,
+                          "dstport": dport}
+                    try:
+                        hit = acl_evaluation(ctx.service, hostname, rbacl,
+                                             True, ev)
+                    except BaseException as e:
+                        unreadable.append(
+                            f"{label} ({type(e).__name__}: {e})")
+                        continue
+                    if not hit or len(hit) < 3:
+                        unreadable.append(f"{label} (no verdict returned)")
+                    elif hit[1] == "deny":
+                        blocked.append((label, f"sequence {hit[2]}"))
+                    else:
+                        allowed.append((label, f"sequence {hit[2]}"))
+
+                if blocked:
+                    denies.append(mgmt_ip)
+                sections.append(render_acl_section(
+                    f"To {where} — {pair}, {kind}", None,
+                    blocked=blocked, permitted=allowed,
+                    unread=[(rbacl, u, "") for u in unreadable]))
+        except SystemExit as e:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Reading the TrustSec policy on {hostname} stopped:"
+                f"\n\n{e}", data=data)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"Could not read the TrustSec policy on {hostname} "
+                f"({type(e).__name__}: {e}).", data=data)
+
+        if denies:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"An SGACL enforced on {hostname} is blocking the AP's "
+                f"traffic to its controller.\n\n" + "\n\n".join(sections),
+                data=data)
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"No SGACL enforced on {hostname} blocks the AP's traffic to "
+            f"its controller.\n\n" + "\n\n".join(sections), data=data)
+
+
 class ApBorderCapwapAcls(_ApCheck):
     """CAPWAP ACLs on one border, for the AP's path to its controller.
 
@@ -5042,8 +5222,17 @@ class ApBorderDiscovery(_ApCheck):
         for idx, b in enumerate(borders, start=1):
             host = (b.get("hostname") if isinstance(b, dict)
                     else getattr(b, "hostname", None)) or f"border{idx}"
-            mgmt = ((b.get("mgmtip") if isinstance(b, dict)
-                     else getattr(b, "mgmtip", None)) or "").strip()
+            # getFabricBorders enriches each border with
+            # "managementIpAddress"; only getFabricCPs uses "mgmtip". Reading
+            # the CP key left every border with no address, so the inventory
+            # lookup never ran and each one reported as absent.
+            mgmt = ""
+            for key in ("managementIpAddress", "mgmtip"):
+                val = (b.get(key) if isinstance(b, dict)
+                       else getattr(b, key, None))
+                if val:
+                    mgmt = str(val).strip()
+                    break
             status = ((b.get("status") if isinstance(b, dict)
                        else getattr(b, "status", None)) or "").strip()
 
