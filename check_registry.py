@@ -53,13 +53,6 @@ from checks.ap_onboarding import (
     ApCpDiscovery,
 )
 from checks.ap_wlc import ApWlcDiscovery, ApWlcProfile
-from checks.ap_wlc_join import (
-    ApWlcNetconfGate,
-    ApWlcApRegistration,
-    ApWlcApJoinPhases,
-    ApWlcApTags,
-    ApWlcApJoinHistory,
-)
 from checks.profile import (
     ResolveCatcName,
     ProfileXtrNetworkDevice,
@@ -209,18 +202,6 @@ def build_check_chain(payload: dict) -> list[Check]:
             # Fabric WLC at the site is profiled, with no AP-specific lookup.
             ApWlcDiscovery(),
             ApWlcProfile(),
-            # Manifest step 5. The AP's own state on those controllers, read
-            # over NETCONF. Placed here, directly after the controllers are
-            # profiled and before any edge-side check, because it answers the
-            # question the rest of the chain is in service of: an AP that
-            # never joined makes every ACL, SGACL and LISP finding below a
-            # description of a path nothing is using. Opt-in: with no NETCONF
-            # credentials configured these SKIP and the chain is unchanged.
-            ApWlcNetconfGate(),
-            ApWlcApRegistration(),
-            ApWlcApJoinPhases(),
-            ApWlcApTags(),
-            ApWlcApJoinHistory(),
             # Step 3 -- the AP's current state on the edge. Starts by deriving
             # the VLAN it onboards in from the INFRA_VN L2 instance step 2 read
             # off the controllers; every later edge check hangs off that VLAN.

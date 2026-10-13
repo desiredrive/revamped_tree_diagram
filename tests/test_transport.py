@@ -124,7 +124,7 @@ def test_scenarios_still_assemble():
     # assembles a chain, and an exact count turns every deliberate addition
     # into a failing test that says nothing about the seam this guards.
     expected = {"dhcp": 52, "east_west": 63, "underlay_multicast": 52,
-                "ap_onboarding": 46}
+                "ap_onboarding": 41}
     for scenario, count in expected.items():
         chain = build_check_chain(
             {"scenario": scenario, "mgmt_ip": "1.1.1.1", "vrf": "default"})
