@@ -179,7 +179,7 @@ class ControlPlaneListing(Check):
                 "label": cphost,
                 "ip": getattr(cp, "mgmtip", None) or None,
                 "connect_to": "xtr",
-                "edge_label": "LISP",
+                "edge_label": "LISP Session",
             })
             bullet_lines.append(f"• {cphost} — RLOC {rloc}")
         body = "\n".join(bullet_lines) if bullet_lines else "(no control planes found)"

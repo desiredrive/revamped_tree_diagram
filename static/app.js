@@ -940,6 +940,18 @@ function showTopology(payload) {
           'line-color': '#2563eb',
           'width': 2,
       }},
+      // The LISP control-plane session, like CAPWAP, is a relationship
+      // between two nodes rather than a cable between them -- the underlay
+      // hops it crosses are drawn as their own edges. Matched on the label
+      // because these edges are built from a node's `connect_to` rather than
+      // an `add_edges` spec, so there is no flag to carry.
+      { selector: 'edge[label = "LISP Session"]', style: {
+          'line-style': 'dotted',
+          'line-color': '#7095ba',
+          'width': 3,
+          'color': '#3d5a7a',
+          'font-size': '10px',
+      }},
       { selector: 'edge[capwap = "true"]', style: {
           // Bowed away from the physical path so the tunnel reads as going
           // over the topology rather than through it.

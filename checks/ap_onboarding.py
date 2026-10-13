@@ -4508,7 +4508,7 @@ class ApCpDiscovery(_ApCheck):
                 "label": host,
                 "ip": mgmt or None,
                 "connect_to": "xtr",
-                "edge_label": "LISP",
+                "edge_label": "LISP Session",
             })
             cp_targets[node_id] = host
 
