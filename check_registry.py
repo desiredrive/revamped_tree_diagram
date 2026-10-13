@@ -260,6 +260,17 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApL2LispDatabase(),
             ApL2LispRegistration(),
             ApIpAddress(),
+            # Manifest step 5: what the primary controller believes about this
+            # AP. Placed here for two reasons. It grades the AP's IP against
+            # the address ApIpAddress just resolved from SISF, so it cannot
+            # run above that. And it publishes the radio MAC that the
+            # still-to-be-built radio-MAC LISP registration and access-tunnel
+            # checks key on -- those belong in the border/CP block below, so
+            # this has to stay above it. A FAIL here stops that block, which
+            # is correct: none of it means anything if the AP never joined.
+            # The collection half of step 2 ran much earlier, since
+            # ApInfraVnVlan needs the L2 instance it reads.
+            ApWlcApStateProfile(),
             # Manifest line 64. The reverse direction of ApCefToWlc: not can
             # the AP reach the controller, but can the Edge reach the AP --
             # which is the direction the CAPWAP replies travel in. Needs the
@@ -296,12 +307,6 @@ def build_check_chain(payload: dict) -> list[Check]:
             ApL3LispDatabase(),
             ApL3LispRegistration(),
             ApCpDiscovery(),
-            # Manifest step 5, last: what each controller believes about this
-            # AP. Deliberately after the wired validations -- "the WLC has
-            # never heard of this AP" is a conclusion drawn from the port, the
-            # VLAN, the ACLs and the LISP registrations above, not a finding
-            # that stands on its own. Its collection half ran back at step 2.
-            ApWlcApStateProfile(),
         ]
     if scenario == "dhcp":
         return [

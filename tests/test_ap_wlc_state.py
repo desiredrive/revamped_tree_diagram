@@ -131,8 +131,14 @@ def test_absent_ap_warns_and_never_stops_the_chain(patched):
     assert ctx.state["ap_wlc_ap_absent"][WLC] == "dead.beef.0001"
 
 
-def test_unregistered_state_is_a_warning_not_a_pass(patched, monkeypatch):
-    """An AP that joined but is not Registered is not serving clients."""
+def test_unregistered_state_stops_the_run(patched, monkeypatch):
+    """Not Registered ends the flow rather than noting a problem.
+
+    SDA allows one primary controller, so there is no second one the AP could
+    be registered on instead. Everything the flow exists to validate is built
+    on a CAPWAP session that does not exist, so continuing would report a wall
+    of absences that all restate this single fault.
+    """
     import copy
     import radkit_cli
     from checks.ap_wlc import ApWlcApState
@@ -141,9 +147,51 @@ def test_unregistered_state_is_a_warning_not_a_pass(patched, monkeypatch):
     downed["ap_name"]["AP-002"]["state"] = "Downloading"
     monkeypatch.setattr(radkit_cli, "get_single_output_genie",
                         lambda h, c, s, **k: downed)
+    ctx = _ctx()
+    r = ApWlcApState(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.FAIL
+    assert "Downloading" in r.message
+    # Without this every later check fails on its own missing data.
+    assert "not Registered" in ctx.state["ap_stop"]
+
+
+def test_registered_ap_grades_mac_ip_mode_and_admin(patched, monkeypatch):
+    """The five rules that apply once the AP is registered."""
+    from checks.ap_wlc import ApWlcApState
+
+    ctx = _ctx()
+    # What SISF saw on the edge, which the controller's address is graded on.
+    ctx.state["ap_ip"] = "172.19.5.10"
+    r = ApWlcApState(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.OK
+    # Saved for the radio-MAC LISP and access-tunnel checks still to be built.
+    assert ctx.state["ap_wlc_radio_mac"] == "3891.b70f.2600"
+
+
+def test_controller_ip_disagreeing_with_sisf_is_flagged(patched, monkeypatch):
+    """One of the two is stale: the AP moved, or something still points at
+    where it used to be."""
+    from checks.ap_wlc import ApWlcApState
+
+    ctx = _ctx()
+    ctx.state["ap_ip"] = "172.19.5.99"
+    ctx.state["ap_ip_source"] = "device-tracking + DHCP snooping"
+    r = ApWlcApState(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.WARN
+    assert "172.19.5.99" in r.message and "172.19.5.10" in r.message
+
+
+def test_non_local_mode_and_disabled_admin_are_flagged(patched, monkeypatch):
+    """Local/Enabled is what an AP onboards as on a fabric edge."""
+    import checks.ap_wlc as mod
+    from checks.ap_wlc import ApWlcApState
+
+    monkeypatch.setattr(mod, "_ap_config_general", lambda h, n, s: (
+        {"ap_mode": "FlexConnect", "administrative_state": "Disabled"}, None))
     r = ApWlcApState(WLC, "wlc0").run_ap(_ctx())
     assert r.status is CheckStatus.WARN
-    assert "Downloading" in r.message
+    assert "FlexConnect" in r.message
+    assert "Disabled" in r.message
 
 
 def test_unreadable_config_still_reports_the_join(patched, monkeypatch):

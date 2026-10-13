@@ -1132,6 +1132,7 @@ class ApWlcApState(_PerWlcCheck):
     def _describe(self, ctx, service, name, row, ap_mac) -> CheckResult:
         """Render the AP's state, pulling tags and profiles from the AP itself."""
         from radkit_cli import get_single_output_genie
+        from checks.shared import normalize_mac
 
         state = (row.get("state") or "").strip()
         # Published for the site-wide verdict and for later checks that need
@@ -1191,28 +1192,70 @@ class ApWlcApState(_PerWlcCheck):
                 f" ({cfg.get('primary_cisco_controller_ip_address') or '—'})",
             ]
 
-        status = CheckStatus.OK
-        notes = []
-        # "Registered" is the only state in which the AP is actually serving.
-        # Anything else is reported as a fabric fault -- WARN, not FAIL: the
-        # tool can continue, and the rest of the chain still has findings to
-        # contribute about the path this AP is trying to use.
+        # Not Registered is the one condition that ends the run. SDA allows a
+        # single primary controller, so this is the controller the AP joins --
+        # there is no second one for it to be registered on instead. Everything
+        # the flow exists to validate (the radio MAC's LISP registration, the
+        # access tunnel) is built on a CAPWAP session that does not exist, so
+        # continuing would report a wall of absences that all restate this one
+        # fault. CAPWAP has to be fixed before the rest means anything.
         if state and state.lower() != "registered":
+            ctx.state["ap_stop"] = (
+                f"AP {name} is {state} on {self.hostname}, not Registered.")
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"{name} is {state} on {self.hostname}, not Registered.\n\n"
+                f"CAPWAP is not established, so nothing downstream of the join "
+                f"can be validated -- the access tunnel and the radio MAC's "
+                f"LISP registration do not exist until the AP registers. "
+                f"Establish CAPWAP first, then re-run.")
+
+        notes = []
+        status = CheckStatus.OK
+
+        def flag(message):
+            nonlocal status
             status = CheckStatus.WARN
-            notes.append(
-                f"The controller reports this AP as {state}, not Registered. "
-                f"It is not serving clients in this state.")
-        admin = (cfg or {}).get("administrative_state") or ""
-        if admin and admin.strip().lower() == "disabled":
-            status = CheckStatus.WARN
-            notes.append(
-                "The AP is administratively disabled on this controller.")
+            notes.append(message)
+
+        # The Ethernet MAC the controller reports, against the MAC this run was
+        # started with. The lookup matched on it, so a mismatch here means the
+        # summary row disagrees with itself rather than that the wrong AP was
+        # found; worth surfacing because every wired check above keyed on the
+        # input MAC.
+        reported_mac = normalize_mac((row.get("ethernet_mac") or "").strip())
+        if reported_mac and ap_mac and reported_mac != normalize_mac(ap_mac):
+            flag(f"The controller reports Ethernet MAC {reported_mac}, but "
+                 f"this run was started with {ap_mac}.")
+
+        # The AP's address as the controller sees it, against what the edge
+        # switch witnessed (SISF device-tracking, and the DHCP snooping
+        # binding where the two agree). A disagreement means one of them is
+        # stale: the AP moved, or re-addressed, and something is still
+        # pointing at where it used to be.
+        sisf_ip = (ctx.state.get("ap_ip") or "").strip()
+        if ap_ip and sisf_ip and ap_ip != sisf_ip:
+            source = ctx.state.get("ap_ip_source") or "the edge switch"
+            flag(f"The controller has this AP at {ap_ip}, but {source} on the "
+                 f"edge has {sisf_ip}.")
+
+        # Local is the mode an AP onboards in on a fabric edge. Anything else
+        # is a different design, and the checks above and below it are reading
+        # a topology the AP is not actually using.
+        mode = ((cfg or {}).get("ap_mode") or "").strip()
+        if mode and mode.lower() != "local":
+            flag(f"The AP is in {mode} mode, not Local.")
+
+        admin = ((cfg or {}).get("administrative_state") or "").strip()
+        if admin and admin.lower() != "enabled":
+            flag(f"The AP is administratively {admin}, not Enabled.")
+
         if cfg_error:
             # The summary row already proved the AP is joined, so failing to
             # read its config narrows what can be said, it does not reverse it.
-            status = CheckStatus.WARN if status is CheckStatus.OK else status
-            notes.append(
-                f"The AP's tags and profiles could not be read — {cfg_error}")
+            # It does mean mode and admin state went ungraded, which is why
+            # this is surfaced rather than passed over.
+            flag(f"The AP's tags and profiles could not be read — {cfg_error}")
 
         if notes:
             lines += [""] + [f"  ⚠ {n}" for n in notes]
