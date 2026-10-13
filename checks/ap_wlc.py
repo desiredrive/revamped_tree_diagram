@@ -318,6 +318,7 @@ class ApWlcProfile(_ApCheck):
             queued.append(ApWlcFabricEnabled(hostname, node))
             queued.append(ApWlcControlPlanes(hostname, node))
             queued.append(ApWlcInfraVn(hostname, node))
+            queued.append(ApWlcCountry(hostname, mgmt_ip, node))
         # Last: every collection has been attempted by the time this runs.
         queued.append(ApWlcCollectionVerdict())
         plural = "" if len(candidates) == 1 else "s"
@@ -914,6 +915,106 @@ class ApWlcInfraVn(_PerWlcCheck):
         if subnet is not None:
             ctx.state.setdefault("ap_infra_subnet", str(subnet))
         return CheckResult(CheckStatus.OK, "\n".join(lines))
+
+
+class ApWlcCountry(_PerWlcCheck):
+    """Regulatory countries configured on the controller.
+
+    An AP only brings up a radio in a country the controller is configured
+    for. Join and country are separate failures, and the second is the
+    quieter one: an AP whose country is not configured here joins, registers
+    and serves nothing, because every radio stays down. That looks like an RF
+    problem rather than a configuration one.
+
+    Read over NETCONF (`country-oper`) rather than from
+    `show wireless country configured`. The list is keyed on the country code,
+    but which code to ask for is not known until the AP's own code has been
+    read, so it is fetched whole -- it is one entry per configured country,
+    not one per AP, and stays small.
+
+    Opt-in with the rest of the NETCONF reads: with no credentials set this
+    SKIPs and nothing else in the run changes.
+    """
+
+    aspect = "Country"
+    running_note = "Reading the configured regulatory countries…"
+
+    def __init__(self, hostname: str, mgmt_ip: str, node_id: str):
+        super().__init__(hostname, node_id)
+        self.mgmt_ip = mgmt_ip
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        from netconf_client import (
+            NetconfError, country_oper, credentials, dig, session_for_wlc,
+        )
+
+        if not credentials():
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — NETCONF is not configured. Set NETCONF_USERNAME "
+                "and NETCONF_PASSWORD (and NETCONF_PORT if the controllers do "
+                "not listen on 830) to read the configured countries.",
+            )
+
+        session = session_for_wlc(self.mgmt_ip)
+        if session is None:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — no management address is known for "
+                f"{self.hostname}.")
+
+        try:
+            entries = country_oper(session)
+        except NetconfError as e:
+            # The controller not answering NETCONF says nothing about its
+            # country configuration, and the rest of this controller's
+            # validation came over RADKit and is unaffected.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The configured countries could not be read from "
+                f"{self.hostname} — {e}")
+
+        if not entries:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{self.hostname} reports no configured regulatory country. "
+                f"No AP can bring up a radio until one is configured.")
+
+        codes = []
+        lines = []
+        for entry in entries:
+            code = (dig(entry, "country-code", default="") or "").strip()
+            if not code:
+                continue
+            codes.append(code)
+            name = dig(entry, "country-string", default="") or ""
+            lines.append(f"  {code:4} {name}")
+            # The regulatory domain strings say which AP hardware variants the
+            # country accepts; an AP whose domain is absent here is rejected
+            # even though the country itself is configured.
+            for band, leaf in (("802.11b/g", "reg-domain-str-80211bg"),
+                               ("802.11a", "reg-domain-str-80211a")):
+                domains = (dig(entry, leaf, default="") or "").strip()
+                if domains:
+                    # The device pads each domain to a fixed width and
+                    # separates them with commas, so the raw string arrives
+                    # as "    -AN^,    -NA^". Collapsed here rather than
+                    # printed as-is.
+                    domains = ", ".join(
+                        d.strip() for d in domains.split(",") if d.strip())
+                    lines.append(f"       {band:10} {domains}")
+
+        # Published for the AP-side country check: the AP's own code is read
+        # off its CAPWAP record later in the run, and graded against this.
+        ctx.state.setdefault("ap_wlc_countries", {})[self.hostname] = codes
+
+        plural = "y" if len(codes) == 1 else "ies"
+        return CheckResult(
+            CheckStatus.OK,
+            f"{len(codes)} regulatory countr{plural} configured on "
+            f"{self.hostname}:\n\n" + "\n".join(lines),
+            data={"countries": codes},
+        )
 
 
 class ApWlcCollectionVerdict(_ApCheck):

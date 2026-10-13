@@ -343,3 +343,53 @@ def test_unjoined_ap_names_the_phase_it_is_stuck_in(monkeypatch):
     assert "not joined" in result.message
     assert "stuck in DTLS" in result.message
     assert "dtls-cert-verify-fail" in result.message
+
+
+def test_country_check_reports_configured_countries(monkeypatch):
+    """The WLC country check reads `country-oper` and lists what is set.
+
+    An AP whose country is not configured on the controller joins and keeps
+    every radio down, so this is reported with the controller rather than
+    with the AP.
+    """
+    import netconf_client
+    from checks.ap_wlc import ApWlcCountry
+    from checks.base import CheckStatus
+
+    reply = ('<?xml version="1.0" encoding="UTF-8"?>'
+             '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><data>'
+             '<access-point-oper-data xmlns="http://cisco.com/ns/yang/'
+             'Cisco-IOS-XE-wireless-access-point-oper">'
+             '<country-oper><country-code>MX </country-code>'
+             '<country-string>Mexico</country-string>'
+             '<reg-domain-str-80211bg>     -A^,    -NA^</reg-domain-str-80211bg>'
+             '</country-oper></access-point-oper-data></data></rpc-reply>')
+
+    class Stub:
+        def get_subtree(self, _f):
+            import xml.etree.ElementTree as ET
+            from netconf_client import to_dict
+            return to_dict(ET.fromstring(reply))
+
+    monkeypatch.setenv("NETCONF_USERNAME", "u")
+    monkeypatch.setenv("NETCONF_PASSWORD", "p")
+    monkeypatch.setattr(netconf_client, "session_for", lambda *a, **k: Stub())
+
+    ctx = _ctx()
+    result = ApWlcCountry("wlc", "10.0.0.1", "wlc0").run(ctx)
+    assert result.status == CheckStatus.OK
+    assert "MX" in result.message and "Mexico" in result.message
+    # The device pads each regulatory domain; the report collapses that.
+    assert "-A^, -NA^" in result.message
+    assert ctx.state["ap_wlc_countries"]["wlc"] == ["MX"]
+
+
+def test_country_check_skips_without_netconf(monkeypatch):
+    """Same opt-in guarantee as the rest of the NETCONF reads."""
+    from checks.ap_wlc import ApWlcCountry
+    from checks.base import CheckStatus
+    monkeypatch.delenv("NETCONF_USERNAME", raising=False)
+    monkeypatch.delenv("NETCONF_PASSWORD", raising=False)
+    result = ApWlcCountry("wlc", "10.0.0.1", "wlc0").run(_ctx())
+    assert result.status == CheckStatus.SKIP
+    assert "NETCONF is not configured" in result.message
