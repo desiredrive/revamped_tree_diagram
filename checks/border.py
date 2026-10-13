@@ -67,7 +67,7 @@ class BorderDiscovery(Check):
                 "label": mgmt,
                 "ip": b.get("managementIpAddress") or None,
                 "connect_to": "xtr",
-                "edge_label": "fabric",
+                "edge_label": "IP Underlay",
             })
             if status == "reachable":
                 collect = BorderCollect(idx=idx, border_id=bid, mgmt=mgmt)
@@ -384,7 +384,7 @@ class BorderCollect(Check):
             result_data["merge_into"] = {
                 "source": self.target_node_id,
                 "target": merge_into,
-                "edge_label": "fabric",
+                "edge_label": "IP Underlay",
             }
         # For each additional underlay-switch that matches this border's
         # hostname (i.e. same physical Border showing up as a CDP neighbor on

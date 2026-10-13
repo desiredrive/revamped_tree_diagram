@@ -5398,7 +5398,7 @@ class ApBorderDiscovery(_ApCheck):
             add_nodes.append({
                 "id": node_id, "role": "border", "label": host,
                 "ip": mgmt or None, "connect_to": "xtr",
-                "edge_label": "fabric",
+                "edge_label": "IP Underlay",
             })
 
             # An unreachable border cannot be queried; reporting "no ACL" for

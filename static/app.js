@@ -940,6 +940,16 @@ function showTopology(payload) {
           'line-color': '#2563eb',
           'width': 2,
       }},
+      // The routed path between fabric nodes. Dotted like the sessions above
+      // it for the same reason: the hops between two fabric nodes are not a
+      // cable, and the ones this run looked at are drawn as their own edges.
+      { selector: 'edge[label = "IP Underlay"]', style: {
+          'line-style': 'dotted',
+          'line-color': '#708aba',
+          'width': 3,
+          'color': '#3d4f7a',
+          'font-size': '10px',
+      }},
       // The LISP control-plane session, like CAPWAP, is a relationship
       // between two nodes rather than a cable between them -- the underlay
       // hops it crosses are drawn as their own edges. Matched on the label
