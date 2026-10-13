@@ -1,8 +1,9 @@
 """AP Onboarding step 2 — WLC parameters.
 
-Two checks, both standalone: they describe the wireless controllers themselves
-and say nothing about any particular AP. The AP's own state on the WLC is a
-later step.
+`ApWlcDiscovery` and `ApWlcProfile` are standalone: they describe the wireless
+controllers themselves and say nothing about any particular AP. `ApWlcApState`
+is the manifest's step 5 and does the opposite -- it looks up one AP on each
+controller and reports what that controller believes about it.
 
 `ApWlcDiscovery` finds every WLC registered to the fabric site and resolves it
 to a RSA hostname. `ApWlcProfile` then profiles each one -- platform, HA,
@@ -318,8 +319,11 @@ class ApWlcProfile(_ApCheck):
             queued.append(ApWlcFabricEnabled(hostname, node))
             queued.append(ApWlcControlPlanes(hostname, node))
             queued.append(ApWlcInfraVn(hostname, node))
-        # Last: every collection has been attempted by the time this runs.
+            # Manifest step 5: the AP's own state on this controller.
+            queued.append(ApWlcApState(hostname, node))
+        # Last: every collection has been attempted by the time these run.
         queued.append(ApWlcCollectionVerdict())
+        queued.append(ApWlcApStateVerdict())
         plural = "" if len(candidates) == 1 else "s"
         return CheckResult(
             CheckStatus.OK,
@@ -916,6 +920,260 @@ class ApWlcInfraVn(_PerWlcCheck):
         return CheckResult(CheckStatus.OK, "\n".join(lines))
 
 
+def _ap_summary_rows(parsed):
+    """`show ap summary` as {ap name: row}, or None if it did not parse.
+
+    Genie keys the summary on the AP name: {'ap_name': {'AP-002': {...}}}.
+    Returns None rather than {} when the shape is wrong, so the caller can
+    distinguish "this controller has no APs" -- a real and informative answer
+    -- from "the output was not what we expected".
+    """
+    # A GenieParseResult is a Mapping but NOT a dict; testing for dict here
+    # would discard a perfectly good parse. See _trustpoint_fields above.
+    if not isinstance(parsed, Mapping):
+        return None
+    rows = parsed.get("ap_name")
+    if rows is None:
+        # The parser emits no `ap_name` key at all when no AP is joined.
+        return {} if "ap_neighbor_count" in parsed else None
+    if not isinstance(rows, Mapping):
+        return None
+    return rows
+
+
+def _find_ap_by_ethernet_mac(rows, ap_mac):
+    """The (name, row) whose Ethernet MAC is `ap_mac`, or (None, None).
+
+    Matches on the Ethernet MAC only. That is the MAC the edge switch sees on
+    the wire and the one the rest of the AP chain carries, so it is the value
+    the user supplies; the radio MAC is a different address on the same AP and
+    matching it here would make two different inputs look equivalent when the
+    rest of the chain can only act on one of them.
+
+    Both sides are normalised before comparing: Genie prints the dotted-quad
+    form, and a MAC typed with colons or in upper case is the same address.
+    """
+    from checks.shared import normalize_mac
+
+    want = normalize_mac(ap_mac)
+    for name, row in rows.items():
+        if not isinstance(row, Mapping):
+            continue
+        if normalize_mac(row.get("ethernet_mac")) == want:
+            return name, row
+    return None, None
+
+
+def _ap_config_general(wlc_hostname, ap_name, service):
+    """`show ap name <ap> config general` as (fields, error).
+
+    Reuses wirelessmodules.AccessPointInfo, which already issues exactly this
+    command -- the per-AP collection the east-west wireless chain uses. Only
+    one of the pair is ever non-None.
+    """
+    from wirelessmodules.accesspointinfo import AccessPointInfo
+
+    try:
+        info = AccessPointInfo(wlc_hostname)
+        info.apconfiggeneral(ap_name, service)
+        parsed = info.apconfiggeneral
+    except BaseException as e:
+        return None, f"{type(e).__name__}: {e}"
+
+    if not isinstance(parsed, Mapping):
+        return None, "the output did not parse into the expected shape"
+    # Keyed on the AP name, the same way the summary is.
+    by_name = parsed.get("ap_name")
+    if isinstance(by_name, Mapping):
+        entry = by_name.get(ap_name)
+        if isinstance(entry, Mapping):
+            return entry, None
+        # The controller echoes the name it knows; if that differs in case
+        # from the summary's, take the single entry rather than report
+        # nothing.
+        if len(by_name) == 1:
+            only = next(iter(by_name.values()))
+            if isinstance(only, Mapping):
+                return only, None
+    return None, "the output did not contain this AP's configuration"
+
+
+class ApWlcApState(_PerWlcCheck):
+    """Manifest step 5 — what this controller believes about the AP itself.
+
+    Every other per-WLC check here describes the controller. This one answers
+    the question the rest of the AP chain is in service of: has the AP joined,
+    and did it land on the intended configuration. An AP that never joined
+    makes every ACL, SGACL and LISP finding downstream a description of a path
+    nothing is using.
+
+    Two commands, in this order and for a reason:
+
+      `show ap summary`                       one row per joined AP, carrying
+                                              the Ethernet MAC. The AP chain
+                                              learns that MAC from the edge
+                                              switch -- it is what a switch
+                                              sees on the wire -- while every
+                                              per-AP command on the controller
+                                              is keyed on the AP's *name*.
+                                              This row is the bridge.
+
+      `show ap name <name> config general`    the tags, profiles, country and
+                                              mode, none of which appear in
+                                              the summary.
+
+    The AP being absent from the summary is the single most informative
+    outcome and is not an error: it is the answer "this AP has not joined this
+    controller", which on a multi-controller site is also the normal answer
+    from every controller but one.
+    """
+
+    aspect = "AP State"
+    running_note = "Looking the AP up on the controller…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        from checks.shared import normalize_mac
+
+        service = ctx.service
+        if not service:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        ap_mac = normalize_mac(ctx.payload.get("mac"))
+        if not ap_mac:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no AP MAC was supplied, so there is nothing to "
+                "look up on the controller.")
+
+        from radkit_cli import get_single_output_genie
+
+        try:
+            parsed = get_single_output_genie(
+                self.hostname, "show ap summary", service)
+        except BaseException as e:
+            # One controller refusing the command is not a verdict on the AP:
+            # it may well be joined to a different controller at this site.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"`show ap summary` could not be read from {self.hostname} — "
+                f"{type(e).__name__}: {e}")
+
+        rows = _ap_summary_rows(parsed)
+        if rows is None:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"`show ap summary` from {self.hostname} did not parse into "
+                f"the expected shape, so the AP could not be looked up.")
+
+        name, row = _find_ap_by_ethernet_mac(rows, ap_mac)
+        if not name:
+            joined = len(rows)
+            # Deliberately not a FAIL. A FAIL from an _ApCheck sets `ap_stop`
+            # and skips every check after it, and on a site with more than one
+            # controller the AP is absent from all but one of them by
+            # definition. ApWlcApStateVerdict owns the site-wide decision.
+            ctx.state.setdefault("ap_wlc_ap_absent", {})[self.hostname] = ap_mac
+            return CheckResult(
+                CheckStatus.WARN,
+                f"No AP with Ethernet MAC {ap_mac} is joined to "
+                f"{self.hostname}.\n\n"
+                f"{joined} AP{'' if joined == 1 else 's'} "
+                f"{'is' if joined == 1 else 'are'} joined to this controller. "
+                f"The lookup matches the Ethernet MAC, which is what the edge "
+                f"switch sees on the wire; if the value supplied was the AP's "
+                f"radio MAC it will not match here even when the AP is "
+                f"joined.")
+
+        return self._describe(ctx, service, name, row, ap_mac)
+
+    def _describe(self, ctx, service, name, row, ap_mac) -> CheckResult:
+        """Render the AP's state, pulling tags and profiles from the AP itself."""
+        from radkit_cli import get_single_output_genie
+
+        state = (row.get("state") or "").strip()
+        # Published for the site-wide verdict and for later checks that need
+        # to know the AP reached a controller at all.
+        ctx.state.setdefault("ap_wlc_joined_on", []).append(self.hostname)
+        ctx.state.setdefault("ap_wlc_ap_name", name)
+        radio_mac = (row.get("radio_mac") or "").strip()
+        if radio_mac:
+            ctx.state.setdefault("ap_wlc_radio_mac", radio_mac)
+        ap_ip = (row.get("ap_ip_address") or "").strip()
+        if ap_ip:
+            ctx.state.setdefault("ap_wlc_ap_ip", ap_ip)
+
+        lines = [
+            f"{name} is joined to {self.hostname}.",
+            "",
+            f"  State         {state or '—'}",
+            f"  Model         {row.get('ap_model') or '—'}",
+            f"  Ethernet MAC  {row.get('ethernet_mac') or '—'}",
+            f"  Radio MAC     {radio_mac or '—'}",
+            f"  IP address    {ap_ip or '—'}",
+            f"  Country       {row.get('country') or '—'}"
+            f"   Regulatory domain {row.get('regulatory_domain') or '—'}",
+            f"  Location      {row.get('location') or '—'}",
+        ]
+
+        # The tags and profiles are the half of step 5 the summary cannot
+        # answer, and they are per-AP rather than per-controller.
+        cfg, cfg_error = _ap_config_general(self.hostname, name, service)
+        if cfg:
+            ctx.state.setdefault("ap_wlc_tags", {})[self.hostname] = {
+                "site_tag": cfg.get("site_tag_name"),
+                "policy_tag": cfg.get("policy_tag_name"),
+                "rf_tag": cfg.get("rf_tag_name"),
+                "ap_join_profile": cfg.get("ap_join_profile"),
+                "flex_profile": cfg.get("flex_profile"),
+            }
+            lines += [
+                "",
+                "  Tags and profiles",
+                f"    Site tag        {cfg.get('site_tag_name') or '—'}",
+                f"    Policy tag      {cfg.get('policy_tag_name') or '—'}",
+                f"    RF tag          {cfg.get('rf_tag_name') or '—'}",
+                f"    AP-join profile {cfg.get('ap_join_profile') or '—'}",
+                f"    Flex profile    {cfg.get('flex_profile') or '—'}",
+                "",
+                "  Mode and administration",
+                f"    AP mode         {cfg.get('ap_mode') or '—'}"
+                f"   submode {cfg.get('ap_submode') or '—'}",
+                f"    Admin state     {cfg.get('administrative_state') or '—'}"
+                f"   operation {cfg.get('operation_state') or '—'}",
+                f"    Primary WLC     {cfg.get('primary_cisco_controller_name') or '—'}"
+                f" ({cfg.get('primary_cisco_controller_ip_address') or '—'})",
+            ]
+
+        status = CheckStatus.OK
+        notes = []
+        # "Registered" is the only state in which the AP is actually serving.
+        # Anything else is reported as a fabric fault -- WARN, not FAIL: the
+        # tool can continue, and the rest of the chain still has findings to
+        # contribute about the path this AP is trying to use.
+        if state and state.lower() != "registered":
+            status = CheckStatus.WARN
+            notes.append(
+                f"The controller reports this AP as {state}, not Registered. "
+                f"It is not serving clients in this state.")
+        admin = (cfg or {}).get("administrative_state") or ""
+        if admin and admin.strip().lower() == "disabled":
+            status = CheckStatus.WARN
+            notes.append(
+                "The AP is administratively disabled on this controller.")
+        if cfg_error:
+            # The summary row already proved the AP is joined, so failing to
+            # read its config narrows what can be said, it does not reverse it.
+            status = CheckStatus.WARN if status is CheckStatus.OK else status
+            notes.append(
+                f"The AP's tags and profiles could not be read — {cfg_error}")
+
+        if notes:
+            lines += [""] + [f"  ⚠ {n}" for n in notes]
+
+        return CheckResult(status, "\n".join(lines),
+                           data={"ap_name": name, "state": state})
+
+
 class ApWlcCollectionVerdict(_ApCheck):
     """Site-wide verdicts once every controller has been profiled.
 
@@ -1074,3 +1332,78 @@ class ApWlcCollectionVerdict(_ApCheck):
             f"usable INFRA_VN; the flow continues on those.\n\n"
             f"Unusable INFRA_VN:\n{detail}",
         )
+
+
+class ApWlcApStateVerdict(_ApCheck):
+    """Site-wide: did the AP join any controller at all?
+
+    The per-controller check cannot decide this. On a site with more than one
+    Fabric WLC the AP is absent from all but one of them by definition, so
+    "not on this controller" is the expected answer almost everywhere and
+    means nothing on its own. Only the view across every controller does.
+
+    Absent everywhere is a fabric fault, and the manifest's rule is that a
+    fabric fault is a WARN: the tool can continue, and the edge-side checks
+    after this one still have findings worth having -- the port, the VLAN, the
+    ACLs and the LISP registrations are what explain *why* the AP did not
+    reach a controller. Stopping here would discard exactly the evidence
+    someone needs to act on.
+
+    Runs on the XTR rather than a controller: the verdict is about the site.
+    """
+
+    name = "WLC AP State Verdict"
+    target_node_id = "xtr"
+    running_note = "Confirming the AP joined a controller…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        candidates = ctx.state.get("ap_wlc_candidates") or []
+        if not candidates:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery).")
+
+        from checks.shared import normalize_mac
+        ap_mac = normalize_mac(ctx.payload.get("mac"))
+        if not ap_mac:
+            return CheckResult(
+                CheckStatus.SKIP, "Skipped — no AP MAC was supplied.")
+
+        joined_on = ctx.state.get("ap_wlc_joined_on") or []
+        if joined_on:
+            name = ctx.state.get("ap_wlc_ap_name") or "The AP"
+            where = ", ".join(joined_on)
+            if len(joined_on) == 1:
+                return CheckResult(
+                    CheckStatus.OK,
+                    f"{name} ({ap_mac}) is joined to {where}.")
+            # Two controllers both claiming the same AP is a genuine anomaly
+            # rather than redundancy: an AP holds one CAPWAP session at a
+            # time, so this is either a stale record or a split site.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{name} ({ap_mac}) is reported as joined by more than one "
+                f"controller: {where}.\n\n"
+                f"An AP holds one CAPWAP session at a time, so one of these "
+                f"records is stale or the controllers disagree about who owns "
+                f"the AP.")
+
+        absent = ctx.state.get("ap_wlc_ap_absent") or {}
+        checked = len(absent)
+        if not checked:
+            # Nothing reported either way -- every per-controller check
+            # skipped or errored, so there is no verdict to give.
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no controller reported on this AP (see the "
+                "per-controller AP State checks).")
+
+        return CheckResult(
+            CheckStatus.WARN,
+            f"No controller at this site has AP {ap_mac} joined.\n\n"
+            f"Checked {checked} controller{'' if checked == 1 else 's'}: "
+            f"{', '.join(absent)}.\n\n"
+            f"The AP has not completed CAPWAP. The edge-side checks that "
+            f"follow examine the path it would use to get there -- the access "
+            f"port, the INFRA_VN VLAN, the route to the controller and the "
+            f"access lists along it.")
