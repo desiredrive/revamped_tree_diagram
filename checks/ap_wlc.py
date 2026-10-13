@@ -322,6 +322,7 @@ class ApWlcProfile(_ApCheck):
             # Manifest step 5: the AP's own state on this controller.
             queued.append(ApWlcApState(hostname, node))
             queued.append(ApWlcApUptime(hostname, node))
+            queued.append(ApWlcApCountry(hostname, node))
         # Last: every collection has been attempted by the time these run.
         queued.append(ApWlcCollectionVerdict())
         queued.append(ApWlcApStateVerdict())
@@ -1120,6 +1121,10 @@ class ApWlcApState(_PerWlcCheck):
         # answer, and they are per-AP rather than per-controller.
         cfg, cfg_error = _ap_config_general(self.hostname, name, service)
         if cfg:
+            country = (cfg.get("country_code") or "").strip()
+            if country:
+                # Graded by ApWlcApCountry against the controller's own list.
+                ctx.state.setdefault("ap_wlc_country", {})[self.hostname] = country
             ctx.state.setdefault("ap_wlc_tags", {})[self.hostname] = {
                 "site_tag": cfg.get("site_tag_name"),
                 "policy_tag": cfg.get("policy_tag_name"),
@@ -1310,6 +1315,85 @@ class ApWlcApUptime(_PerWlcCheck):
                                    rows, unreadable, expected))
 
         return _uptime_message(name, row, uptime_seconds)
+
+
+class ApWlcApCountry(_PerWlcCheck):
+    """Is the AP's own country configured on the controller it joined?
+
+    A quieter failure than a join failure, and easy to mistake for an RF
+    problem. An AP whose country is not configured on its controller joins,
+    registers and then serves nothing, because every radio stays down. The
+    registration checks all pass; only the radios are missing.
+
+    Needs the AP's own country, which `ApWlcApState` reads from `show ap name
+    <ap> config general`, so it runs after it. The controller's list comes
+    from `show wireless country configured`, which Genie has no parser for.
+    """
+
+    aspect = "AP Country"
+    running_note = "Checking the AP's country is configured on the controller…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        service = ctx.service
+        if not service:
+            return CheckResult(CheckStatus.SKIP, "Skipped — no RSA service.")
+
+        ap_country = ((ctx.state.get("ap_wlc_country") or {})
+                      .get(self.hostname) or "").strip()
+
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import parse_wireless_country
+
+        try:
+            raw = get_any_single_output(
+                self.hostname, "show wireless country configured", service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The configured countries could not be read from "
+                f"{self.hostname} — {type(e).__name__}: {e}")
+
+        countries, unreadable = parse_wireless_country(raw)
+
+        if not countries:
+            detail = ""
+            if unreadable:
+                detail = (f" {unreadable} line"
+                          f"{'' if unreadable == 1 else 's'} under the table "
+                          f"could not be read, so the list may be incomplete.")
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{self.hostname} reports no configured regulatory country."
+                f"{detail}\n\nNo AP can bring up a radio until one is "
+                f"configured.")
+
+        lines = [f"{len(countries)} regulatory countr"
+                 f"{'y' if len(countries) == 1 else 'ies'} configured on "
+                 f"{self.hostname}:", ""]
+        for code, entry in sorted(countries.items()):
+            lines.append(f"  {code}  {entry['name']}")
+            if entry["bands"]:
+                lines.append(f"      {entry['bands']}")
+
+        if not ap_country:
+            # Without the AP's country there is nothing to grade against, but
+            # the controller's list is still worth showing.
+            lines += ["", "  ⚠ The AP's own country was not read (see AP "
+                          "State), so it was not graded against this list."]
+            return CheckResult(CheckStatus.OK, "\n".join(lines))
+
+        lines += ["", f"  AP country  {ap_country}"]
+        if ap_country.upper() in countries:
+            return CheckResult(CheckStatus.OK, "\n".join(lines))
+
+        return CheckResult(
+            CheckStatus.WARN,
+            "\n".join(lines + [
+                "",
+                f"  ⚠ The AP's country {ap_country} is not configured on "
+                f"{self.hostname}. The AP can join and register, but every "
+                f"radio stays down until the country is added.",
+            ]))
 
 
 class ApWlcCollectionVerdict(_ApCheck):

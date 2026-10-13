@@ -138,3 +138,67 @@ def parse_ap_uptime(text):
         name = entry.pop("ap_name").strip()
         rows[name] = {k: v.strip() for k, v in entry.items()}
     return rows, unreadable, expected
+
+
+#: A row under "Configured Country Codes": the code, the country name, and
+#: the bands with the environments each is approved for.
+#:
+#: Anchored on the two-letter code followed by a dash, which is the one part
+#: of the row with a fixed shape. The band list is free text whose contents
+#: vary by regulatory domain, so it is captured whole rather than split into
+#: fields this lab cannot show us the full range of.
+_COUNTRY_ROW = re.compile(
+    r"^\s+(?P<code>[A-Z]{2})\s+-\s+(?P<name>\S[^\s].*?)\s{2,}(?P<bands>\S.*?)\s*$"
+)
+
+#: The summary line IOS prints above the table.
+_COUNTRY_SUMMARY = re.compile(
+    r"^\s*Configured Country\.+\s+(?P<code>[A-Z]{2})\s*-\s*(?P<name>.+?)\s*$"
+)
+
+
+def parse_wireless_country(text):
+    """`show wireless country configured` as (countries, unreadable).
+
+    There is no Genie parser for this command.
+
+    `countries` maps the two-letter code -> {name, bands}, with both values
+    as the device printed them. `unreadable` counts lines that sat under the
+    table heading but did not match.
+
+    An empty dict with no unreadable rows means the controller genuinely has
+    no configured country -- a real and serious answer, since no AP can bring
+    a radio up without one. That is why a row is never half-recovered: a
+    country in the dict with a blank name is indistinguishable from a
+    configured one, and the AP's country would then grade as present when it
+    was never read.
+    """
+    countries = {}
+    unreadable = 0
+    in_table = False
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.endswith("#") or "#show " in stripped:
+            continue
+        summary = _COUNTRY_SUMMARY.match(line)
+        if summary:
+            # The single "Configured Country" line duplicates one of the rows
+            # below; the table is authoritative, so this is not a row.
+            continue
+        if stripped.startswith("Configured Country Codes"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        match = _COUNTRY_ROW.match(line)
+        if not match:
+            unreadable += 1
+            continue
+        entry = match.groupdict()
+        countries[entry["code"]] = {
+            "name": entry["name"].strip(),
+            "bands": entry["bands"].strip(),
+        }
+    return countries, unreadable
