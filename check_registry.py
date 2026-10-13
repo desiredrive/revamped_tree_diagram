@@ -33,6 +33,7 @@ from checks.ap_onboarding import (
     ApDhcpAccessLists,
     ApTrustSecPolicy,
     ApWlcTrustSecPolicy,
+    ApVlanAccessMap,
     ApCefToAp,
     ApBorderDiscovery,
     ApAuthTemplate,
@@ -277,6 +278,10 @@ def build_check_chain(payload: dict) -> list[Check]:
             # can deny one direction and permit the other, so the return path
             # being clean says nothing about this one.
             ApWlcTrustSecPolicy(),
+            # A VLAN access-map filters inside the VLAN, before any
+            # `ip access-group` the checks above read, so a VACL dropping
+            # the AP's traffic is invisible to every one of them.
+            ApVlanAccessMap(),
             # Manifest line 62: the same ACL question on the borders. The WLC
             # is outside the fabric, so the CAPWAP session crosses a border
             # on the way out and an ACL there is invisible to every

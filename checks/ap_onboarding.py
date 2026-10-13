@@ -4919,6 +4919,152 @@ class ApWlcTrustSecPolicy(_ApCheck):
             f"its controller.\n\n" + "\n\n".join(sections), data=data)
 
 
+class ApVlanAccessMap(_ApCheck):
+    """VACL applied to the VLAN the AP onboards in.
+
+    Every ACL check above reads `ip access-group` -- a PACL on the access
+    port or a RACL on the SVI. A VLAN access-map is neither: it filters
+    inside the VLAN, before any of that, and is invisible to all of them. An
+    AP whose CAPWAP or DHCP is dropped by a VACL therefore passes every
+    other access-list check cleanly.
+
+    Both directions are asked about, for each controller. A map that permits
+    the join request and drops the reply blocks the session just as
+    completely as one that drops both.
+
+    The implicit deny is treated as a finding in its own right: a VLAN
+    access-map whose last sequence is not `action forward` drops everything
+    it did not explicitly match, which catches traffic no named ACL mentions.
+
+    `acl_entry` is PD-eligible -- recorded for the later platform pass.
+    """
+
+    name = "AP VLAN Access-Map"
+    target_node_id = "xtr"
+    running_note = "Evaluating the VACL on the AP's VLAN…"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+        ap_ip = ctx.state.get("ap_ip")
+        vlan = ctx.state.get("ap_vlan") or ctx.state.get("ap_infra_vlan")
+        wlcs = ctx.state.get("ap_wlc_candidates") or []
+        data = {"ap_ip": ap_ip, "vlan": vlan}
+
+        if not vlan:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the AP's VLAN is not known, so no VLAN "
+                "access-map can be looked up.", data=data)
+        if not ap_ip:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the AP has no known IPv4 address, so there is no "
+                "source address to evaluate against.", data=data)
+
+        try:
+            from switchingmodules.vacl import get_vacl_drop_acls
+            raw = get_vacl_drop_acls(hostname, int(vlan), ctx.service) or []
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"Could not read the VLAN access-map for VLAN {vlan} on "
+                f"{hostname} ({type(e).__name__}: {e}), so a VACL dropping "
+                f"the AP's traffic would not be seen.", data=data)
+
+        implicit_deny = "VACL_IMPLICIT_DENY_ACTIVE" in raw
+        acls = [a for a in raw if a != "VACL_IMPLICIT_DENY_ACTIVE"]
+        data.update({"acls": acls, "implicit_deny": implicit_deny})
+
+        if not acls and not implicit_deny:
+            return CheckResult(
+                CheckStatus.OK,
+                f"No VLAN access-map filters VLAN {vlan} on {hostname}, so "
+                f"nothing here drops the AP's traffic.", data=data)
+
+        if not wlcs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no WLC was discovered (see WLC Discovery), so "
+                "there is no flow to evaluate against the VACL.", data=data)
+
+        from securitymodules.accesslists import acl_evaluation
+
+        sections, denies, unreadable = [], [], []
+        for wlc_host, mgmt_ip, _node in wlcs:
+            flows = []
+            for port in (5246, 5247):
+                kind = "control" if port == 5246 else "data"
+                flows.append((f"CAPWAP {kind} (UDP/{port}), AP to WLC",
+                              ap_ip, mgmt_ip, "udp", 65535, port))
+                flows.append((f"CAPWAP {kind} (UDP/{port}), WLC to AP",
+                              mgmt_ip, ap_ip, "udp", port, 65535))
+
+            for acl in acls:
+                record_pd_object(ctx, "acl_entry", radkit_hostname=hostname,
+                                 acl=acl, vlan=vlan)
+                blocked, allowed, unread = [], [], []
+                for label, s_ip, d_ip, proto, sport, dport in flows:
+                    ev = {"sourceip": s_ip, "destinationip": d_ip,
+                          "protocol": proto, "srcport": sport,
+                          "dstport": dport}
+                    try:
+                        hit = acl_evaluation(ctx.service, hostname, acl,
+                                             False, ev)
+                    except BaseException as e:
+                        unread.append((acl, label,
+                                       f"{type(e).__name__}: {e}"))
+                        continue
+                    if not hit or len(hit) < 3:
+                        unread.append((acl, label, "no verdict returned"))
+                    # A VACL's drop ACLs are MATCH lists, not permit lists:
+                    # a packet the ACL permits is one the access-map drops,
+                    # and one it denies simply falls through to the next
+                    # sequence. Reading the verdict the usual way round would
+                    # invert every result.
+                    elif hit[1] == "permit":
+                        blocked.append((label, f"matched {acl}, sequence "
+                                               f"{hit[2]}"))
+                    else:
+                        allowed.append((label, f"not matched by {acl}"))
+
+                if blocked:
+                    denies.append(mgmt_ip)
+                if unread:
+                    unreadable.extend(unread)
+                sections.append(render_acl_section(
+                    f"AP {ap_ip} ↔ WLC {wlc_host} ({mgmt_ip}), dropped by "
+                    f"{acl} on VLAN {vlan}",
+                    None, blocked=blocked, permitted=allowed, unread=unread))
+
+        body = "\n\n".join(sections)
+        if implicit_deny:
+            body += (f"\n\nThe access-map on VLAN {vlan} ends without an "
+                     f"'action forward' sequence, so any traffic it does not "
+                     f"explicitly match is dropped.")
+
+        if denies:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"A VLAN access-map on {hostname} is dropping the AP's "
+                f"traffic.\n\n" + body,
+                data=dict(data, errors=unreadable))
+        if implicit_deny:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The VLAN access-map on VLAN {vlan} ends in an implicit "
+                f"deny.\n\n" + body, data=dict(data, errors=unreadable))
+        if unreadable:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The VLAN access-map on VLAN {vlan} could not be fully "
+                f"evaluated.\n\n" + body,
+                data=dict(data, errors=unreadable))
+        return CheckResult(
+            CheckStatus.OK,
+            f"No VLAN access-map on {hostname} drops the AP's traffic.\n\n"
+            + body, data=data)
+
+
 class ApBorderCapwapAcls(_ApCheck):
     """CAPWAP ACLs on one border, for the AP's path to its controller.
 
