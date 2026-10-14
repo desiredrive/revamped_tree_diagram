@@ -305,3 +305,19 @@ def test_a_blocking_acl_names_the_interface_and_reads_as_prose(monkeypatch):
     assert "TenGigabitEthernet1/0/3" in r.message
     assert "nolisp, sequence 1" in r.message
     assert "('" not in r.message            # no tuple repr
+
+
+def test_the_switch_side_check_is_named_for_the_device_it_reads():
+    """"(switch)" read as a different subject rather than the same check run
+    from the other end -- and the xTR is not always an edge, since the
+    controller runs this flow too."""
+    import checks.lisp_session as m
+
+    t = m.LispSessionTarget(eid="172.19.5.10", xtr_hostname="Edge2",
+                            catc_name="c", iid=4097, af="ipv4")
+    for cls in (m.LispSessionAccessLists, m.LispSessionTrustSec):
+        near = cls(t, "172.19.1.65", "cp2", False).name
+        far = cls(t, "172.19.1.65", "cp2", True).name
+        assert "Edge2" in near and "switch" not in near
+        assert "cp2" in far
+        assert near != far

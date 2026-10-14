@@ -1468,7 +1468,10 @@ class LispSessionAccessLists(_SessionCheck):
         self.cp_mgmt = cp_mgmt or self.cp_hostname
         # False: switch -> map-server. True: the reverse, run on the CP.
         self.on_cp = on_cp
-        side = self.cp_hostname if on_cp else "switch"
+        # Named by device, not by role: "switch" read as a different subject
+        # rather than the same check run from the other end, and the xTR is
+        # not always an edge -- the controller runs this flow too.
+        side = self.cp_hostname if on_cp else (target.xtr_hostname or "switch")
         self.name = f"Session ACLs ({side}) — {self.cp_hostname}"
         self.running_note = "Evaluating ACLs on the underlay path."
         self.target_node_id = target.node_for(self.cp_hostname)
@@ -1589,7 +1592,10 @@ class LispSessionTrustSec(_SessionCheck):
         self.cp_hostname = cp_hostname or map_server
         self.cp_mgmt = cp_mgmt or self.cp_hostname
         self.on_cp = on_cp
-        side = self.cp_hostname if on_cp else "switch"
+        # Named by device, not by role: "switch" read as a different subject
+        # rather than the same check run from the other end, and the xTR is
+        # not always an edge -- the controller runs this flow too.
+        side = self.cp_hostname if on_cp else (target.xtr_hostname or "switch")
         self.name = f"Session TrustSec ({side}) — {self.cp_hostname}"
         self.running_note = "Evaluating the CTS policy for the session."
         self.target_node_id = target.node_for(self.cp_hostname)
