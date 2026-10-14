@@ -637,17 +637,15 @@ class LispControlPlaneConfiguration(_SessionCheck):
                 data={"cp": self.cp_hostname},
             )
 
-        # `rloc_members` and `domains` are read above and were never graded:
-        # the five checks in `cp_configuration_validation` cover the site and
-        # the roles, and stop there. Neither is fatal on its own, so both are
-        # reported alongside the pass rather than raised through it.
+        # `domains` is read above and was never graded: the five checks in
+        # `cp_configuration_validation` cover the site and the roles, and stop
+        # there. Not fatal on its own, so it is reported alongside the pass
+        # rather than raised through it.
+        #
+        # `rloc_members` is read too and is deliberately NOT graded: a fabric
+        # runs correctly without `map-server rloc members distribute`, and
+        # Border2 in this lab does.
         notes = []
-        if getattr(cfg, "rloc_members_distribute", None) is not True:
-            notes.append(
-                f"• `map-server rloc members distribute` is not configured on "
-                f"{self.cp_hostname}. The control plane does not advertise "
-                f"its site's locators to the other map-servers, so an xTR "
-                f"registering here may be unknown to the rest of the fabric.")
         domain = getattr(cfg, "domainid", 0)
         multihoming = getattr(cfg, "multihomingid", 0)
         if not domain:
@@ -668,14 +666,10 @@ class LispControlPlaneConfiguration(_SessionCheck):
         if notes:
             return CheckResult(
                 CheckStatus.WARN, "\n".join(lines + [""] + notes),
-                data={"cp": self.cp_hostname,
-                      "rloc_members_distribute": getattr(
-                          cfg, "rloc_members_distribute", None),
-                      "domain_id": domain})
+                data={"cp": self.cp_hostname, "domain_id": domain})
         return CheckResult(
             CheckStatus.OK, "\n".join(lines),
-            data={"cp": self.cp_hostname,
-                  "rloc_members_distribute": True, "domain_id": domain},
+            data={"cp": self.cp_hostname, "domain_id": domain},
         )
 
 

@@ -400,11 +400,11 @@ def test_a_foreign_target_does_not_borrow_the_edges_rloc():
 
 
 # --------------------------------------------------------------------------
-# `rloc_members` and `domains` are read by the configuration check and were
-# never graded: the five checks in `cp_configuration_validation` stop at the
-# site and the roles. A control plane that does not distribute its locators,
-# or has no domain ID, passed silently while the OK message claimed it
-# "allows the locators this switch registers from" -- which nothing had read.
+# `domains` is read by the configuration check and was never graded: the five
+# checks in `cp_configuration_validation` stop at the site and the roles. A
+# control plane with no domain ID passed silently while the OK message
+# claimed it "allows the locators this switch registers from" -- which
+# nothing had read.
 # --------------------------------------------------------------------------
 
 
@@ -438,13 +438,17 @@ def test_a_fully_configured_control_plane_passes(monkeypatch):
     assert "Domain ID 1" in r.message
 
 
-def test_locators_not_distributed_is_reported(monkeypatch):
-    """Without it the CP does not advertise its site's locators to its peers,
-    so an xTR registering here can be unknown to the rest of the fabric."""
+def test_locators_not_distributed_is_not_a_finding(monkeypatch):
+    """A fabric runs correctly without `map-server rloc members distribute`.
+
+    It is read by `rloc_members` and deliberately left ungraded: Border2 in
+    the lab does not configure it and registers fine, so reporting it would
+    be noise on every run.
+    """
     r = _cfg_check(monkeypatch, rloc_members_distribute=False,
                    domainid=1, multihomingid=0)
-    assert r.status is CheckStatus.WARN
-    assert "rloc members distribute" in r.message
+    assert r.status is CheckStatus.OK
+    assert "distribute" not in r.message
 
 
 def test_no_domain_id_is_reported(monkeypatch):
@@ -456,11 +460,12 @@ def test_no_domain_id_is_reported(monkeypatch):
     assert "Domain ID" not in r.message     # nothing to report
 
 
-def test_both_faults_are_reported_in_one_run(monkeypatch):
-    """Neither is fatal, so the reader gets both rather than the first."""
+def test_a_missing_domain_id_is_the_only_graded_fault(monkeypatch):
+    """With distribute ungraded, the domain ID is what this check adds."""
     r = _cfg_check(monkeypatch, rloc_members_distribute=None, domainid=0)
     assert r.status is CheckStatus.WARN
-    assert "rloc members distribute" in r.message and "domain ID" in r.message
+    assert "domain ID" in r.message
+    assert "distribute" not in r.message
 
 
 def test_a_rejected_registration_warns_rather_than_stopping_the_run(monkeypatch):
