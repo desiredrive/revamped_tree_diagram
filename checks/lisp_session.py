@@ -23,6 +23,8 @@ queues them through `data["queue_checks"]` and supplies the node ids it has
 already drawn for its control planes.
 """
 
+import types
+
 from checks.base import Check, CheckResult, CheckStatus, RunContext
 from checks.shared import (_cef_interfaces, _evaluate_acls,
                            render_acl_section)
@@ -920,8 +922,23 @@ class LispAuthenticationKey(_SessionCheck):
             etr = _profile_xtr(ctx, t)
             from traffic_flows.lispsessiontroubleshooting import ETRConfiguration
             etr_cfg = ETRConfiguration(etr.profiled_device.hostname)
-            etr_cfg.etr_map_servers(etr.eid_properties, t.af or "ipv4",
-                                    ctx.service)
+            # `etr_map_servers` wants one thing off this object: `.mapservers`,
+            # the map-servers actually registering this EID, which restrict a
+            # show-run blob covering every instance on the box.
+            #
+            # On the edge that comes from the EID identification phase, as
+            # `eid_properties`. The controller's flow has no such phase -- its
+            # map-servers come from `show wireless fabric summary` -- so
+            # reading `etr.eid_properties` there raised AttributeError and the
+            # key was never compared. The target knows its own map-servers in
+            # both cases, so they are taken from it and the EID phase's record
+            # is used only when it exists.
+            props = ctx.state.get("_lisp_session_eid_props")
+            if props is None or not getattr(props, "mapservers", None):
+                props = types.SimpleNamespace(
+                    mapservers=[{"map_server": ms} for ms in
+                                (t.control_planes or [])] or None)
+            etr_cfg.etr_map_servers(props, t.af or "ipv4", ctx.service)
             ms_config = getattr(etr_cfg, "mapserverconfiguration", None) or []
         except SystemExit as e:
             return CheckResult(

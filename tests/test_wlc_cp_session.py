@@ -154,3 +154,81 @@ def test_nodes_resolve_by_hostname_as_well_as_address():
     reused = [c for c in checks
               if isinstance(c, LispControlPlaneConfiguration)]
     assert reused and all(c.target_node_id == "wlccp-1" for c in reused)
+
+
+# --------------------------------------------------------------------------
+# The authentication key comparison. `ETRConfiguration.etr_map_servers` wants
+# `.mapservers` off the EID identification phase's record -- which the
+# controller's flow does not have, having no such phase.
+# --------------------------------------------------------------------------
+
+
+def test_the_target_carries_the_map_servers_it_registers_to():
+    """Without them `LispAuthenticationKey` reached for `eid_properties` on
+    the ETR and raised AttributeError, so the key was never compared:
+
+      Could not compare authentication keys for border1-sdawest-com
+      (AttributeError: 'ETRDevice' object has no attribute 'eid_properties')
+
+    The edge gets them from the EID phase; the controller gets them from
+    `show wireless fabric summary`, so the target has to carry them.
+    """
+    from checks.wlc_cp_session import wlc_cp_session_checks
+    from checks.lisp_session import LispAuthenticationKey
+
+    checks = wlc_cp_session_checks(
+        wmi="10.31.136.74", vnid=8188, radio_mac="3891.b70f.2600",
+        control_planes=[("172.19.1.64", "cp1", "10.31.136.64"),
+                        ("172.19.1.65", "cp2", "10.31.136.65")],
+        catc_name="catc", wlc_hostname="wlc", wlc_node_id="wlc",
+        cp_nodes={"172.19.1.64": "apcp-1", "172.19.1.65": "apcp-2"})
+
+    auth = [c for c in checks if isinstance(c, LispAuthenticationKey)]
+    assert auth, "no authentication key check was queued"
+    # RLOCs, not hostnames: the comparison matches against the CP's loopback.
+    assert auth[0].target.control_planes == ["172.19.1.64", "172.19.1.65"]
+
+
+def test_the_comparison_falls_back_to_the_targets_control_planes(monkeypatch):
+    """The substitute record stands in for the EID phase's, so the reader
+    restricts its grading the same way rather than seeing every instance on
+    the box."""
+    import checks.lisp_session as m
+
+    seen = {}
+
+    class Cfg:
+        def __init__(self, _h): pass
+        def site_uci(self, *a): 
+            self.authentication_key = (True, "k")
+            self.decrypted = True
+        def __getattr__(self, _n): return lambda *a, **k: None
+    monkeypatch.setattr("routingmodules.lisp.L2LISPControlPlane", Cfg)
+    monkeypatch.setattr(m, "_cp_device",
+                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
+                            profiled_device=types.SimpleNamespace(
+                                hostname=h, loopback="172.19.1.64")))
+    # An ETR with NO eid_properties -- the controller's case exactly.
+    monkeypatch.setattr(m, "_profile_xtr",
+                        lambda ctx, t: types.SimpleNamespace(
+                            profiled_device=types.SimpleNamespace(
+                                hostname="wlc")))
+
+    class ETRCfg:
+        def __init__(self, _h): pass
+        def etr_map_servers(self, props, af, svc):
+            seen["mapservers"] = props.mapservers
+            self.mapserverconfiguration = []
+    monkeypatch.setattr(
+        "traffic_flows.lispsessiontroubleshooting.ETRConfiguration", ETRCfg)
+
+    t = m.LispSessionTarget(
+        eid="3891.b70f.2600", xtr_hostname="wlc", catc_name="catc",
+        iid=8188, af="ethernet",
+        control_planes=["172.19.1.64", "172.19.1.65"])
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    r = m.LispAuthenticationKey(t, "cp1").run_session(ctx)
+
+    assert "AttributeError" not in (r.message or "")
+    assert seen["mapservers"] == [{"map_server": "172.19.1.64"},
+                                  {"map_server": "172.19.1.65"}]

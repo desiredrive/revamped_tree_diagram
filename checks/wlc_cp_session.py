@@ -190,7 +190,14 @@ def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
         eid=radio_mac, xtr_hostname=wlc_hostname, catc_name=catc_name,
         iid=vnid, af="ethernet", cp_nodes=cp_nodes or {},
         xtr_node_id=wlc_node_id, label=f"the AP's radio MAC {radio_mac}",
-        xtr_loopback=wmi)
+        xtr_loopback=wmi,
+        # The map-servers the controller registers this radio MAC to. The
+        # edge's flow learns these from the EID identification phase, which
+        # the controller has none of -- so `LispAuthenticationKey` has no
+        # other source for which map-servers to restrict its comparison to.
+        control_planes=[
+            cp[0] if isinstance(cp, (tuple, list)) else cp
+            for cp in control_planes])
     # Keyed by BOTH the address and the hostname: `show wireless fabric
     # summary` names control planes by address and the canvas nodes follow it,
     # while `node_for` looks up by hostname. Keyed one way only, the five
