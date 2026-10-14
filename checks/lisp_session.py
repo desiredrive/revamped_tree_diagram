@@ -1756,8 +1756,29 @@ class LispSessionTrustSec(_SessionCheck):
             srcinfo.cts_sgt_mapping(ctx.service)
             dstinfo = cts_endpoint_info(dst, None, host)
             dstinfo.cts_sgt_mapping(ctx.service)
-            sgt = getattr(srcinfo, "sgt", None)
-            dgt = getattr(dstinfo, "sgt", None)
+            # The local binding where there is one, else what CEF carries.
+            # An address off the fabric has no `sgt-map` entry -- a control
+            # plane holds none for the controller's WMI -- but the forwarding
+            # plane still classifies it, and that is the SGT policy is
+            # evaluated against. `cts_sgt_mapping` reads both; only the
+            # binding was being used, so an off-fabric address came back None
+            # and the check reported "no SGT binding ... so no policy
+            # applies", which is not the same statement.
+            #
+            # SGT 0 is Unknown, and a real group that policy matches like any
+            # other -- so it is a value here, not a missing one.
+            def _sgt_of(info):
+                local = getattr(info, "sgt", None)
+                if local is not None:
+                    return _int0(local)
+                cef = getattr(info, "cefsgt", None)
+                return None if cef is None else _int0(cef)
+
+            sgt = _sgt_of(srcinfo)
+            dgt = _sgt_of(dstinfo)
+            data["sgt_from_cef"] = {
+                "src": getattr(srcinfo, "sgt", None) is None,
+                "dst": getattr(dstinfo, "sgt", None) is None}
             data.update({"sgt": sgt, "dgt": dgt})
 
             rules = cts_rules(host)

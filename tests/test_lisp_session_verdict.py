@@ -552,7 +552,8 @@ def test_a_trustsec_deny_names_the_sgt_pair(monkeypatch):
 
 
 def _cts_check(monkeypatch, sgt, dgt, *, default=True, rbacl="Permit IP",
-               raw="Permit IP-00", verdict="deny", seq="default deny"):
+               raw="Permit IP-00", verdict="deny", seq="default deny",
+               cefsgt=None, cefdgt=None):
     """The TrustSec check with the CTS reads stubbed."""
     import checks.lisp_session as m
 
@@ -571,9 +572,15 @@ def _cts_check(monkeypatch, sgt, dgt, *, default=True, rbacl="Permit IP",
             self.ctsportenabled = True
             self.globalenforcement = True
         def cts_sgt_mapping(self, _svc):
-            g = sgt if self._ip == "172.19.1.64" else dgt
+            src = self._ip == "172.19.1.64"
+            g = sgt if src else dgt
             if g is not None:
                 self.sgt = g
+            # Mirrors the real reader: `cefsgt` is set whether or not a local
+            # binding exists, and 0 when CEF carries no SGT line.
+            c = cefsgt if src else cefdgt
+            if c is not None:
+                self.cefsgt = c
     monkeypatch.setattr("securitymodules.ciscotrustsec.cts_endpoint_info", Info)
 
     class Rules:
@@ -636,3 +643,29 @@ def test_an_unbound_address_says_which_end(monkeypatch):
     assert r.status is CheckStatus.OK
     assert "no SGT binding for 10.31.136.74" in r.message
     assert "172.19.1.64 is SGT 2" in r.message
+
+
+def test_the_destination_group_comes_from_cef_when_there_is_no_binding(
+        monkeypatch):
+    """The controller's WMI sits off the fabric, so a control plane holds no
+    `sgt-map` entry for it -- but the forwarding plane still classifies it,
+    and that is the group policy is evaluated against. Reading only the local
+    binding reported "no SGT binding for 10.31.136.74, so the policy below is
+    not applied", which is a different statement from the truth."""
+    r = _cts_check(monkeypatch, 2, None, cefdgt=4, default=False,
+                   verdict="permit", seq="10")
+    assert r.data["dgt"] == 4
+    assert r.data["sgt_from_cef"] == {"src": False, "dst": True}
+    assert "Destination 10.31.136.74 is SGT 4" in r.message
+
+
+def test_an_unclassified_destination_is_sgt_zero_not_a_missing_value(
+        monkeypatch):
+    """SGT 0 is Unknown -- a real group that policy matches like any other.
+    Treating it as absent skipped the policy evaluation entirely on exactly
+    the address this flow is about."""
+    r = _cts_check(monkeypatch, 2, None, cefdgt=0, default=False,
+                   verdict="permit", seq="10")
+    assert r.data["dgt"] == 0
+    assert "no SGT binding" not in r.message
+    assert "Destination 10.31.136.74 is SGT 0" in r.message
