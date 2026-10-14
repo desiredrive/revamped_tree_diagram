@@ -1332,6 +1332,10 @@ def _parse_ipv4_server_raw(output, eid, iid):
         # Which prefix the CP answered with, and whether it is the host's own
         # /32 rather than a covering prefix.
         "eid_prefix": None, "exact_prefix": False,
+        # Ethernet (L2) registrations only. The IPv4 caller never sees these
+        # lines, so they stay at their defaults there.
+        "reliable_transport": False, "wlc_ap_bit": None,
+        "wlc_data_length": None, "wlc_data_hex": None,
     }
 
     # "% No entries found" / an empty Requested EID-prefix section both mean the
@@ -1344,6 +1348,7 @@ def _parse_ipv4_server_raw(output, eid, iid):
     prefix_seen = False
     current_etr = None
     in_locator_table = False
+    in_wlc_data = False
 
     for line in output.splitlines():
         stripped = line.strip()
@@ -1401,6 +1406,30 @@ def _parse_ipv4_server_raw(output, eid, iid):
         m = re.match(r"^Allowed locators mismatch:\s*(\d+)", stripped, re.IGNORECASE)
         if m:
             record["allowed_locators_mismatch"] = int(m.group(1)); continue
+
+        # Per-ETR flags. All three sit inside the ETR block and are read
+        # whichever ETR is current: a radio MAC registers from exactly one.
+        if stripped == "sourced by reliable transport":
+            record["reliable_transport"] = True
+            continue
+        m = re.match(r"^WLC AP bit:\s*(\S+)", stripped)
+        if m:
+            record["wlc_ap_bit"] = m.group(1).strip()
+            continue
+        m = re.match(r"^WLC data length:\s*(\d+)", stripped)
+        if m:
+            record["wlc_data_length"] = int(m.group(1))
+            in_wlc_data = True
+            continue
+        if in_wlc_data:
+            # The hex payload, two-digit groups indented under the length.
+            # Ends at the locator table header, which the next branch catches.
+            if re.match(r"^(?:[0-9A-Fa-f]{2}\s+)+[0-9A-Fa-f]{2}$", stripped):
+                record["wlc_data_hex"] = (
+                    (record["wlc_data_hex"] + " " if record["wlc_data_hex"]
+                     else "") + stripped)
+                continue
+            in_wlc_data = False
 
         m = re.match(r"^ETR\s+(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?", stripped)
         if m:

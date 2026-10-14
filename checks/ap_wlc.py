@@ -383,6 +383,13 @@ class ApWlcApStateProfile(_ApCheck):
             # Runs last of the per-controller checks because an AP that is
             # not registered has already stopped the run by here.
             queued.append(ApWlcFabricControlPlane(hostname, node))
+            # The radio MAC's registration on each resolved control plane.
+            # Before the session trigger below: a control plane holding no
+            # registration is exactly what that session flow explains, so
+            # the registration has to be read first.
+            from checks.ap_radio_registration import (
+                ApRadioMacRegistrationTrigger)
+            queued.append(ApRadioMacRegistrationTrigger(hostname, node))
             # Trigger 3: a control plane the fabric check found Down leaves
             # the radio MAC unregistered there, which no edge-side check can
             # see. Immediately after the check that resolves the set, so the
