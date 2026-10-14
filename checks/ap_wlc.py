@@ -2462,13 +2462,6 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
             # the chain's xTR and reports its fabric under this name.
             xtr_mgmtip=mgmt,
             xtr_loopback=wmi,
-            # The controller cannot answer the EID identification phase: the
-            # radio MAC is a LISP database entry, never a switched MAC, so
-            # there is no MAC table to find it in and no access VLAN to
-            # resolve the instance from. `singleETRLISPSessionOnlyFEW` drops
-            # that phase for the same reason; the IID and map-servers above
-            # are what it would have produced.
-            few=True,
         )
 
         listed = ", ".join(f"{ip} ({state})" for ip, state in down)
