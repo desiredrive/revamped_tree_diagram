@@ -383,6 +383,11 @@ class ApWlcApStateProfile(_ApCheck):
             # Runs last of the per-controller checks because an AP that is
             # not registered has already stopped the run by here.
             queued.append(ApWlcFabricControlPlane(hostname, node))
+            # Trigger 3: a control plane the fabric check found Down leaves
+            # the radio MAC unregistered there, which no edge-side check can
+            # see. Immediately after the check that resolves the set, so the
+            # session flow it queues runs before the next controller's.
+            queued.append(ApWlcCpLispSessionTrigger(hostname, node))
         # Last: every controller has been looked at by the time this runs.
         queued.append(ApWlcApStateVerdict())
         plural = "" if len(candidates) == 1 else "s"
@@ -2294,6 +2299,36 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
 
         down = [p for p in planes
                 if (p.get("status") or "").strip().lower() != CP_STATUS_UP]
+
+        # What the session trigger runs on. The controller is an xTR of its
+        # own, registering the radio MAC into the L2 instance to these same
+        # control planes, so the flow needs its device, its RLOC and the
+        # instance -- none of which the AP chain's xtr_* keys describe.
+        ctx.state["ap_wlc_cp_down"] = [
+            (p["ip_address"], p.get("status")) for p in down]
+        # A node per control plane, so the session flow's per-CP findings
+        # land on the control plane they are about rather than all piling
+        # onto the controller. The edge path may already have drawn these
+        # same devices; addNodes merges by management IP, so the second
+        # description tags the existing node instead of duplicating it.
+        cp_nodes, add_nodes = {}, []
+        for idx, plane in enumerate(planes, start=1):
+            addr = plane["ip_address"]
+            node_id = f"wlccp-{idx}"
+            cp_nodes[addr] = node_id
+            add_nodes.append({
+                "id": node_id, "role": "control-plane", "label": addr,
+                "ip": addr, "connect_to": self.target_node_id,
+                "edge_label": "LISP Session",
+            })
+        ctx.state["ap_wlc_cp_nodes"] = cp_nodes
+        # ApWlcCollect recorded it; _PerWlcCheck itself carries no address.
+        ctx.state["ap_wlc_mgmtip"] = (
+            (ctx.state.get("ap_wlc_profiles") or {})
+            .get(self.hostname, {}).get("mgmt_ip"))
+        if vnid.get("l2_vnid"):
+            ctx.state["ap_wlc_l2_vnid"] = vnid["l2_vnid"]
+
         lines = [
             f"{name} is fabric-enabled on {self.hostname} and resolves to "
             f"{len(planes)} control plane{'' if len(planes) == 1 else 's'}.",
@@ -2318,11 +2353,93 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         # manifest's warn-and-continue rule applies, because the other plane
         # of the pair may still be carrying the registration.
         if down:
+            listed = ", ".join(f"{ip} ({st})" for ip, st in
+                               ctx.state["ap_wlc_cp_down"])
             return CheckResult(
                 CheckStatus.WARN,
                 "\n".join(lines) + "\n\n"
-                + f"{len(down)} of these is not Up, so the AP may be "
-                  f"registering to fewer control planes than the fabric "
-                  f"intends.")
+                + f"{listed} {'is' if len(down) == 1 else 'are'} not Up. The "
+                  f"controller cannot register the AP's radio MAC there, so "
+                  f"that control plane holds no record of it — the session "
+                  f"flow below says why.",
+                data={"control_planes": addresses, "add_nodes": add_nodes})
         return CheckResult(CheckStatus.OK, "\n".join(lines),
-                           data={"control_planes": addresses})
+                           data={"control_planes": addresses,
+                                 "add_nodes": add_nodes})
+
+
+class ApWlcCpLispSessionTrigger(_ApCheck):
+    """Run the LISP session flow when a controller's control plane is down.
+
+    Trigger 3 of the five. The controller is an xTR in its own right: it
+    registers the AP's radio MAC into the L2 instance, to the same control
+    planes the edge registers the AP's address to. A session down from the
+    controller leaves the radio MAC unregistered while every edge-side check
+    passes, which is why the edge-side triggers cannot see this fault.
+
+    The EID is the radio MAC rather than the AP's address: that is what the
+    controller registers, so it is what the flow can ask a control plane
+    about. The control planes themselves are the ones the controller resolved
+    -- `ap_cp_set` -- not the ones the edge peers with, which can differ.
+    """
+
+    def __init__(self, hostname: str, node_id: str):
+        self.hostname = hostname
+        self.node_id = node_id
+        self.target_node_id = node_id
+        self.name = f"WLC LISP Session Troubleshooting — {hostname}"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        down = ctx.state.get("ap_wlc_cp_down") or []
+        if not down:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — every control plane this controller registers to "
+                "has its session up, so there is nothing to explain.")
+
+        mac = (ctx.state.get("ap_wlc_radio_mac") or "").strip()
+        if not mac:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the AP's radio MAC is not known (see WLC AP "
+                "State), and it is what the controller registers, so there "
+                "is no EID to trace.")
+
+        iid = ctx.state.get("ap_wlc_l2_vnid")
+        mgmt = (ctx.state.get("ap_wlc_mgmtip") or "").strip()
+        if not iid or not mgmt:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the controller's L2 instance or management "
+                "address is not known, so the flow has no device and "
+                "instance to run against.")
+
+        from checks.lisp_session import LispSessionTarget, lisp_session_checks
+        target = LispSessionTarget(
+            eid=mac,
+            xtr_hostname=self.hostname,
+            catc_name=ctx.state.get("catc_name"),
+            iid=iid,
+            af="ethernet",
+            cp_nodes=ctx.state.get("ap_wlc_cp_nodes") or {},
+            xtr_node_id=self.node_id,
+            label=f"the AP's radio MAC {mac}",
+            # The controller, not the edge: without this the flow profiles
+            # the chain's xTR and reports its fabric under this name.
+            xtr_mgmtip=mgmt,
+            xtr_loopback=ctx.state.get("ap_wlc_rloc"),
+        )
+
+        listed = ", ".join(f"{ip} ({state})" for ip, state in down)
+        return CheckResult(
+            CheckStatus.WARN,
+            f"The LISP session from {self.hostname} to {listed} is not up. "
+            f"The controller registers {mac} to that control plane, so a "
+            f"session that is down leaves the radio MAC unregistered there "
+            f"while every edge-side check still passes.\n\n"
+            f"The session flow runs against the controller to say why: its "
+            f"own database and map-server configuration, its sessions, and "
+            f"each control plane's path, configuration and counters.",
+            data={"queue_checks": lisp_session_checks(
+                target, map_servers=[(ip, ip, ip) for ip, _s in down])},
+        )

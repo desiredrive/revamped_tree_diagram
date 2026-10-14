@@ -113,6 +113,11 @@ class _SessionCheck(Check):
 
     def __init__(self, target: LispSessionTarget):
         self.target = target
+        # Set here, not in run_session: the runner routes check_started
+        # before run() is called, so a check that only assigns its node
+        # while running is announced against the previous default -- the
+        # edge -- and appears on the wrong node until it finishes.
+        self.target_node_id = target.xtr_node_id
 
     def run(self, ctx: RunContext) -> CheckResult:
         stop = ctx.state.get(self.target.key(STOP_KEY))
