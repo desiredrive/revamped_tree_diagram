@@ -530,7 +530,11 @@ def test_a_trustsec_deny_names_the_sgt_pair(monkeypatch):
     monkeypatch.setattr("securitymodules.ciscotrustsec.cts_endpoint_info", Info)
 
     class Rules:
-        def __init__(self, _h): self.rbacl = ["Permit IP"]
+        def __init__(self, _h):
+            self.rbacl = ["Permit IP"]
+            # The verbatim device name. `acl_evaluation` runs
+            # `show ip access-list`, which answers only to this form.
+            self.rawrbacl = "Permit IP-00"
         def cts_rbac_permissions(self, *a): self.isdefaultrule = True
         def cts_rbac_rbacls(self, *a): pass
         def cts_rbac_counters(self, *a):
@@ -538,7 +542,12 @@ def test_a_trustsec_deny_names_the_sgt_pair(monkeypatch):
             self.sw_denied_count = 0
     monkeypatch.setattr("securitymodules.ciscotrustsec.cts_rules", Rules)
     monkeypatch.setattr("securitymodules.accesslists.acl_evaluation",
-                        lambda *a, **k: (None, "deny", "default deny"))
+                        lambda *a, **k: (True, "deny", "default deny"))
+
+    class Acl:
+        def __init__(self, _h): pass
+        def rbaclacl(self, _n, _s): self.aces = [{"index": 10}]
+    monkeypatch.setattr("securitymodules.accesslists.AccessList", Acl)
 
     ctx = types.SimpleNamespace(service=object(), payload={}, state={})
     r = m.LispSessionTrustSec(
@@ -553,9 +562,12 @@ def test_a_trustsec_deny_names_the_sgt_pair(monkeypatch):
 
 def _cts_check(monkeypatch, sgt, dgt, *, default=True, rbacl="Permit IP",
                raw="Permit IP-00", verdict="deny", seq="default deny",
-               cefsgt=None, cefdgt=None):
-    """The TrustSec check with the CTS reads stubbed."""
+               cefsgt=None, cefdgt=None, resolves_empty=(), evaluated=None):
+    """The TrustSec check with the CTS reads stubbed.
+
+    `evaluated` collects the ACL names the readback was asked for."""
     import checks.lisp_session as m
+    evaluated = [] if evaluated is None else evaluated
 
     monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: types.SimpleNamespace(
         profiled_device=types.SimpleNamespace(
@@ -595,6 +607,17 @@ def _cts_check(monkeypatch, sgt, dgt, *, default=True, rbacl="Permit IP",
     monkeypatch.setattr("securitymodules.ciscotrustsec.cts_rules", Rules)
     monkeypatch.setattr("securitymodules.accesslists.acl_evaluation",
                         lambda *a, **k: (True, verdict, seq))
+
+    # The check reads the ACL back before evaluating it: an ACL with no ACEs
+    # evaluates to the synthetic implicit-deny alone, so an unresolved name
+    # is indistinguishable from a real block unless it is checked for.
+    class Acl:
+        def __init__(self, _h): pass
+        def rbaclacl(self, name, _svc):
+            evaluated.append(name)
+            self.aces = [] if name in (resolves_empty or ()) else [
+                {"index": 10, "forwarding": verdict}]
+    monkeypatch.setattr("securitymodules.accesslists.AccessList", Acl)
 
     t = m.LispSessionTarget(
         eid="3891.b70f.2600", xtr_hostname="wlc", catc_name="catc",
@@ -669,3 +692,27 @@ def test_an_unclassified_destination_is_sgt_zero_not_a_missing_value(
     assert r.data["dgt"] == 0
     assert "no SGT binding" not in r.message
     assert "Destination 10.31.136.74 is SGT 0" in r.message
+
+
+def test_the_policy_is_evaluated_against_the_raw_device_name(monkeypatch):
+    """Two readers, two name forms. `show cts rbacl` answers to the stripped
+    display name, `show ip access-list` only to the verbatim one -- Border1
+    returns the ACE for "Permit IP-00" and nothing at all for "Permit IP"."""
+    seen = []
+    _cts_check(monkeypatch, 2, 4, default=False, rbacl="AllowWeb",
+               raw="AllowWeb-01", verdict="permit", seq="10", evaluated=seen)
+    assert seen and set(seen) == {"AllowWeb-01"}
+
+
+def test_an_unresolved_acl_is_not_reported_as_a_deny(monkeypatch):
+    """The fault this fixes. `hexdecimal_representation_acl` appends a
+    synthetic implicit-deny matching any source, any destination and every
+    port, so an ACL that reads back empty evaluates to that entry alone and
+    denies everything -- and a permit-all default policy was reported as
+    blocking the LISP session."""
+    r = _cts_check(monkeypatch, 2, 0, raw="Permit IP-00",
+                   resolves_empty=("Permit IP-00",))
+    assert r.status is not CheckStatus.WARN
+    assert r.data["denies"] == []
+    assert r.data["unresolved_acls"] == ["Permit IP-00"]
+    assert "could not be read back as an access list" in r.message

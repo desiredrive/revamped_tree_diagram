@@ -1845,19 +1845,42 @@ class LispSessionTrustSec(_SessionCheck):
 
         # Evaluate each RBACL both ways. Ephemeral source port on the
         # initiating side, 4342 on the listening side.
-        acls = getattr(rules, "rbacl", None) or []
+        # The VERBATIM device name, not the display form. Two readers, two
+        # name forms: `cts_rbac_rbacls` runs `show cts rbacl "<name>"`, which
+        # answers to the stripped name, while `acl_evaluation` runs
+        # `show ip access-list "<name>"`, which answers only to the raw one.
+        # Border1 returns the ACE for "Permit IP-00" and nothing at all for
+        # "Permit IP" -- and an empty answer became a deny below, so a
+        # permit-all default policy reported as blocking the session.
+        acls = raw or getattr(rules, "rbacl", None) or []
         if isinstance(acls, str):
             acls = [acls]
         forward = {"sourceip": src, "destinationip": dst, "protocol": "tcp",
                    "srcport": 65535, "dstport": 4342}
         reverse = {"sourceip": dst, "destinationip": src, "protocol": "tcp",
                    "srcport": 4342, "dstport": 65535}
-        denies = []
+        denies, unresolved = [], []
         from securitymodules.accesslists import acl_evaluation
         for acl in acls:
             for label, ev in ((f"{src} → {dst}", forward),
                               (f"{dst} → {src}", reverse)):
                 try:
+                    from securitymodules.accesslists import AccessList
+                    # Read the ACL first, and only evaluate it if it HAS
+                    # ACEs. `hexdecimal_representation_acl` appends a
+                    # synthetic implicit-deny matching any source, any
+                    # destination and every port, so an ACL that read as
+                    # empty evaluates to exactly that one entry and denies
+                    # everything. A name the device does not resolve then
+                    # looks identical to a real block -- which is how a
+                    # Permit IP default policy came back as a deny.
+                    probe = AccessList(host)
+                    probe.rbaclacl(acl, ctx.service)
+                    if not getattr(probe, "aces", None):
+                        # Once per ACL, not once per direction.
+                        if acl not in unresolved:
+                            unresolved.append(acl)
+                        continue
                     hit = acl_evaluation(ctx.service, host, acl, True, ev)
                 except BaseException:
                     continue
@@ -1875,7 +1898,14 @@ class LispSessionTrustSec(_SessionCheck):
 
         hw = _int0(getattr(rules, "hw_denied_count", 0))
         sw = _int0(getattr(rules, "sw_denied_count", 0))
-        data.update({"denies": denies, "hw_denied": hw, "sw_denied": sw})
+        data.update({"denies": denies, "hw_denied": hw, "sw_denied": sw,
+                     "unresolved_acls": unresolved})
+        for acl in unresolved:
+            # Said, not silently dropped: the policy was NOT evaluated, which
+            # is a different answer from "it permits".
+            lines.append(
+                f"• {acl} could not be read back as an access list on {host}, "
+                f"so its ACEs were not evaluated.")
 
         if denies:
             # `lines` carries the SGT pair and the RBACL that produced the
