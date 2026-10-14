@@ -497,3 +497,142 @@ def test_a_rejected_registration_warns_rather_than_stopping_the_run(monkeypatch)
 
     assert r.status is CheckStatus.WARN
     assert "site_uci" in r.message
+
+
+def test_a_trustsec_deny_names_the_sgt_pair(monkeypatch):
+    """An SGACL deny is actionable only once the groups are named.
+
+    The deny branch dropped `lines`, which carries the SGT pair and the
+    RBACL, and printed only the addresses and the sequence:
+
+      • Permit IP denies 172.19.1.64 -> 10.31.136.74 at sequence default deny
+
+    which never says which groups those addresses were classified into.
+    """
+    import checks.lisp_session as m
+
+    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: types.SimpleNamespace(
+        profiled_device=types.SimpleNamespace(
+            hostname="Edge2", loopback="172.19.1.68")))
+    monkeypatch.setattr(m, "_cp_device",
+                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
+                            profiled_device=types.SimpleNamespace(hostname=h)))
+    monkeypatch.setattr(m, "_igp_interfaces",
+                        lambda ctx, h, d: ["TenGigabitEthernet1/0/1"])
+
+    class Info:
+        def __init__(self, ip, _a, _h): self._ip = ip
+        def cts_enforcement(self, *a):
+            self.ctsportenabled = True
+            self.globalenforcement = True
+        def cts_sgt_mapping(self, _svc):
+            self.sgt = 8 if self._ip == "172.19.1.65" else 4
+    monkeypatch.setattr("securitymodules.ciscotrustsec.cts_endpoint_info", Info)
+
+    class Rules:
+        def __init__(self, _h): self.rbacl = ["Permit IP"]
+        def cts_rbac_permissions(self, *a): self.isdefaultrule = True
+        def cts_rbac_rbacls(self, *a): pass
+        def cts_rbac_counters(self, *a):
+            self.hw_denied_count = 0
+            self.sw_denied_count = 0
+    monkeypatch.setattr("securitymodules.ciscotrustsec.cts_rules", Rules)
+    monkeypatch.setattr("securitymodules.accesslists.acl_evaluation",
+                        lambda *a, **k: (None, "deny", "default deny"))
+
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    r = m.LispSessionTrustSec(
+        _target(), "172.19.1.65", "cp2", True).run_session(ctx)
+
+    assert r.status is CheckStatus.WARN
+    # Both groups named, and the RBACL that produced the verdict.
+    assert "SGT 8" in r.message and "SGT 4" in r.message
+    assert "Permit IP" in r.message
+    assert r.data["sgt"] == 8 and r.data["dgt"] == 4
+
+
+def _cts_check(monkeypatch, sgt, dgt, *, default=True, rbacl="Permit IP",
+               raw="Permit IP-00", verdict="deny", seq="default deny"):
+    """The TrustSec check with the CTS reads stubbed."""
+    import checks.lisp_session as m
+
+    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: types.SimpleNamespace(
+        profiled_device=types.SimpleNamespace(
+            hostname="wlc", loopback=None)))
+    monkeypatch.setattr(m, "_cp_device",
+                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
+                            profiled_device=types.SimpleNamespace(hostname=h)))
+    monkeypatch.setattr(m, "_igp_interfaces",
+                        lambda ctx, h, d: ["TenGigabitEthernet1/0/1"])
+
+    class Info:
+        def __init__(self, ip, _a, _h): self._ip = ip
+        def cts_enforcement(self, *a):
+            self.ctsportenabled = True
+            self.globalenforcement = True
+        def cts_sgt_mapping(self, _svc):
+            g = sgt if self._ip == "172.19.1.64" else dgt
+            if g is not None:
+                self.sgt = g
+    monkeypatch.setattr("securitymodules.ciscotrustsec.cts_endpoint_info", Info)
+
+    class Rules:
+        def __init__(self, _h):
+            self.rbacl = [rbacl]
+            self.rawrbacl = raw
+        def cts_rbac_permissions(self, *a): self.isdefaultrule = default
+        def cts_rbac_rbacls(self, *a): pass
+        def cts_rbac_counters(self, *a):
+            self.hw_denied_count = 0
+            self.sw_denied_count = 0
+    monkeypatch.setattr("securitymodules.ciscotrustsec.cts_rules", Rules)
+    monkeypatch.setattr("securitymodules.accesslists.acl_evaluation",
+                        lambda *a, **k: (True, verdict, seq))
+
+    t = m.LispSessionTarget(
+        eid="3891.b70f.2600", xtr_hostname="wlc", catc_name="catc",
+        iid=8188, af="ethernet", xtr_mgmtip="10.31.136.74",
+        xtr_loopback="10.31.136.74")
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    return m.LispSessionTrustSec(
+        t, "172.19.1.64", "border1-sdawest-com", True).run_session(ctx)
+
+
+def test_the_policy_lookup_reports_what_it_resolved(monkeypatch):
+    """SGT, DGT, the rule hit and the RBACL, before any verdict.
+
+    The output named a deny and a sequence and nothing else, so there was no
+    way to tell a real block from a lookup that went wrong.
+    """
+    r = _cts_check(monkeypatch, 2, 8)
+
+    assert "172.19.1.64 is SGT 2" in r.message
+    assert "10.31.136.74 is SGT 8" in r.message
+    assert "the default rule" in r.message
+    assert "Permit IP" in r.message
+    # The device's own name for it, where the lookup name differs.
+    assert "Permit IP-00" in r.message
+    assert r.data["sgt"] == 2 and r.data["dgt"] == 8
+    assert r.data["is_default_rule"] is True
+
+
+def test_the_terminal_ace_is_named_as_such(monkeypatch):
+    """`sequence default deny` read as a sequence number. It is the terminal
+    0xFFFFFFFF entry the device reports as part of the RBACL's contents."""
+    r = _cts_check(monkeypatch, 2, 8)
+    assert "terminal implicit-deny ACE" in r.message
+    assert "sequence default deny" not in r.message
+
+
+def test_an_unbound_address_says_which_end(monkeypatch):
+    """Border1 holds no SGT map for the controller's WMI, which is the real
+    lab case: the controller sits outside the fabric.
+
+    "no SGT binding for X or Y" did not say which end, and the one that IS
+    bound is worth naming.
+    """
+    r = _cts_check(monkeypatch, 2, None)
+
+    assert r.status is CheckStatus.OK
+    assert "no SGT binding for 10.31.136.74" in r.message
+    assert "172.19.1.64 is SGT 2" in r.message

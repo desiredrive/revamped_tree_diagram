@@ -1783,16 +1783,44 @@ class LispSessionTrustSec(_SessionCheck):
                 f"({type(e).__name__}: {e}).", data=data)
 
         if sgt is None or dgt is None:
+            # Name WHICH end is unbound, and what the other one resolved to.
+            # "no SGT binding for X or Y" did not say which, and an address
+            # with no binding is the common case: the controller sits outside
+            # the fabric, so a control plane holds no SGT map for its WMI.
+            unbound = [a for a, g in ((src, sgt), (dst, dgt)) if g is None]
+            known = [f"{a} is SGT {g}" for a, g in ((src, sgt), (dst, dgt))
+                     if g is not None]
             return CheckResult(
                 CheckStatus.OK,
-                f"{host} has no SGT binding for {src} or {dst}, so no "
-                f"TrustSec policy applies to the session.", data=data)
+                f"{host} has no SGT binding for "
+                f"{' or '.join(unbound)}"
+                + (f" ({', '.join(known)})" if known else "")
+                + f", so the policy below is not applied to this session.",
+                data=data)
 
         data["rbacl"] = rbacl
         data["is_default_rule"] = default
+        # What the policy lookup actually resolved, reported before any
+        # verdict is drawn from it. Without these four the output named a
+        # deny and a sequence and nothing else, so there was no way to tell a
+        # real block from a lookup that went wrong -- which is what happened:
+        # a default policy of Permit reported as blocking the session.
+        raw = getattr(rules, "rawrbacl", None)
+        sgtname = getattr(rules, "sgtname", None)
+        dgtname = getattr(rules, "dgtname", None)
+        data.update({"rawrbacl": raw, "sgt_name": sgtname,
+                     "dgt_name": dgtname})
+        src_label = f"SGT {sgt}" + (f" ({sgtname})" if sgtname else "")
+        dst_label = f"SGT {dgt}" + (f" ({dgtname})" if dgtname else "")
         kind = ("the default rule" if default
-                else f"a specific rule for SGT {sgt} → SGT {dgt}")
-        lines = [f"• Policy: {kind}, RBACL {rbacl}"]
+                else f"a specific rule for {src_label} → {dst_label}")
+        lines = [
+            f"• Source {src} is {src_label}",
+            f"• Destination {dst} is {dst_label}",
+            f"• Rule hit: {kind}",
+            f"• RBACL: {rbacl}" + (f" (as {raw} on the device)"
+                                   if raw and raw != rbacl else ""),
+        ]
 
         # Evaluate each RBACL both ways. Ephemeral source port on the
         # initiating side, 4342 on the listening side.
@@ -1814,23 +1842,32 @@ class LispSessionTrustSec(_SessionCheck):
                     continue
                 if not hit or len(hit) < 3:
                     continue
+                # hit[2] is the ACE's sequence number, or the string
+                # "default deny" for the terminal 0xFFFFFFFF entry the device
+                # reports as part of the RBACL's contents.
+                ace = f"sequence {hit[2]}" if hit[2] != "default deny" \
+                    else "the terminal implicit-deny ACE"
                 if hit[1] == "deny":
-                    denies.append(
-                        f"{acl} denies {label} at sequence {hit[2]}")
+                    denies.append(f"{acl} denies {label} at {ace}")
                 elif hit[1] == "permit":
-                    lines.append(
-                        f"• {acl} permits {label} (sequence {hit[2]})")
+                    lines.append(f"• {acl} permits {label} at {ace}")
 
         hw = _int0(getattr(rules, "hw_denied_count", 0))
         sw = _int0(getattr(rules, "sw_denied_count", 0))
         data.update({"denies": denies, "hw_denied": hw, "sw_denied": sw})
 
         if denies:
+            # `lines` carries the SGT pair and the RBACL that produced the
+            # verdict. Dropping it here printed the denies with the IPs and
+            # the sequence but never said which groups they were classified
+            # into -- and an SGACL deny is only actionable once the source
+            # and destination SGTs are named.
             return CheckResult(
                 CheckStatus.WARN,
                 f"The TrustSec policy on {host} is blocking the LISP "
-                f"session (TCP/4342):\n\n"
-                + "\n".join(f"• {d}" for d in denies), data=data)
+                f"session (TCP/4342) between SGT {sgt} ({src}) and SGT "
+                f"{dgt} ({dst}):\n\n"
+                + "\n".join(lines + [f"• {d}" for d in denies]), data=data)
 
         if hw or sw:
             return CheckResult(
