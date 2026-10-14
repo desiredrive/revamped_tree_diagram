@@ -28,7 +28,7 @@ from checks.base import Check, CheckResult, CheckStatus, RunContext
 from checks.lisp_session import (
     LispControlPlaneConfiguration,
     LispMapServerSelfSession, LispSessionAccessLists, LispSessionTrustSec,
-    LispControlPlaneStatistics, LispCpCpuUtilization, LispInterCpSession,
+    LispCpCpuUtilization, LispInterCpSession,
     LispSessionTarget, LispTcpSocket, _cp_device)
 
 
@@ -327,7 +327,6 @@ def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
         # which a C9800 answers with nothing.
         checks.append(WlcCpAuthenticationKey(
             host, mgmt, (keys or {}).get(addr), catc_name, node, vnid))
-        checks.append(LispControlPlaneStatistics(target, host, mgmt))
         checks.append(LispTcpSocket(target, host, mgmt))
         checks.append(LispCpCpuUtilization(target, host, mgmt))
         # The control plane's own session to the map-server address, which

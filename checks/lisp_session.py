@@ -678,110 +678,6 @@ class LispControlPlaneConfiguration(_SessionCheck):
         )
 
 
-class LispControlPlaneStatistics(_SessionCheck):
-    """The LISP counters on ONE control plane, for this instance.
-
-    Where a rejected registration actually shows up. A Map-Register that is
-    sent, received and then discarded leaves no record and no session error --
-    only a counter here moves.
-    """
-
-    def __init__(self, target, cp_hostname, cp_mgmt=None):
-        self.target = target
-        self.cp_hostname = cp_hostname
-        self.cp_mgmt = cp_mgmt or cp_hostname
-        self.name = f"Control Plane Statistics — {cp_hostname}"
-        self.target_node_id = target.node_for(cp_hostname)
-        self.running_note = "Reading the LISP counters."
-
-    def run_session(self, ctx: RunContext) -> CheckResult:
-        t = self.target
-        from routingmodules.lisp import LISPInstanceStatus
-        try:
-            # CLI is issued against the RADKit inventory name, which the
-            # profiler resolves from the management IP -- see _cp_device.
-            cp = _cp_device(ctx, self.cp_hostname, t.catc_name, self.cp_mgmt)
-            stats = LISPInstanceStatus(cp.profiled_device.hostname, t.iid)
-            stats.eidStatistics(t.af or "ipv4", ctx.service)
-        except SystemExit as e:
-            return CheckResult(
-                CheckStatus.FAIL,
-                f"Reading the LISP counters on {self.cp_hostname} stopped:"
-                f"\n\n{e}", data={"cp": self.cp_hostname})
-        except KeyError as e:
-            # The parsed output carried no LISP instance -- `lisp_id` is the
-            # key the statistics walk indexes by. That is a statement about
-            # the device, not a tool failure: this control plane has no LISP
-            # instance matching the one the AP registers into. A fabric fault
-            # is a warning, so the remaining control planes still get walked.
-            return CheckResult(
-                CheckStatus.WARN,
-                f"{self.cp_hostname} returned no LISP instance {t.iid} when "
-                f"its counters were read (missing {e}), so it cannot be told "
-                f"whether registrations for {t.label} are arriving. A control "
-                f"plane with no instance {t.iid} cannot accept them at all — "
-                f"check that it serves this instance.",
-                data={"cp": self.cp_hostname})
-        except BaseException as e:
-            return CheckResult(
-                CheckStatus.FAIL,
-                f"Could not read the LISP counters from {self.cp_hostname} "
-                f"({type(e).__name__}: {e}).", data={"cp": self.cp_hostname})
-
-        if not getattr(stats, "statisticscollected", False):
-            return CheckResult(
-                CheckStatus.WARN,
-                f"{self.cp_hostname} returned no LISP statistics for instance "
-                f"{t.iid}, so it cannot be told whether registrations are "
-                f"arriving and being rejected.",
-                data={"cp": self.cp_hostname})
-
-        def _int(attr):
-            try:
-                return int(getattr(stats, attr, 0) or 0)
-            except (TypeError, ValueError):
-                return 0
-
-        registers = _int("map_register")
-        notifies = _int("map_notify")
-        rejects = {
-            "registrations dropped for an invalid source RLOC":
-                _int("map_register_invalid_source_rloc_drops"),
-            "EID prefixes rejected because a limit was reached":
-                _int("rejected_eid_prefix_due_to_limit"),
-            "packets dropped on the LISP control port":
-                _int("lisp_control_port_drops"),
-            "malformed packets dropped": _int("lisp_checksum_drops"),
-            "unsupported LISP packets dropped":
-                _int("unsupported_lisp_packet_drops"),
-        }
-        seen = {k: v for k, v in rejects.items() if v}
-
-        data = {"cp": self.cp_hostname, "map_register": registers,
-                "map_notify": notifies, "rejects": seen}
-
-        lines = [f"• {self.cp_hostname} has received {registers} Map-Register "
-                 f"message(s) for instance {t.iid} and sent {notifies} "
-                 f"Map-Notify."]
-        status = CheckStatus.OK
-        if seen:
-            status = CheckStatus.WARN
-            for k, v in seen.items():
-                lines.append(f"• {v} {k}.")
-            lines.append(
-                "• These counters are cumulative and carry no timestamp, so "
-                "they say that registrations were discarded, not when. "
-                "Re-read them to see whether they are still moving.")
-        elif registers == 0:
-            status = CheckStatus.WARN
-            lines.append(
-                f"• No Map-Register has arrived for instance {t.iid} at all. "
-                f"The switch reports sending them, so they are not reaching "
-                f"this control plane — the path between them is what to look "
-                f"at, not the registration itself.")
-        return CheckResult(status, "\n".join(lines), data=data)
-
-
 def lisp_session_checks(target: LispSessionTarget, map_servers=None):
     """The session-flow checks for one EID, in the order they should run.
 
@@ -844,7 +740,6 @@ def lisp_session_checks(target: LispSessionTarget, map_servers=None):
         # session is not evidence that registrations are getting through.
         checks.append(LispControlPlaneConfiguration(target, host, mgmt))
         checks.append(LispAuthenticationKey(target, host, mgmt))
-        checks.append(LispControlPlaneStatistics(target, host, mgmt))
         checks.append(LispTcpSocket(target, host, mgmt))
         checks.append(LispCpCpuUtilization(target, host, mgmt))
         # The control plane's own session to the map-server address, which
@@ -1843,69 +1738,50 @@ class LispSessionTrustSec(_SessionCheck):
                                    if raw and raw != rbacl else ""),
         ]
 
-        # Evaluate each RBACL both ways. Ephemeral source port on the
-        # initiating side, 4342 on the listening side.
-        # The VERBATIM device name, not the display form. Two readers, two
-        # name forms: `cts_rbac_rbacls` runs `show cts rbacl "<name>"`, which
-        # answers to the stripped name, while `acl_evaluation` runs
-        # `show ip access-list "<name>"`, which answers only to the raw one.
-        # Border1 returns the ACE for "Permit IP-00" and nothing at all for
-        # "Permit IP" -- and an empty answer became a deny below, so a
-        # permit-all default policy reported as blocking the session.
-        acls = raw or getattr(rules, "rbacl", None) or []
-        if isinstance(acls, str):
-            acls = [acls]
-        forward = {"sourceip": src, "destinationip": dst, "protocol": "tcp",
-                   "srcport": 65535, "dstport": 4342}
-        reverse = {"sourceip": dst, "destinationip": src, "protocol": "tcp",
-                   "srcport": 4342, "dstport": 65535}
-        denies, unresolved = [], []
-        from securitymodules.accesslists import acl_evaluation
-        for acl in acls:
-            for label, ev in ((f"{src} → {dst}", forward),
-                              (f"{dst} → {src}", reverse)):
-                try:
-                    from securitymodules.accesslists import AccessList
-                    # Read the ACL first, and only evaluate it if it HAS
-                    # ACEs. `hexdecimal_representation_acl` appends a
-                    # synthetic implicit-deny matching any source, any
-                    # destination and every port, so an ACL that read as
-                    # empty evaluates to exactly that one entry and denies
-                    # everything. A name the device does not resolve then
-                    # looks identical to a real block -- which is how a
-                    # Permit IP default policy came back as a deny.
-                    probe = AccessList(host)
-                    probe.rbaclacl(acl, ctx.service)
-                    if not getattr(probe, "aces", None):
-                        # Once per ACL, not once per direction.
-                        if acl not in unresolved:
-                            unresolved.append(acl)
-                        continue
-                    hit = acl_evaluation(ctx.service, host, acl, True, ev)
-                except BaseException:
-                    continue
-                if not hit or len(hit) < 3:
-                    continue
-                # hit[2] is the ACE's sequence number, or the string
-                # "default deny" for the terminal 0xFFFFFFFF entry the device
-                # reports as part of the RBACL's contents.
-                ace = f"sequence {hit[2]}" if hit[2] != "default deny" \
-                    else "the terminal implicit-deny ACE"
-                if hit[1] == "deny":
-                    denies.append(f"{acl} denies {label} at {ace}")
-                elif hit[1] == "permit":
-                    lines.append(f"• {acl} permits {label} at {ace}")
+        # The ACEs `cts_rbac_rbacls` already fetched, which is what the
+        # legacy flow reports. An earlier attempt here ran the RBACL name
+        # through `acl_evaluation` instead -- that uses `show ip access-list`,
+        # a different command answering to a different name form, and on an
+        # empty answer `hexdecimal_representation_acl` appends a synthetic
+        # implicit-deny matching everything. A permit-all default policy came
+        # back as a deny in both directions.
+        #
+        # `defaultpermit` is set when the device reports NO default policy at
+        # all, which `cts_rbac_permissions` treats as permit-all. Border2 is
+        # in exactly that state: `show cts role-based permissions default`
+        # returns only the monitor lines, so there is no RBACL to name and
+        # nothing is being blocked.
+        denies = []
+        if getattr(rules, "defaultpermit", False) and not rbacl:
+            lines.append(
+                f"• {host} has no default policy configured, which is an "
+                f"implicit permit-all: nothing is blocking this session.")
+        else:
+            aces = getattr(rules, "aces", None) or []
+            if aces:
+                lines.append(f"• ACEs in {rbacl}:")
+                lines.extend(f"    {a}" for a in aces)
+                # A deny is only a finding when it could match this session.
+                # TCP/4342 either way, so a `deny ip` or a `deny tcp` with no
+                # ports does; a deny for some other protocol or port does not.
+                for a in aces:
+                    tok = str(a).split()
+                    if tok and tok[0] == "deny" and (
+                            len(tok) < 2 or tok[1] in ("ip", "tcp")):
+                        denies.append(f"{rbacl}: {a}")
+            else:
+                # Said, not silently dropped: the policy was NOT evaluated,
+                # which is a different answer from "it permits".
+                lines.append(
+                    f"• {rbacl} resolved to no ACEs on {host}, so its "
+                    f"contents were not evaluated.")
 
         hw = _int0(getattr(rules, "hw_denied_count", 0))
         sw = _int0(getattr(rules, "sw_denied_count", 0))
         data.update({"denies": denies, "hw_denied": hw, "sw_denied": sw,
-                     "unresolved_acls": unresolved})
-        for acl in unresolved:
-            # Said, not silently dropped: the policy was NOT evaluated, which
-            # is a different answer from "it permits".
-            lines.append(
-                f"• {acl} could not be read back as an access list on {host}, "
-                f"so its ACEs were not evaluated.")
+                     "aces": getattr(rules, "aces", None),
+                     "default_permit": bool(
+                         getattr(rules, "defaultpermit", False))})
 
         if denies:
             # `lines` carries the SGT pair and the RBACL that produced the

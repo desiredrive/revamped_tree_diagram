@@ -63,14 +63,13 @@ def test_a_down_control_plane_queues_the_per_cp_flow():
     assert r.status is CheckStatus.WARN
     assert "172.19.1.65" in r.message
     assert "3891.b70f.2600" in r.message
-    # Seven checks per control plane, plus one inter-CP check each.
-    # Ten per control plane, plus one inter-CP check each. The last three of
-    # the ten are the control-plane-side path checks -- the CP's own session
-    # to the map-server, and the ACL and SGT policy it applies towards the
-    # WMI. The controller sits outside the fabric, so its LISP traffic
-    # crosses a border; without them a policy blocking registrations there
-    # was invisible while every other check on the CP passed.
-    assert len(r.data["queue_checks"]) == 10 * 2 + 2
+    # Nine per control plane, plus one inter-CP check each. The last three
+    # of the nine are the control-plane-side path checks -- the CP's own
+    # session to the map-server, and the ACL and SGT policy it applies
+    # towards the WMI. The controller sits outside the fabric, so its LISP
+    # traffic crosses a border; without them a policy blocking registrations
+    # there was invisible while every other check on the CP passed.
+    assert len(r.data["queue_checks"]) == 9 * 2 + 2
 
 
 def test_every_finding_lands_on_the_control_plane_it_is_about():

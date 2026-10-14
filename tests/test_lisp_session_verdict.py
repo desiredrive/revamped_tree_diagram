@@ -230,7 +230,7 @@ def test_all_down_still_fans_out_over_every_control_plane():
     names = [type(c).__name__ for c in m.lisp_session_checks(t, map_servers=pairs)]
 
     # Three switch-side, thirteen per CP, one inter-CP each, one verdict.
-    assert len(names) == 3 + 13 * 3 + 3 + 1
+    assert len(names) == 3 + 12 * 3 + 3 + 1
     assert names.count("LispSessionRouting") == 3
     assert names.count("LispAuthenticationKey") == 3
     assert names[-1] == "LispSessionVerdict"
@@ -247,33 +247,6 @@ def test_the_verdict_is_what_stops_a_total_outage(monkeypatch):
     r = LispSessionVerdict(_target()).run_session(ctx)
     assert r.status is CheckStatus.FAIL
     assert ctx.state[_target().key(STOP_KEY)]
-
-
-def test_a_control_plane_without_the_instance_warns_rather_than_failing(monkeypatch):
-    """`lisp_id` missing means the CP serves no such instance.
-
-    That is a fabric fault -- a statement about the device -- not the tool
-    failing to work, so it warns and the remaining control planes are still
-    walked. It reached the user as "KeyError: 'lisp_id'", which named the
-    parser key and not the condition.
-    """
-    import checks.lisp_session as m
-
-    monkeypatch.setattr(m, "_cp_device",
-                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
-                            profiled_device=types.SimpleNamespace(hostname=h)))
-
-    class Boom:
-        def __init__(self, *a): pass
-        def eidStatistics(self, af, svc): raise KeyError("lisp_id")
-    monkeypatch.setattr("routingmodules.lisp.LISPInstanceStatus", Boom)
-
-    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
-    r = m.LispControlPlaneStatistics(_target(), "cp1").run_session(ctx)
-
-    assert r.status is CheckStatus.WARN
-    assert "4097" in r.message
-    assert "KeyError" not in r.message
 
 
 def test_a_blocking_acl_names_the_interface_and_reads_as_prose(monkeypatch):
@@ -499,75 +472,11 @@ def test_a_rejected_registration_warns_rather_than_stopping_the_run(monkeypatch)
     assert "site_uci" in r.message
 
 
-def test_a_trustsec_deny_names_the_sgt_pair(monkeypatch):
-    """An SGACL deny is actionable only once the groups are named.
-
-    The deny branch dropped `lines`, which carries the SGT pair and the
-    RBACL, and printed only the addresses and the sequence:
-
-      • Permit IP denies 172.19.1.64 -> 10.31.136.74 at sequence default deny
-
-    which never says which groups those addresses were classified into.
-    """
-    import checks.lisp_session as m
-
-    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: types.SimpleNamespace(
-        profiled_device=types.SimpleNamespace(
-            hostname="Edge2", loopback="172.19.1.68")))
-    monkeypatch.setattr(m, "_cp_device",
-                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
-                            profiled_device=types.SimpleNamespace(hostname=h)))
-    monkeypatch.setattr(m, "_igp_interfaces",
-                        lambda ctx, h, d: ["TenGigabitEthernet1/0/1"])
-
-    class Info:
-        def __init__(self, ip, _a, _h): self._ip = ip
-        def cts_enforcement(self, *a):
-            self.ctsportenabled = True
-            self.globalenforcement = True
-        def cts_sgt_mapping(self, _svc):
-            self.sgt = 8 if self._ip == "172.19.1.65" else 4
-    monkeypatch.setattr("securitymodules.ciscotrustsec.cts_endpoint_info", Info)
-
-    class Rules:
-        def __init__(self, _h):
-            self.rbacl = ["Permit IP"]
-            # The verbatim device name. `acl_evaluation` runs
-            # `show ip access-list`, which answers only to this form.
-            self.rawrbacl = "Permit IP-00"
-        def cts_rbac_permissions(self, *a): self.isdefaultrule = True
-        def cts_rbac_rbacls(self, *a): pass
-        def cts_rbac_counters(self, *a):
-            self.hw_denied_count = 0
-            self.sw_denied_count = 0
-    monkeypatch.setattr("securitymodules.ciscotrustsec.cts_rules", Rules)
-    monkeypatch.setattr("securitymodules.accesslists.acl_evaluation",
-                        lambda *a, **k: (True, "deny", "default deny"))
-
-    class Acl:
-        def __init__(self, _h): pass
-        def rbaclacl(self, _n, _s): self.aces = [{"index": 10}]
-    monkeypatch.setattr("securitymodules.accesslists.AccessList", Acl)
-
-    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
-    r = m.LispSessionTrustSec(
-        _target(), "172.19.1.65", "cp2", True).run_session(ctx)
-
-    assert r.status is CheckStatus.WARN
-    # Both groups named, and the RBACL that produced the verdict.
-    assert "SGT 8" in r.message and "SGT 4" in r.message
-    assert "Permit IP" in r.message
-    assert r.data["sgt"] == 8 and r.data["dgt"] == 4
-
-
 def _cts_check(monkeypatch, sgt, dgt, *, default=True, rbacl="Permit IP",
                raw="Permit IP-00", verdict="deny", seq="default deny",
-               cefsgt=None, cefdgt=None, resolves_empty=(), evaluated=None):
-    """The TrustSec check with the CTS reads stubbed.
-
-    `evaluated` collects the ACL names the readback was asked for."""
+               cefsgt=None, cefdgt=None, aces=None, defaultpermit=False):
+    """The TrustSec check with the CTS reads stubbed."""
     import checks.lisp_session as m
-    evaluated = [] if evaluated is None else evaluated
 
     monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: types.SimpleNamespace(
         profiled_device=types.SimpleNamespace(
@@ -597,27 +506,17 @@ def _cts_check(monkeypatch, sgt, dgt, *, default=True, rbacl="Permit IP",
 
     class Rules:
         def __init__(self, _h):
-            self.rbacl = [rbacl]
+            self.rbacl = rbacl
             self.rawrbacl = raw
+            self.defaultpermit = defaultpermit
         def cts_rbac_permissions(self, *a): self.isdefaultrule = default
-        def cts_rbac_rbacls(self, *a): pass
+        def cts_rbac_rbacls(self, _n, _s):
+            self.aces = [] if aces is None else aces
         def cts_rbac_counters(self, *a):
             self.hw_denied_count = 0
             self.sw_denied_count = 0
     monkeypatch.setattr("securitymodules.ciscotrustsec.cts_rules", Rules)
-    monkeypatch.setattr("securitymodules.accesslists.acl_evaluation",
-                        lambda *a, **k: (True, verdict, seq))
 
-    # The check reads the ACL back before evaluating it: an ACL with no ACEs
-    # evaluates to the synthetic implicit-deny alone, so an unresolved name
-    # is indistinguishable from a real block unless it is checked for.
-    class Acl:
-        def __init__(self, _h): pass
-        def rbaclacl(self, name, _svc):
-            evaluated.append(name)
-            self.aces = [] if name in (resolves_empty or ()) else [
-                {"index": 10, "forwarding": verdict}]
-    monkeypatch.setattr("securitymodules.accesslists.AccessList", Acl)
 
     t = m.LispSessionTarget(
         eid="3891.b70f.2600", xtr_hostname="wlc", catc_name="catc",
@@ -644,14 +543,6 @@ def test_the_policy_lookup_reports_what_it_resolved(monkeypatch):
     assert "Permit IP-00" in r.message
     assert r.data["sgt"] == 2 and r.data["dgt"] == 8
     assert r.data["is_default_rule"] is True
-
-
-def test_the_terminal_ace_is_named_as_such(monkeypatch):
-    """`sequence default deny` read as a sequence number. It is the terminal
-    0xFFFFFFFF entry the device reports as part of the RBACL's contents."""
-    r = _cts_check(monkeypatch, 2, 8)
-    assert "terminal implicit-deny ACE" in r.message
-    assert "sequence default deny" not in r.message
 
 
 def test_an_unbound_address_says_which_end(monkeypatch):
@@ -694,25 +585,44 @@ def test_an_unclassified_destination_is_sgt_zero_not_a_missing_value(
     assert "Destination 10.31.136.74 is SGT 0" in r.message
 
 
-def test_the_policy_is_evaluated_against_the_raw_device_name(monkeypatch):
-    """Two readers, two name forms. `show cts rbacl` answers to the stripped
-    display name, `show ip access-list` only to the verbatim one -- Border1
-    returns the ACE for "Permit IP-00" and nothing at all for "Permit IP"."""
-    seen = []
-    _cts_check(monkeypatch, 2, 4, default=False, rbacl="AllowWeb",
-               raw="AllowWeb-01", verdict="permit", seq="10", evaluated=seen)
-    assert seen and set(seen) == {"AllowWeb-01"}
 
 
-def test_an_unresolved_acl_is_not_reported_as_a_deny(monkeypatch):
-    """The fault this fixes. `hexdecimal_representation_acl` appends a
-    synthetic implicit-deny matching any source, any destination and every
-    port, so an ACL that reads back empty evaluates to that entry alone and
-    denies everything -- and a permit-all default policy was reported as
-    blocking the LISP session."""
-    r = _cts_check(monkeypatch, 2, 0, raw="Permit IP-00",
-                   resolves_empty=("Permit IP-00",))
-    assert r.status is not CheckStatus.WARN
+def test_no_default_policy_is_an_implicit_permit_all(monkeypatch):
+    """Border2 reports only the monitor lines for `show cts role-based
+    permissions default`, so cts_rbac_permissions sets defaultpermit and
+    leaves rbacl None. That is a permit-all, and saying "RBACL: None" with
+    nothing else left it reading like a lookup that had failed."""
+    r = _cts_check(monkeypatch, 0, 0, rbacl=None, raw=None,
+                   defaultpermit=True)
+    assert r.status is CheckStatus.OK
+    assert "implicit permit-all" in r.message
+    assert r.data["default_permit"] is True
     assert r.data["denies"] == []
-    assert r.data["unresolved_acls"] == ["Permit IP-00"]
-    assert "could not be read back as an access list" in r.message
+
+
+def test_the_aces_the_policy_resolved_are_listed(monkeypatch):
+    """`cts_rbac_rbacls` already fetched them -- the legacy flow reports
+    exactly this. Re-reading the RBACL name through acl_evaluation instead
+    used a different command answering to a different name form."""
+    r = _cts_check(monkeypatch, 2, 0, rbacl="Permit IP", raw="Permit IP-00",
+                   aces=["permit ip"])
+    assert r.status is CheckStatus.OK
+    assert "permit ip" in r.message
+    assert r.data["aces"] == ["permit ip"]
+    assert r.data["denies"] == []
+
+
+def test_a_deny_ace_that_could_match_the_session_is_a_finding(monkeypatch):
+    r = _cts_check(monkeypatch, 2, 4, default=False, rbacl="Block",
+                   raw="Block-01", aces=["deny ip"])
+    assert r.status is CheckStatus.WARN
+    assert "SGT 2" in r.message and "SGT 4" in r.message
+
+
+def test_a_deny_for_another_protocol_is_not_a_finding(monkeypatch):
+    """TCP/4342 either way. A deny for some other protocol cannot match it,
+    and counting it blocks a session that is actually permitted."""
+    r = _cts_check(monkeypatch, 2, 4, default=False, rbacl="Block",
+                   raw="Block-01", aces=["deny icmp", "permit ip"])
+    assert r.status is CheckStatus.OK
+    assert r.data["denies"] == []
