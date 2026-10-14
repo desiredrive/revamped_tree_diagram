@@ -43,10 +43,12 @@ def _ctx(info=None, **over):
         "catc_name": "mxc-dnac5",
         "fabric_id": "fab-1",
         "ap_wlc_collected": {WLC: _info() if info is None else info},
-        "ap_wlc_cp_planes": [("172.19.1.64", "172.19.1.64", "172.19.1.64"),
-                             ("172.19.1.65", "172.19.1.65", "172.19.1.65")],
-        "ap_wlc_cp_nodes": {"172.19.1.64": "wlccp-1",
-                            "172.19.1.65": "wlccp-2"},
+        # (RLOC, hostname, management IP), resolved against the control
+        # planes the edge discovered -- the three are genuinely different.
+        "ap_wlc_cp_planes": [("172.19.1.64", "cp1", "10.31.136.64"),
+                             ("172.19.1.65", "cp2", "10.31.136.65")],
+        "ap_wlc_cp_nodes": {"172.19.1.64": "apcp-1", "cp1": "apcp-1",
+                            "172.19.1.65": "apcp-2", "cp2": "apcp-2"},
     }
     state.update(over)
     return types.SimpleNamespace(service=object(), payload={}, state=state)
@@ -71,19 +73,25 @@ def test_every_finding_lands_on_the_control_plane_it_is_about():
     the collection logfile instead of the canvas."""
     checks = _run(_ctx()).data["queue_checks"]
     nodes = {c.target_node_id for c in checks}
-    assert nodes == {"wlccp-1", "wlccp-2"}
+    assert nodes == {"apcp-1", "apcp-2"}
     assert "wlc" not in nodes
 
 
-def test_the_reused_control_plane_checks_are_keyed_by_address():
-    """`show wireless fabric summary` names control planes by address and the
-    canvas nodes follow it, while `node_for` looks up by hostname. Keyed one
-    way only, the five reused checks fall back to the controller's node."""
+def test_the_reused_control_plane_checks_land_on_the_edges_nodes():
+    """The control planes are the ones `ApCpDiscovery` already drew, so the
+    findings join that node rather than a second one for the same device.
+
+    `show wireless fabric summary` names control planes by RLOC while
+    `node_for` looks up by hostname, so both key the same node.
+    """
     from checks.lisp_session import LispControlPlaneConfiguration
 
+    seen = 0
     for c in _run(_ctx()).data["queue_checks"]:
         if isinstance(c, LispControlPlaneConfiguration):
-            assert c.target_node_id.startswith("wlccp-")
+            assert c.target_node_id.startswith("apcp-")
+            seen += 1
+    assert seen == 2
 
 
 def test_the_flow_registers_from_the_wireless_management_interface():
@@ -162,3 +170,80 @@ def test_the_node_is_known_before_the_check_runs():
     assigns its node while running is announced against the previous default
     and renders on the wrong node until it finishes."""
     assert ApWlcCpLispSessionTrigger(WLC, "wlc-1").target_node_id == "wlc-1"
+
+
+# --------------------------------------------------------------------------
+# Resolving the control planes. `show wireless fabric summary` names them by
+# RLOC and nothing else; `ApCpDiscovery` already resolved the same devices to
+# hostname, RLOC and management IP, and drew a node for each.
+# --------------------------------------------------------------------------
+
+
+def _fabric_ctx(**over):
+    """State as it stands when ApWlcFabricControlPlane runs: the edge's CP
+    discovery has published its three maps."""
+    state = {
+        "ap_cp_targets": {"apcp-1": "cp1", "apcp-2": "cp2"},
+        "ap_cp_rlocs": {"cp1": "172.19.1.64", "cp2": "172.19.1.65"},
+        "ap_cp_mgmts": {"cp1": "10.31.136.64", "cp2": "10.31.136.65"},
+    }
+    state.update(over)
+    return types.SimpleNamespace(service=object(), payload={}, state=state)
+
+
+def _resolve(ctx, addresses):
+    """The resolution block of ApWlcFabricControlPlane, as it runs there."""
+    cp_rlocs = ctx.state.get("ap_cp_rlocs") or {}
+    cp_mgmts = ctx.state.get("ap_cp_mgmts") or {}
+    cp_targets = ctx.state.get("ap_cp_targets") or {}
+    by_rloc = {rloc: host for host, rloc in cp_rlocs.items()}
+    node_by_host = {host: nid for nid, host in cp_targets.items()}
+
+    cp_nodes, planes_out, unmatched = {}, [], []
+    for addr in addresses:
+        host = by_rloc.get(addr)
+        if not host:
+            unmatched.append(addr)
+            continue
+        node_id = node_by_host.get(host)
+        if node_id:
+            cp_nodes[addr] = node_id
+            cp_nodes[host] = node_id
+        planes_out.append((addr, host, cp_mgmts.get(host) or host))
+    return cp_nodes, planes_out, unmatched
+
+
+def test_the_management_ip_is_never_the_rloc():
+    """The fault this fixes. Profiling goes through Catalyst Center by
+    management address; no device is managed at the RLOC, so filling the
+    triple from the summary killed every per-CP check with "Error Retrieving
+    Device Details from Catalyst Center API"."""
+    _n, planes, _u = _resolve(_fabric_ctx(), ["172.19.1.64", "172.19.1.65"])
+    assert planes == [("172.19.1.64", "cp1", "10.31.136.64"),
+                      ("172.19.1.65", "cp2", "10.31.136.65")]
+    for rloc, _host, mgmt in planes:
+        assert mgmt != rloc
+
+
+def test_the_edges_nodes_are_reused_rather_than_new_ones_minted():
+    """Two nodes for one device splits its findings across the canvas."""
+    nodes, _p, _u = _resolve(_fabric_ctx(), ["172.19.1.64", "172.19.1.65"])
+    assert set(nodes.values()) == {"apcp-1", "apcp-2"}
+    assert not any(n.startswith("wlccp-") for n in nodes.values())
+
+
+def test_nodes_are_keyed_by_both_rloc_and_hostname():
+    """The summary names CPs by RLOC; `node_for` looks them up by hostname."""
+    nodes, _p, _u = _resolve(_fabric_ctx(), ["172.19.1.64"])
+    assert nodes["172.19.1.64"] == nodes["cp1"] == "apcp-1"
+
+
+def test_a_control_plane_the_edge_never_saw_is_reported_not_guessed():
+    """A different site, or an SDA transit CP. It has no profiled device and
+    no node, so inventing a triple for it only reproduces the original
+    fault further down."""
+    nodes, planes, unmatched = _resolve(
+        _fabric_ctx(), ["172.19.1.64", "172.19.1.99"])
+    assert unmatched == ["172.19.1.99"]
+    assert [p[0] for p in planes] == ["172.19.1.64"]
+    assert "172.19.1.99" not in nodes

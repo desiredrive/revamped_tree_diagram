@@ -2306,30 +2306,46 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         # instance -- none of which the AP chain's xtr_* keys describe.
         ctx.state["ap_wlc_cp_down"] = [
             (p["ip_address"], p.get("status")) for p in down]
-        # A node per control plane, so the session flow's per-CP findings
-        # land on the control plane they are about rather than all piling
-        # onto the controller. The edge path may already have drawn these
-        # same devices; addNodes merges by management IP, so the second
-        # description tags the existing node instead of duplicating it.
-        cp_nodes, add_nodes = {}, []
-        for idx, plane in enumerate(planes, start=1):
+        # The control planes the edge already discovered. `ApCpDiscovery`
+        # runs just before the chain that queues this check, and it resolved
+        # each one properly: hostname, RLOC and -- separately -- the
+        # management IP, because the ETR peers with the RLOC while profiling
+        # a device goes through Catalyst Center by management address.
+        #
+        # `show wireless fabric summary` names control planes by RLOC only.
+        # Filling hostname and management IP from it too asked Catalyst
+        # Center to profile a device at the RLOC, where none is managed, and
+        # every per-CP check died with "Error Retrieving Device Details".
+        # So the summary is used for what it actually says -- WHICH control
+        # planes the controller registers to -- and the rest is looked up.
+        cp_rlocs = ctx.state.get("ap_cp_rlocs") or {}
+        cp_mgmts = ctx.state.get("ap_cp_mgmts") or {}
+        cp_targets = ctx.state.get("ap_cp_targets") or {}
+        by_rloc = {rloc: host for host, rloc in cp_rlocs.items()}
+        node_by_host = {host: nid for nid, host in cp_targets.items()}
+
+        cp_nodes, planes_out, unmatched = {}, [], []
+        for plane in planes:
             addr = plane["ip_address"]
-            node_id = f"wlccp-{idx}"
-            cp_nodes[addr] = node_id
-            add_nodes.append({
-                "id": node_id, "role": "control-plane", "label": addr,
-                "ip": addr, "connect_to": self.target_node_id,
-                "edge_label": "LISP Session",
-            })
+            host = by_rloc.get(addr)
+            if not host:
+                # A control plane the controller registers to that the edge
+                # never saw: a different site, or an SDA transit CP. Not an
+                # error -- but it has no profiled device and no node here, so
+                # it is reported rather than guessed at.
+                unmatched.append(addr)
+                continue
+            node_id = node_by_host.get(host)
+            if node_id:
+                # Reuse the node the edge drew. Minting a second one for the
+                # same device splits its findings across two canvas nodes.
+                cp_nodes[addr] = node_id
+                cp_nodes[host] = node_id
+            planes_out.append((addr, host, cp_mgmts.get(host) or host))
         ctx.state["ap_wlc_cp_nodes"] = cp_nodes
-        # (address, hostname, mgmt_ip). `show wireless fabric summary` gives
-        # only the address, so it fills all three: the control plane is
-        # profiled through Catalyst Center, which resolves the address to the
-        # inventory name -- the same thing `find_control_plane` does in the
-        # legacy flow.
-        ctx.state["ap_wlc_cp_planes"] = [
-            (p["ip_address"], p["ip_address"], p["ip_address"])
-            for p in planes]
+        # (RLOC, hostname, management IP) -- the three the session flow needs.
+        ctx.state["ap_wlc_cp_planes"] = planes_out
+        ctx.state["ap_wlc_cp_unmatched"] = unmatched
         # ApWlcCollect recorded it; _PerWlcCheck itself carries no address.
         ctx.state["ap_wlc_mgmtip"] = (
             (ctx.state.get("ap_wlc_profiles") or {})
@@ -2369,6 +2385,13 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
             lines.append(
                 f"• Control plane {plane['ip_address']}: "
                 f"{plane.get('status') or '—'}")
+        if unmatched:
+            # Named so the gap is visible: these are skipped by the session
+            # flow below, which has no profiled device for them.
+            lines.append(
+                f"• Not among the control planes the edge discovered: "
+                f"{', '.join(unmatched)}. The session flow below does not "
+                f"cover {'it' if len(unmatched) == 1 else 'them'}.")
 
         # A control plane that is down is a fabric fault, not a tool one: the
         # manifest's warn-and-continue rule applies, because the other plane
@@ -2384,10 +2407,9 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
                   f"The session flow below says why "
                   f"{'that session' if one else 'those sessions'} "
                   f"{'is' if one else 'are'} down.",
-                data={"control_planes": addresses, "add_nodes": add_nodes})
+                data={"control_planes": addresses})
         return CheckResult(CheckStatus.OK, "\n".join(lines),
-                           data={"control_planes": addresses,
-                                 "add_nodes": add_nodes})
+                           data={"control_planes": addresses})
 
 
 class ApWlcCpLispSessionTrigger(_ApCheck):
