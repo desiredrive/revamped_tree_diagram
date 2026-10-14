@@ -1745,9 +1745,33 @@ class LispSessionVerdict(_SessionCheck):
                 "Skipped — no map-server session was read, so there is "
                 "nothing to weigh up.")
 
-        up = [ms for ms, state in states.items()
+        # The verdict is about the switch, not about the subset of control
+        # planes this run happened to walk. A caller triggered by ONE down
+        # session passes only that control plane, so judging on the walked
+        # subset alone would read a single down peer as "every session is
+        # down" and stop a flow whose registrations are still leaving through
+        # the peers that are up. Read the full peer set -- the same reader
+        # LispGlobalSession reports from, so the two cannot contradict each
+        # other -- and fall back to the walked subset only when the switch
+        # cannot be re-read.
+        peer_states = dict(states)
+        try:
+            etr = _profile_xtr(ctx, t)
+            etr.global_lisp_session(ctx.service)
+            all_up, all_down = peer_session_states(etr)
+        except BaseException:
+            pass
+        else:
+            peer_states = {peer: state for peer, state in all_up + all_down}
+            # A map-server that was walked but is not among the peers still
+            # counts: its absence from the session table is not evidence it
+            # is up.
+            for ms, state in states.items():
+                peer_states.setdefault(ms, state)
+
+        up = [ms for ms, state in peer_states.items()
               if (state or "").strip().lower() == "up"]
-        down = [(ms, state) for ms, state in states.items()
+        down = [(ms, state) for ms, state in peer_states.items()
                 if (state or "").strip().lower() != "up"]
 
         if not up:
@@ -1769,7 +1793,7 @@ class LispSessionVerdict(_SessionCheck):
             listed = ", ".join(f"{ms} ({state})" for ms, state in down)
             return CheckResult(
                 CheckStatus.WARN,
-                f"{len(up)} of {len(states)} LISP session(s) from "
+                f"{len(up)} of {len(peer_states)} LISP session(s) from "
                 f"{t.xtr_hostname} came back up; still down: {listed}.\n\n"
                 f"{t.label} can register through the session(s) that are up, "
                 f"so the flow continues — but a control plane whose session "

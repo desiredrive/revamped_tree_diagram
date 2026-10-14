@@ -128,3 +128,68 @@ def test_two_runs_of_the_flow_do_not_share_state():
     assert LispSessionVerdict(wlc).run_session(ctx).status is CheckStatus.OK
     assert ctx.state.get(edge.key(STOP_KEY))
     assert not ctx.state.get(wlc.key(STOP_KEY))
+
+
+def _etr_with_peers(peers):
+    """An ETR stub whose session table reads like the device's."""
+    return types.SimpleNamespace(
+        global_lisp_sessions=types.SimpleNamespace(
+            peers={p: [{"state": s}] for p, s in peers.items()}),
+        profiled_device=types.SimpleNamespace(loopback="172.19.1.68"),
+        global_lisp_session=lambda svc: None,
+    )
+
+
+def test_one_walked_cp_down_is_not_every_session_down(monkeypatch):
+    """The verdict judges the switch, not the subset of CPs it walked.
+
+    A trigger that fires on ONE down session passes only that control plane,
+    so the walked subset is {that CP: Down}. Reading the verdict off it alone
+    concluded "every session is down" and stopped the AP flow -- while the
+    switch's other two sessions were up and its registrations were still
+    getting through. The live run that caught this had 172.19.1.64 and
+    172.19.1.100 up with only 172.19.1.65 down, and LISP Session -- Global
+    said so three checks earlier.
+    """
+    import checks.lisp_session as m
+
+    etr = _etr_with_peers({"172.19.1.64": "Up", "172.19.1.65": "Down",
+                           "172.19.1.100": "Up"})
+    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: etr)
+
+    ctx = _ctx({"172.19.1.65": "Down"})          # only the implicated CP
+    r = LispSessionVerdict(_target(), map_servers=["172.19.1.65"]).run_session(ctx)
+
+    assert r.status is CheckStatus.WARN
+    assert not ctx.state.get(_target().key(STOP_KEY))
+    assert "172.19.1.65" in r.message
+    assert "2 of 3" in r.message
+
+
+def test_an_unreadable_switch_falls_back_to_the_walked_subset(monkeypatch):
+    """Re-reading the switch is an improvement on the subset, not a
+    dependency: if it cannot be read the verdict still reports what the
+    per-map-server checks established rather than reporting nothing."""
+    import checks.lisp_session as m
+
+    def boom(ctx, t):
+        raise RuntimeError("device unreachable")
+    monkeypatch.setattr(m, "_profile_xtr", boom)
+
+    ctx = _ctx({"172.19.1.64": "Down", "172.19.1.65": "Down"})
+    r = LispSessionVerdict(_target()).run_session(ctx)
+    assert r.status is CheckStatus.FAIL
+    assert ctx.state[_target().key(STOP_KEY)]
+
+
+def test_a_walked_cp_absent_from_the_peer_table_still_counts(monkeypatch):
+    """A map-server missing from `show lisp session` is not thereby up."""
+    import checks.lisp_session as m
+
+    etr = _etr_with_peers({"172.19.1.64": "Up"})
+    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: etr)
+
+    ctx = _ctx({"172.19.1.65": "Down"})
+    r = LispSessionVerdict(_target()).run_session(ctx)
+    assert r.status is CheckStatus.WARN
+    assert "172.19.1.65" in r.message
