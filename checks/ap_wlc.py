@@ -2346,6 +2346,12 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         # (RLOC, hostname, management IP) -- the three the session flow needs.
         ctx.state["ap_wlc_cp_planes"] = planes_out
         ctx.state["ap_wlc_cp_unmatched"] = unmatched
+        # {control plane address: key}, from the `Key` column of
+        # `show wireless fabric summary`. Already plaintext, and the only
+        # place the controller's per-control-plane key appears: a C9800 has
+        # no `etr map-server` lines for it to be read from.
+        ctx.state["ap_wlc_cp_keys"] = {
+            p["ip_address"]: p.get("key") for p in planes if p.get("key")}
         # ApWlcCollect recorded it; _PerWlcCheck itself carries no address.
         ctx.state["ap_wlc_mgmtip"] = (
             (ctx.state.get("ap_wlc_profiles") or {})
@@ -2507,5 +2513,6 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
                 control_planes=planes, catc_name=ctx.state.get("catc_name"),
                 wlc_hostname=self.hostname, wlc_node_id=self.node_id,
                 cp_nodes=ctx.state.get("ap_wlc_cp_nodes") or {},
-                wlc_mgmtip=ctx.state.get("ap_wlc_mgmtip"))},
+                wlc_mgmtip=ctx.state.get("ap_wlc_mgmtip"),
+                keys=ctx.state.get("ap_wlc_cp_keys") or {})},
         )

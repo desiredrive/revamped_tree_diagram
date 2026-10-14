@@ -163,17 +163,22 @@ def test_nodes_resolve_by_hostname_as_well_as_address():
 # --------------------------------------------------------------------------
 
 
-def test_the_target_carries_the_map_servers_it_registers_to():
-    """Without them `LispAuthenticationKey` reached for `eid_properties` on
-    the ETR and raised AttributeError, so the key was never compared:
+def test_the_key_comes_from_the_fabric_summary_not_the_running_config():
+    """The controller's key for each control plane is in the `Key` column of
+    `show wireless fabric summary`, already plaintext.
 
-      Could not compare authentication keys for border1-sdawest-com
-      (AttributeError: 'ETRDevice' object has no attribute 'eid_properties')
+    The edge's `LispAuthenticationKey` learns the xTR's key from `etr
+    map-server` lines in `show run | section service ethernet`. A C9800 has
+    no such lines and answers that command with nothing at all, so it found
+    no entry for any control plane and reported:
 
-    The edge gets them from the EID phase; the controller gets them from
-    `show wireless fabric summary`, so the target has to carry them.
+      The switch has no map-server entry for 172.19.1.64, so there is no key
+      to compare against border1-sdawest-com.
+
+    It is not in this chain; the comparison is done against the control
+    plane's site key by a check that reads the controller's own source.
     """
-    from checks.wlc_cp_session import wlc_cp_session_checks
+    from checks.wlc_cp_session import wlc_cp_session_checks, WlcCpAuthenticationKey
     from checks.lisp_session import LispAuthenticationKey
 
     checks = wlc_cp_session_checks(
@@ -181,18 +186,43 @@ def test_the_target_carries_the_map_servers_it_registers_to():
         control_planes=[("172.19.1.64", "cp1", "10.31.136.64"),
                         ("172.19.1.65", "cp2", "10.31.136.65")],
         catc_name="catc", wlc_hostname="wlc", wlc_node_id="wlc",
-        cp_nodes={"172.19.1.64": "apcp-1", "172.19.1.65": "apcp-2"})
+        cp_nodes={"172.19.1.64": "apcp-1", "172.19.1.65": "apcp-2"},
+        wlc_mgmtip="10.31.136.74",
+        keys={"172.19.1.64": "66302309625d422d",
+              "172.19.1.65": "66302309625d422d"})
 
-    auth = [c for c in checks if isinstance(c, LispAuthenticationKey)]
-    assert auth, "no authentication key check was queued"
-    # RLOCs, not hostnames: the comparison matches against the CP's loopback.
-    assert auth[0].target.control_planes == ["172.19.1.64", "172.19.1.65"]
+    assert not [c for c in checks if isinstance(c, LispAuthenticationKey)]
+    auth = [c for c in checks if isinstance(c, WlcCpAuthenticationKey)]
+    assert len(auth) == 2
+    assert {c.wlc_key for c in auth} == {"66302309625d422d"}
+    assert {c.target_node_id for c in auth} == {"apcp-1", "apcp-2"}
 
 
-def test_the_comparison_falls_back_to_the_targets_control_planes(monkeypatch):
-    """The substitute record stands in for the EID phase's, so the reader
-    restricts its grading the same way rather than seeing every instance on
-    the box."""
+def test_a_control_plane_with_no_key_in_the_summary_skips():
+    """Nothing to compare is not a mismatch."""
+    from checks.wlc_cp_session import wlc_cp_session_checks, WlcCpAuthenticationKey
+
+    checks = wlc_cp_session_checks(
+        wmi="10.31.136.74", vnid=8188, radio_mac="3891.b70f.2600",
+        control_planes=[("172.19.1.64", "cp1", "10.31.136.64")],
+        catc_name="catc", wlc_hostname="wlc", wlc_node_id="wlc",
+        cp_nodes={"172.19.1.64": "apcp-1"}, wlc_mgmtip="10.31.136.74",
+        keys={})
+
+    auth = [c for c in checks if isinstance(c, WlcCpAuthenticationKey)][0]
+    r = auth.run(types.SimpleNamespace(service=object(), payload={}, state={}))
+    assert r.status is CheckStatus.SKIP
+
+
+def test_the_edge_check_falls_back_to_the_targets_control_planes(monkeypatch):
+    """`LispAuthenticationKey` on a flow with no EID identification phase.
+
+    Not used by the controller's chain -- it reads `show run | section
+    service ethernet`, which a C9800 does not answer -- but the fallback
+    still matters for any other flow that reuses it without that phase: the
+    substitute record restricts its grading to the map-servers this EID
+    registers to, rather than every instance on the box.
+    """
     import checks.lisp_session as m
 
     seen = {}

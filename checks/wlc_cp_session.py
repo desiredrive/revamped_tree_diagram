@@ -26,7 +26,7 @@ under the manifest's rule a fault in the fabric must not stop the run.
 
 from checks.base import Check, CheckResult, CheckStatus, RunContext
 from checks.lisp_session import (
-    LispAuthenticationKey, LispControlPlaneConfiguration,
+    LispControlPlaneConfiguration,
     LispMapServerSelfSession, LispSessionAccessLists, LispSessionTrustSec,
     LispControlPlaneStatistics, LispCpCpuUtilization, LispInterCpSession,
     LispSessionTarget, LispTcpSocket, _cp_device)
@@ -101,6 +101,91 @@ class WlcLocatorSet(Check):
             f"in the WLC locator-set and passive-open is configured.")
 
 
+class WlcCpAuthenticationKey(Check):
+    """Does the controller's key for this control plane match the site key?
+
+    The controller holds one key per control plane, in the `Key` column of
+    `show wireless fabric summary`, already in plaintext. The control plane
+    holds one key for the whole site, under `site site_uci`, usually type 7.
+
+    Not the edge's `LispAuthenticationKey`, which learns the xTR's key from
+    `etr map-server` lines in `show run | section service ethernet`. A C9800
+    has no such lines and answers that command with nothing at all, so that
+    check found no entry for any control plane and reported "no map-server
+    entry ... so there is no key to compare" on every one of them.
+
+    A wrong key does not bring the session down -- it causes per-registration
+    authentication failures on the map-server -- so this runs whatever the
+    session state is.
+    """
+
+    def __init__(self, cp_hostname, cp_mgmt, wlc_key, catc_name, node_id,
+                 vnid=None):
+        self.cp_hostname = cp_hostname
+        self.cp_mgmt = cp_mgmt
+        self.wlc_key = (wlc_key or "").strip()
+        self.catc_name = catc_name
+        self.vnid = vnid
+        self.target_node_id = node_id
+        self.name = f"Authentication Key \u2014 {cp_hostname}"
+        self.running_note = "Comparing the controller and site keys."
+
+    def run(self, ctx: RunContext) -> CheckResult:
+        if not self.wlc_key:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped \u2014 `show wireless fabric summary` reported no key "
+                f"for {self.cp_hostname}, so there is nothing to compare.")
+        try:
+            cp = _cp_device(ctx, self.cp_hostname, self.catc_name, self.cp_mgmt)
+            from routingmodules.lisp import L2LISPControlPlane
+            cfg = L2LISPControlPlane(cp.profiled_device.hostname)
+            # Built directly rather than through the cached device: the
+            # cp_configuration method assigns its result over its own name.
+            cfg.site_uci(self.vnid or ctx.state.get("wlc_cp_vnid"),
+                         ctx.service)
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"Could not read the site key from {self.cp_hostname} "
+                f"({type(e).__name__}: {e}).", data={"cp": self.cp_hostname})
+
+        if getattr(cfg, "decrypted", False) is False:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The key on {self.cp_hostname} is stored in a form that "
+                f"cannot be read off the device (type "
+                f"{getattr(cfg, 'key_type', '?')}), so it cannot be compared "
+                f"with the controller's. If registration is failing, the "
+                f"authentication-failure counters on this control plane are "
+                f"what settle it.",
+                data={"cp": self.cp_hostname, "comparable": False})
+
+        try:
+            cp_key = cfg.authentication_key[1]
+        except (AttributeError, IndexError, TypeError):
+            cp_key = getattr(cfg, "authentication_key", None)
+
+        if not cp_key:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"No authentication key is configured under the site on "
+                f"{self.cp_hostname}, so the controller's registrations "
+                f"cannot be authenticated.", data={"cp": self.cp_hostname})
+
+        if str(cp_key).strip() == self.wlc_key:
+            return CheckResult(
+                CheckStatus.OK,
+                f"The controller and {self.cp_hostname} agree on the "
+                f"authentication key.", data={"cp": self.cp_hostname})
+        return CheckResult(
+            CheckStatus.WARN,
+            f"The controller and {self.cp_hostname} do not agree on the "
+            f"authentication key, so the radio MAC registrations will be "
+            f"rejected: the controller sends {self.wlc_key!r} and the "
+            f"control plane expects {str(cp_key).strip()!r}.",
+            data={"cp": self.cp_hostname, "mismatch": True})
+
 class WlcCpSessionState(Check):
     """The control plane's LISP session to the controller's WMI.
 
@@ -171,7 +256,7 @@ class WlcCpSessionState(Check):
 
 def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
                           wlc_hostname, wlc_node_id="wlc", cp_nodes=None,
-                          wlc_mgmtip=None):
+                          wlc_mgmtip=None, keys=None):
     """The per-control-plane flow, one chain of checks per CP.
 
     `control_planes` is what `show wireless fabric summary` reported, as
@@ -236,7 +321,12 @@ def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
         # an edge or a controller. Each runs whatever the session state is: an
         # Up session is not evidence that registrations are getting through.
         checks.append(LispControlPlaneConfiguration(target, host, mgmt))
-        checks.append(LispAuthenticationKey(target, host, mgmt))
+        # The controller's own key for this control plane, from the summary,
+        # against the site key. NOT the edge's LispAuthenticationKey: that
+        # learns the xTR's key from `show run | section service ethernet`,
+        # which a C9800 answers with nothing.
+        checks.append(WlcCpAuthenticationKey(
+            host, mgmt, (keys or {}).get(addr), catc_name, node, vnid))
         checks.append(LispControlPlaneStatistics(target, host, mgmt))
         checks.append(LispTcpSocket(target, host, mgmt))
         checks.append(LispCpCpuUtilization(target, host, mgmt))
