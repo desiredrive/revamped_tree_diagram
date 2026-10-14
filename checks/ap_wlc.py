@@ -2506,5 +2506,6 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
                 wmi=fabric["rloc"], vnid=fabric["vnid"], radio_mac=mac,
                 control_planes=planes, catc_name=ctx.state.get("catc_name"),
                 wlc_hostname=self.hostname, wlc_node_id=self.node_id,
-                cp_nodes=ctx.state.get("ap_wlc_cp_nodes") or {})},
+                cp_nodes=ctx.state.get("ap_wlc_cp_nodes") or {},
+                wlc_mgmtip=ctx.state.get("ap_wlc_mgmtip"))},
         )

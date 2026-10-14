@@ -232,3 +232,127 @@ def test_the_comparison_falls_back_to_the_targets_control_planes(monkeypatch):
     assert "AttributeError" not in (r.message or "")
     assert seen["mapservers"] == [{"map_server": "172.19.1.64"},
                                   {"map_server": "172.19.1.65"}]
+
+
+# --------------------------------------------------------------------------
+# Which device the flow is actually about. Every check keyed on the xTR's
+# address reads it off the profiled device; a controller registers from its
+# WMI and has no Loopback0 to match on.
+# --------------------------------------------------------------------------
+
+
+def test_the_controller_is_profiled_not_the_edge():
+    """`_profile_xtr` falls back to the AP chain's `xtr_mgmtip` when the
+    target names no management address -- and that is the EDGE.
+
+    The socket check then matched on the edge's Loopback0 and reported the
+    edge's LISP session to the control plane as though it were the
+    controller's, with real counters and no retransmissions:
+
+      border2-sdawest-com holds the LISP socket to 172.19.1.68 ...
+      172.19.1.65:4342 -> 172.19.1.68:28602, MSS 536
+    """
+    from checks.wlc_cp_session import wlc_cp_session_checks
+
+    checks = wlc_cp_session_checks(
+        wmi="10.31.136.74", vnid=8188, radio_mac="3891.b70f.2600",
+        control_planes=[("172.19.1.64", "cp1", "10.31.136.64")],
+        catc_name="catc", wlc_hostname="wlc", wlc_node_id="wlc",
+        cp_nodes={"172.19.1.64": "apcp-1"}, wlc_mgmtip="10.31.136.74")
+
+    targets = {getattr(c, "target", None) for c in checks}
+    targets.discard(None)
+    for t in targets:
+        assert t.xtr_mgmtip == "10.31.136.74"
+
+
+def test_the_controllers_rloc_is_the_wmi_not_a_loopback():
+    """Even when a profiled device offers one, the WMI wins: that is the
+    address the controller registers from."""
+    from checks.lisp_session import LispSessionTarget
+
+    t = LispSessionTarget(
+        eid="3891.b70f.2600", xtr_hostname="wlc", catc_name="catc",
+        iid=8188, af="ethernet", xtr_mgmtip="10.31.136.74",
+        xtr_loopback="10.31.136.74")
+    etr = types.SimpleNamespace(
+        profiled_device=types.SimpleNamespace(loopback="172.19.1.68"))
+    ctx = types.SimpleNamespace(state={"xtr_loopback": "172.19.1.68"})
+
+    assert t.rloc(ctx, etr) == "10.31.136.74"
+
+
+def test_the_edges_socket_check_is_unchanged_when_the_two_sources_differ():
+    """The regression guard for routing this through `rloc()`.
+
+    On the edge `rloc()` prefers ctx.state["xtr_loopback"] while the old code
+    read profiled_device.loopback. `_profile_xtr` populates that state key
+    from the same Catalyst Center read, so they agree in practice -- but if
+    they ever diverge, the edge must keep reporting the profiled device's
+    address rather than silently switching to a stale one.
+    """
+    from checks.lisp_session import LispSessionTarget
+
+    t = LispSessionTarget(eid="172.19.5.10", xtr_hostname="Edge2",
+                          catc_name="catc", iid=4097, af="ipv4")
+    etr = types.SimpleNamespace(
+        profiled_device=types.SimpleNamespace(loopback="172.19.1.68"))
+
+    # Agreeing, which is the real case: unchanged either way.
+    ctx = types.SimpleNamespace(state={"xtr_loopback": "172.19.1.68"})
+    assert t.rloc(ctx, etr) == "172.19.1.68"
+
+    # Unset: falls back to the profiled device, as the old code did.
+    ctx = types.SimpleNamespace(state={})
+    assert t.rloc(ctx, etr) == "172.19.1.68"
+
+
+def test_the_path_checks_run_on_the_control_plane_towards_the_wmi():
+    """Not on the controller. The near side would read CEF, ACLs and CTS
+    policy on a C9800 with IOS-XE switch commands -- the same wrong-device
+    mistake the edge readers made against this controller earlier.
+
+    These were omitted from the controller's chain entirely at first, which
+    left a border policy blocking registrations invisible while every other
+    check on the control plane passed.
+    """
+    from checks.wlc_cp_session import wlc_cp_session_checks
+    from checks.lisp_session import (
+        LispSessionAccessLists, LispSessionTrustSec, LispMapServerSelfSession)
+
+    checks = wlc_cp_session_checks(
+        wmi="10.31.136.74", vnid=8188, radio_mac="3891.b70f.2600",
+        control_planes=[("172.19.1.64", "cp1", "10.31.136.64")],
+        catc_name="catc", wlc_hostname="wlc", wlc_node_id="wlc",
+        cp_nodes={"172.19.1.64": "apcp-1"}, wlc_mgmtip="10.31.136.74")
+
+    for cls in (LispSessionAccessLists, LispSessionTrustSec):
+        found = [c for c in checks if isinstance(c, cls)]
+        assert found, f"{cls.__name__} was not queued"
+        for c in found:
+            assert c.on_cp is True
+            # The map-server is the RLOC, and the check's own node is the CP.
+            assert c.map_server == "172.19.1.64"
+            assert c.target_node_id == "apcp-1"
+
+    assert [c for c in checks if isinstance(c, LispMapServerSelfSession)]
+
+
+def test_the_near_side_path_checks_are_not_queued_against_the_controller():
+    """Routing and PathMtu read the xTR unconditionally -- `show ip cef`,
+    `show ip route` and the IGP -- so they are not wired here pending a live
+    check of what a C9800 answers."""
+    from checks.wlc_cp_session import wlc_cp_session_checks
+    from checks.lisp_session import LispSessionRouting, LispSessionPathMtu
+
+    checks = wlc_cp_session_checks(
+        wmi="10.31.136.74", vnid=8188, radio_mac="3891.b70f.2600",
+        control_planes=[("172.19.1.64", "cp1", "10.31.136.64")],
+        catc_name="catc", wlc_hostname="wlc", wlc_node_id="wlc",
+        cp_nodes={"172.19.1.64": "apcp-1"}, wlc_mgmtip="10.31.136.74")
+
+    for cls in (LispSessionRouting, LispSessionPathMtu):
+        assert not [c for c in checks if isinstance(c, cls)]
+
+    # And no check in the chain reads the near side of a path.
+    assert not [c for c in checks if getattr(c, "on_cp", True) is False]

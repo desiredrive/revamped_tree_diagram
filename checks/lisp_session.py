@@ -421,7 +421,10 @@ class LispGlobalSession(_SessionCheck):
                 f"Could not read the LISP session state from "
                 f"{t.xtr_hostname} ({type(e).__name__}: {e}).")
 
-        etr_rloc = getattr(etr.profiled_device, "loopback", None)
+        # Same reason as the socket check: on a controller the profiled
+        # device carries no usable Loopback0, and this value is published for
+        # everything downstream.
+        etr_rloc = t.rloc(ctx, etr)
         ctx.state[t.key("_lisp_session_etr_rloc")] = etr_rloc
         up, down = peer_session_states(etr)
 
@@ -1028,7 +1031,12 @@ class LispTcpSocket(_SessionCheck):
             cp = _cp_device(ctx, self.cp_hostname, t.catc_name, self.cp_mgmt)
             etr = _profile_xtr(ctx, t)
             cp_loopback = cp.profiled_device.loopback
-            etr_loopback = etr.profiled_device.loopback
+            # Through the target, not off the profiled device: a controller
+            # registers from its WMI and has no Loopback0 to match on, so
+            # reading the device directly found the EDGE's socket to this
+            # control plane and reported it as the controller's -- with real
+            # counters, which made it look like an answer.
+            etr_loopback = t.rloc(ctx, etr)
             # Port 4342 is the LISP control port; the CLI flow matches on the
             # CP's own loopback as source, so the socket found is the one this
             # control plane opened towards this ETR.

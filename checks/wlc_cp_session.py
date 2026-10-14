@@ -27,6 +27,7 @@ under the manifest's rule a fault in the fabric must not stop the run.
 from checks.base import Check, CheckResult, CheckStatus, RunContext
 from checks.lisp_session import (
     LispAuthenticationKey, LispControlPlaneConfiguration,
+    LispMapServerSelfSession, LispSessionAccessLists, LispSessionTrustSec,
     LispControlPlaneStatistics, LispCpCpuUtilization, LispInterCpSession,
     LispSessionTarget, LispTcpSocket, _cp_device)
 
@@ -169,7 +170,8 @@ class WlcCpSessionState(Check):
 
 
 def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
-                          wlc_hostname, wlc_node_id="wlc", cp_nodes=None):
+                          wlc_hostname, wlc_node_id="wlc", cp_nodes=None,
+                          wlc_mgmtip=None):
     """The per-control-plane flow, one chain of checks per CP.
 
     `control_planes` is what `show wireless fabric summary` reported, as
@@ -191,6 +193,12 @@ def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
         iid=vnid, af="ethernet", cp_nodes=cp_nodes or {},
         xtr_node_id=wlc_node_id, label=f"the AP's radio MAC {radio_mac}",
         xtr_loopback=wmi,
+        # Without it `_profile_xtr` falls back to the AP chain's `xtr_mgmtip`
+        # and profiles the EDGE: every check keyed on the xTR then answers
+        # for the wrong box, and does so plausibly -- the socket check
+        # reported the edge's LISP session to the control plane as though it
+        # were the controller's.
+        xtr_mgmtip=wlc_mgmtip,
         # The map-servers the controller registers this radio MAC to. The
         # edge's flow learns these from the EID identification phase, which
         # the controller has none of -- so `LispAuthenticationKey` has no
@@ -232,6 +240,19 @@ def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
         checks.append(LispControlPlaneStatistics(target, host, mgmt))
         checks.append(LispTcpSocket(target, host, mgmt))
         checks.append(LispCpCpuUtilization(target, host, mgmt))
+        # The control plane's own session to the map-server address, which
+        # can be down while the controller's session to it is Up.
+        checks.append(LispMapServerSelfSession(target, addr, host, mgmt))
+        # Path policy, read ON the control plane, towards the WMI: the
+        # controller sits outside the fabric, so its LISP traffic crosses a
+        # border and an ACL or an SGT policy there blocks registrations while
+        # every other check on this control plane passes.
+        #
+        # Only the control-plane side. The near side would read CEF, ACLs and
+        # CTS policy on the C9800 with IOS-XE switch commands, which is the
+        # same wrong-device mistake the edge readers made earlier.
+        checks.append(LispSessionAccessLists(target, addr, host, True, mgmt))
+        checks.append(LispSessionTrustSec(target, addr, host, True, mgmt))
 
     # Site-wide, after each control plane has been looked at on its own.
     for cp in control_planes:
