@@ -2322,6 +2322,14 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
                 "edge_label": "LISP Session",
             })
         ctx.state["ap_wlc_cp_nodes"] = cp_nodes
+        # (address, hostname, mgmt_ip). `show wireless fabric summary` gives
+        # only the address, so it fills all three: the control plane is
+        # profiled through Catalyst Center, which resolves the address to the
+        # inventory name -- the same thing `find_control_plane` does in the
+        # legacy flow.
+        ctx.state["ap_wlc_cp_planes"] = [
+            (p["ip_address"], p["ip_address"], p["ip_address"])
+            for p in planes]
         # ApWlcCollect recorded it; _PerWlcCheck itself carries no address.
         ctx.state["ap_wlc_mgmtip"] = (
             (ctx.state.get("ap_wlc_profiles") or {})
@@ -2452,38 +2460,29 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
                 f"{self.hostname}, so there is no instance the AP's radio MAC "
                 f"would register under.")
 
-        try:
-            from traffic_flows.lispsessiontroubleshooting import (
-                fabricEnabledWirelessSession)
-            _step, control_planes, _cp_info = fabricEnabledWirelessSession(
-                info, ctx.state.get("fabric_id"), 0,
-                ctx.state.get("catc_name"), endpoint, ctx.service)
-        except SystemExit as e:
-            # The legacy flow exits on its own fatal findings. That reason is
-            # a real diagnosis about the fabric, so it is surfaced as a
-            # warning rather than lost -- and per the manifest a fabric fault
-            # must not stop the run.
+        fabric = endpoint.endpointinfo["fabric"]
+        planes = ctx.state.get("ap_wlc_cp_planes") or []
+        if not planes:
             return CheckResult(
-                CheckStatus.WARN,
-                f"The controller's LISP session troubleshooting stopped on "
-                f"{self.hostname}:\n\n{e}")
-        except BaseException as e:
-            return CheckResult(
-                CheckStatus.WARN,
-                f"Could not run the controller's LISP session "
-                f"troubleshooting on {self.hostname} "
-                f"({type(e).__name__}: {e}).")
+                CheckStatus.SKIP,
+                f"Skipped — no control plane was resolved on {self.hostname} "
+                f"(see Fabric Control Plane).")
+
+        from checks.wlc_cp_session import wlc_cp_session_checks
+
+        # The instance every per-control-plane check reads.
+        ctx.state["wlc_cp_vnid"] = fabric["vnid"]
 
         listed = ", ".join(f"{ip} ({state})" for ip, state in down)
-        lines = [
+        return CheckResult(
+            CheckStatus.WARN,
             f"The LISP session from {self.hostname} to {listed} is not up. "
             f"The controller registers {mac} to that control plane, so a "
             f"session that is down leaves the radio MAC unregistered there "
             f"while every edge-side check still passes.",
-            "",
-        ]
-        for cp in (control_planes or []):
-            lines.append(f"• {cp.get('ip') or '?'} — "
-                         f"{cp.get('status') or '?'}")
-        return CheckResult(CheckStatus.WARN, "\n".join(lines),
-                           data={"control_planes": control_planes})
+            data={"queue_checks": wlc_cp_session_checks(
+                wmi=fabric["rloc"], vnid=fabric["vnid"], radio_mac=mac,
+                control_planes=planes, catc_name=ctx.state.get("catc_name"),
+                wlc_hostname=self.hostname, wlc_node_id=self.node_id,
+                cp_nodes=ctx.state.get("ap_wlc_cp_nodes") or {})},
+        )
