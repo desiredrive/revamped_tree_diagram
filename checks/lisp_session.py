@@ -47,9 +47,17 @@ class LispSessionTarget:
 
     def __init__(self, eid, xtr_hostname, catc_name, iid=None, af=None,
                  vrf="default", vlan=None, control_planes=None, cp_nodes=None,
-                 xtr_node_id="xtr", label=None):
+                 xtr_node_id="xtr", label=None, xtr_mgmtip=None,
+                 xtr_loopback=None):
         self.eid = eid
         self.xtr_hostname = xtr_hostname
+        # Which device this flow reads. The AP chain's xtr_* state keys name
+        # the edge, so a flow about a different xTR -- the controller
+        # registers the radio MAC to the same control planes -- has to carry
+        # its own device or it would profile the edge and report its fabric
+        # under the controller's name. None means "the chain's xTR".
+        self.xtr_mgmtip = xtr_mgmtip
+        self.xtr_loopback = xtr_loopback
         self.catc_name = catc_name
         self.iid = iid
         self.af = af                      # "ipv4" | "ethernet", None = derive
@@ -71,6 +79,21 @@ class LispSessionTarget:
     def key(self, name):
         """A ctx.state key private to this target's device."""
         return f"{name}::{self.scope}"
+
+    def rloc(self, ctx, etr):
+        """This target's own RLOC.
+
+        `xtr_loopback` in ctx.state is the AP chain's edge. A flow about a
+        different xTR must not read it -- doing so compares this device's
+        sessions against the edge's address, and every check keyed on the
+        RLOC silently answers for the wrong box. The profiled device is the
+        authority whenever the target names its own.
+        """
+        if self.xtr_mgmtip:
+            return self.xtr_loopback or getattr(
+                getattr(etr, "profiled_device", None), "loopback", None)
+        return ctx.state.get("xtr_loopback") or getattr(
+            getattr(etr, "profiled_device", None), "loopback", None)
 
     @property
     def isl3(self):
@@ -146,7 +169,8 @@ def _profile_xtr(ctx: RunContext, target: LispSessionTarget):
     if cached is not None:
         return cached
     from traffic_flows.lispsessiontroubleshooting import ETRDevice
-    etr = ETRDevice(ctx.state.get("xtr_mgmtip"), 0)
+    mgmt = target.xtr_mgmtip or ctx.state.get("xtr_mgmtip")
+    etr = ETRDevice(mgmt, 0)
     # The web flow does not keep a device_profiler.Device around -- it spreads
     # the profile across ctx.state keys -- but `_build_src_xtr_shim` composes
     # exactly the attribute surface `existing_profiled` reads. Using it avoids
@@ -156,7 +180,11 @@ def _profile_xtr(ctx: RunContext, target: LispSessionTarget):
     # "no TCP socket ... to None" in the socket check, and silently breaks any
     # comparison keyed on the ETR RLOC. Resolve it from Catalyst Center the
     # same way the SGT check does, and cache it for everything downstream.
-    if not ctx.state.get("xtr_loopback") and ctx.state.get("xtr_uuid") \
+    # Only for the chain's own xTR: xtr_uuid and xtr_loopback both name the
+    # edge, so resolving them for a different device would cache that
+    # device's loopback under the edge's key.
+    if not target.xtr_mgmtip \
+            and not ctx.state.get("xtr_loopback") and ctx.state.get("xtr_uuid") \
             and ctx.state.get("catc_name") and ctx.service:
         try:
             from checks.lisp import _query_loopback0
@@ -169,12 +197,19 @@ def _profile_xtr(ctx: RunContext, target: LispSessionTarget):
             # Best effort: a failure here leaves loopback None, which the
             # callers already report rather than crash on.
             pass
-    from checks.ew_shared import _build_src_xtr_shim
-    shim = _build_src_xtr_shim(ctx)
-    if getattr(shim, "hostname", None):
-        etr.existing_profiled(shim)
-    else:
+    # The shim is composed from the chain's xtr_* state keys, so it only
+    # describes the chain's own xTR. A target naming a different device must
+    # be profiled through Catalyst Center instead -- reusing the shim would
+    # read the edge and file its fabric under this target's name.
+    if target.xtr_mgmtip and target.xtr_mgmtip != ctx.state.get("xtr_mgmtip"):
         etr.device_profiler(target.catc_name, ctx.service)
+    else:
+        from checks.ew_shared import _build_src_xtr_shim
+        shim = _build_src_xtr_shim(ctx)
+        if getattr(shim, "hostname", None):
+            etr.existing_profiled(shim)
+        else:
+            etr.device_profiler(target.catc_name, ctx.service)
     ctx.state[target.key("_lisp_session_etr")] = etr
     return etr
 
@@ -1257,8 +1292,7 @@ class LispSessionPathMtu(_SessionCheck):
         try:
             etr = _profile_xtr(ctx, t)
             host = etr.profiled_device.hostname
-            rloc = ctx.state.get("xtr_loopback") or getattr(
-                etr.profiled_device, "loopback", None)
+            rloc = t.rloc(ctx, etr)
             if not rloc:
                 return CheckResult(
                     CheckStatus.WARN,
@@ -1481,8 +1515,7 @@ class LispSessionAccessLists(_SessionCheck):
         data = {"cp": self.cp_hostname, "map_server": self.map_server}
         try:
             etr = _profile_xtr(ctx, t)
-            etr_rloc = ctx.state.get("xtr_loopback") or getattr(
-                etr.profiled_device, "loopback", None)
+            etr_rloc = t.rloc(ctx, etr)
             if self.on_cp:
                 cp = _cp_device(ctx, self.cp_hostname, t.catc_name,
                                 self.cp_mgmt)
@@ -1605,8 +1638,7 @@ class LispSessionTrustSec(_SessionCheck):
         data = {"cp": self.cp_hostname, "map_server": self.map_server}
         try:
             etr = _profile_xtr(ctx, t)
-            etr_rloc = ctx.state.get("xtr_loopback") or getattr(
-                etr.profiled_device, "loopback", None)
+            etr_rloc = t.rloc(ctx, etr)
             if self.on_cp:
                 cp = _cp_device(ctx, self.cp_hostname, t.catc_name,
                                 self.cp_mgmt)

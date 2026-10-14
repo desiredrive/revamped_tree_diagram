@@ -321,3 +321,79 @@ def test_the_switch_side_check_is_named_for_the_device_it_reads():
         assert "Edge2" in near and "switch" not in near
         assert "cp2" in far
         assert near != far
+
+
+# --------------------------------------------------------------------------
+# A flow about a device other than the AP chain's edge. The controller
+# registers the AP's radio MAC to the same control planes, so the same module
+# runs against it -- and every xtr_* state key names the edge.
+# --------------------------------------------------------------------------
+
+
+def _wlc_target():
+    return LispSessionTarget(
+        eid="3891.b70f.2600", xtr_hostname="wlc-jalejand-cisco-com",
+        catc_name="catc", iid=8188, af="ethernet",
+        xtr_mgmtip="10.31.136.74", label="the AP's radio MAC")
+
+
+def test_a_foreign_target_is_profiled_through_catalyst_center(monkeypatch):
+    """The shim is composed from the chain's xtr_* keys, so it describes the
+    edge and nothing else. Reusing it for the controller would read the edge
+    and file its fabric under the controller's name."""
+    import checks.lisp_session as m
+
+    built = {}
+
+    class ETR:
+        def __init__(self, mgmt, _n): built["mgmt"] = mgmt
+        def existing_profiled(self, shim): built["via"] = "shim"
+        def device_profiler(self, catc, svc): built["via"] = "catc"
+    monkeypatch.setattr(
+        "traffic_flows.lispsessiontroubleshooting.ETRDevice", ETR)
+
+    ctx = types.SimpleNamespace(
+        service=object(), payload={},
+        state={"xtr_mgmtip": "10.31.136.126", "xtr_loopback": "172.19.1.68"})
+    m._profile_xtr(ctx, _wlc_target())
+
+    assert built["mgmt"] == "10.31.136.74"      # not the edge
+    assert built["via"] == "catc"               # not the edge's shim
+
+
+def test_the_chains_own_xtr_still_uses_the_cached_shim(monkeypatch):
+    """The edge path must not pay a second Catalyst Center roundtrip."""
+    import checks.lisp_session as m
+
+    built = {}
+
+    class ETR:
+        def __init__(self, mgmt, _n): built["mgmt"] = mgmt
+        def existing_profiled(self, shim): built["via"] = "shim"
+        def device_profiler(self, catc, svc): built["via"] = "catc"
+    monkeypatch.setattr(
+        "traffic_flows.lispsessiontroubleshooting.ETRDevice", ETR)
+    monkeypatch.setattr(m, "_build_src_xtr_shim",
+                        lambda ctx: types.SimpleNamespace(hostname="Edge2"),
+                        raising=False)
+    import checks.ew_shared
+    monkeypatch.setattr(checks.ew_shared, "_build_src_xtr_shim",
+                        lambda ctx: types.SimpleNamespace(hostname="Edge2"))
+
+    ctx = types.SimpleNamespace(
+        service=object(), payload={},
+        state={"xtr_mgmtip": "10.31.136.126", "xtr_loopback": "172.19.1.68"})
+    m._profile_xtr(ctx, _target())
+
+    assert built["mgmt"] == "10.31.136.126"
+    assert built["via"] == "shim"
+
+
+def test_a_foreign_target_does_not_borrow_the_edges_rloc():
+    """Every check keyed on the RLOC would otherwise answer for the edge."""
+    etr = types.SimpleNamespace(
+        profiled_device=types.SimpleNamespace(loopback="10.31.136.74"))
+    ctx = types.SimpleNamespace(state={"xtr_loopback": "172.19.1.68"})
+
+    assert _wlc_target().rloc(ctx, etr) == "10.31.136.74"
+    assert _target().rloc(ctx, etr) == "172.19.1.68"
