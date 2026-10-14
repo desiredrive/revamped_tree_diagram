@@ -2383,18 +2383,21 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
 
 
 class ApWlcCpLispSessionTrigger(_ApCheck):
-    """Run the LISP session flow when a controller's control plane is down.
+    """Run the controller's LISP session flow when one of its control planes
+    is down.
 
     Trigger 3 of the five. The controller is an xTR in its own right: it
     registers the AP's radio MAC into the L2 instance, to the same control
     planes the edge registers the AP's address to. A session down from the
     controller leaves the radio MAC unregistered while every edge-side check
-    passes, which is why the edge-side triggers cannot see this fault.
+    passes, which is why no edge-side trigger can see this fault.
 
-    The EID is the radio MAC rather than the AP's address: that is what the
-    controller registers, so it is what the flow can ask a control plane
-    about. The control planes themselves are the ones the controller resolved
-    -- `ap_cp_set` -- not the ones the edge peers with, which can differ.
+    `fabricEnabledWirelessSession` is that flow, and it is not the edge's.
+    It takes the WMI as the source RLOC, the map-servers and their keys from
+    `show wireless fabric summary`, and the instance from the controller's own
+    VNID mapping -- none of which an edge reader can supply. It is written for
+    a wireless client, so the AP is adapted to the endpoint attributes it
+    reads; see `wirelessmodules.wlc_cp_diagnostic`.
     """
 
     def __init__(self, hostname: str, node_id: str):
@@ -2419,41 +2422,68 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
                 "State), and it is what the controller registers, so there "
                 "is no EID to trace.")
 
-        iid = ctx.state.get("ap_wlc_l2_vnid")
-        mgmt = (ctx.state.get("ap_wlc_mgmtip") or "").strip()
-        if not iid or not mgmt:
+        info = (ctx.state.get("ap_wlc_collected") or {}).get(self.hostname)
+        if info is None:
             return CheckResult(
                 CheckStatus.SKIP,
-                "Skipped — the controller's L2 instance or management "
-                "address is not known, so the flow has no device and "
-                "instance to run against.")
+                "Skipped — controller data was not collected (see WLC "
+                "Collection).")
 
-        from checks.lisp_session import LispSessionTarget, lisp_session_checks
-        target = LispSessionTarget(
-            eid=mac,
-            xtr_hostname=self.hostname,
-            catc_name=ctx.state.get("catc_name"),
-            iid=iid,
-            af="ethernet",
-            cp_nodes=ctx.state.get("ap_wlc_cp_nodes") or {},
-            xtr_node_id=self.node_id,
-            label=f"the AP's radio MAC {mac}",
-            # The controller, not the edge: without this the flow profiles
-            # the chain's xTR and reports its fabric under this name.
-            xtr_mgmtip=mgmt,
-            xtr_loopback=ctx.state.get("ap_wlc_rloc"),
-        )
+        from wirelessmodules.wlc_cp_diagnostic import (
+            ap_endpoint_attributes, wmi_ip)
+
+        # No guess: the WMI is the source RLOC of the registration, and every
+        # per-control-plane check measures the socket from it. `wmi_ip`
+        # returns None with zero or several interfaces rather than picking
+        # one, so an ambiguous WMI stops the flow instead of misdirecting it.
+        if not wmi_ip(info):
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — {self.hostname} has no single wireless management "
+                f"interface, so the address it registers {mac} from is "
+                f"ambiguous (see Management Interface).")
+
+        endpoint = ap_endpoint_attributes(
+            info, mac, ctx.state.get("ap_cp_name"))
+        if not endpoint.endpointinfo["fabric"]["vnid"]:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — no INFRA_VN L2 instance is mapped on "
+                f"{self.hostname}, so there is no instance the AP's radio MAC "
+                f"would register under.")
+
+        try:
+            from traffic_flows.lispsessiontroubleshooting import (
+                fabricEnabledWirelessSession)
+            _step, control_planes, _cp_info = fabricEnabledWirelessSession(
+                info, ctx.state.get("fabric_id"), 0,
+                ctx.state.get("catc_name"), endpoint, ctx.service)
+        except SystemExit as e:
+            # The legacy flow exits on its own fatal findings. That reason is
+            # a real diagnosis about the fabric, so it is surfaced as a
+            # warning rather than lost -- and per the manifest a fabric fault
+            # must not stop the run.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The controller's LISP session troubleshooting stopped on "
+                f"{self.hostname}:\n\n{e}")
+        except BaseException as e:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"Could not run the controller's LISP session "
+                f"troubleshooting on {self.hostname} "
+                f"({type(e).__name__}: {e}).")
 
         listed = ", ".join(f"{ip} ({state})" for ip, state in down)
-        return CheckResult(
-            CheckStatus.WARN,
+        lines = [
             f"The LISP session from {self.hostname} to {listed} is not up. "
             f"The controller registers {mac} to that control plane, so a "
             f"session that is down leaves the radio MAC unregistered there "
-            f"while every edge-side check still passes.\n\n"
-            f"The session flow runs against the controller to say why: its "
-            f"own database and map-server configuration, its sessions, and "
-            f"each control plane's path, configuration and counters.",
-            data={"queue_checks": lisp_session_checks(
-                target, map_servers=[(ip, ip, ip) for ip, _s in down])},
-        )
+            f"while every edge-side check still passes.",
+            "",
+        ]
+        for cp in (control_planes or []):
+            lines.append(f"• {cp.get('ip') or '?'} — "
+                         f"{cp.get('status') or '?'}")
+        return CheckResult(CheckStatus.WARN, "\n".join(lines),
+                           data={"control_planes": control_planes})

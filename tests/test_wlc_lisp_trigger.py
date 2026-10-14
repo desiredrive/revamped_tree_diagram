@@ -5,9 +5,19 @@ into the L2 instance, to the same control planes the edge registers the AP's
 address to. A session down from the controller leaves the radio MAC
 unregistered while every edge-side check passes, which is why none of the
 edge-side triggers can see this fault.
+
+The flow that answers it is `fabricEnabledWirelessSession`, not the edge's.
+It already existed: it takes the WMI as the source RLOC, the map-servers and
+their keys from `show wireless fabric summary`, and the instance from the
+controller's own VNID mapping. An earlier attempt pointed the EDGE flow at the
+controller instead, which failed on the first two readers it reached -- MAC
+learning against a radio MAC that is never in a MAC table, then
+`show run | section service ethernet`, which a C9800 does not answer.
 """
 
 import types
+
+import pytest
 
 from checks.base import CheckStatus
 from checks.ap_wlc import ApWlcCpLispSessionTrigger
@@ -16,80 +26,123 @@ from checks.ap_wlc import ApWlcCpLispSessionTrigger
 WLC = "wlc-jalejand-cisco-com"
 
 
-def _ctx(**over):
+def _info():
+    """A collected controller: one WMI, an INFRA_VN L2 instance."""
+    return types.SimpleNamespace(
+        hostname=WLC,
+        wmi_information={"interfaces": [{"ipaddress": "10.31.136.74"}]},
+        fabric_state={"fabric_vnid_mapping": {"l2_vnid": {
+            "8188": {"name": "172_19_5_0-INFRA_VN"}}}},
+    )
+
+
+def _ctx(info=None, **over):
     state = {
         "ap_wlc_cp_down": [("172.19.1.65", "Down")],
         "ap_wlc_radio_mac": "3891.b70f.2600",
-        "ap_wlc_l2_vnid": "8188",
-        "ap_wlc_mgmtip": "10.31.136.74",
-        "ap_wlc_rloc": "172.19.1.68",
-        "ap_wlc_cp_nodes": {"172.19.1.64": "wlccp-1", "172.19.1.65": "wlccp-2"},
+        "ap_cp_name": "default-control-plane",
         "catc_name": "mxc-dnac5",
-        # The edge, which this flow must not read.
-        "xtr_mgmtip": "10.31.136.126",
-        "xtr_loopback": "172.19.1.68",
+        "fabric_id": "fab-1",
+        "ap_wlc_collected": {WLC: _info() if info is None else info},
     }
     state.update(over)
     return types.SimpleNamespace(service=object(), payload={}, state=state)
 
 
-def _run(ctx):
-    return ApWlcCpLispSessionTrigger(WLC, "wlc").run_ap(ctx)
+def _run(ctx, monkeypatch, **kw):
+    """Run the trigger with the legacy flow stubbed."""
+    seen = {}
+
+    def flow(wlcinfo, fabric_id, step, catc, endpoint, service):
+        seen["wlcinfo"] = wlcinfo
+        seen["endpoint"] = endpoint
+        seen["catc"] = catc
+        if "raises" in kw:
+            raise kw["raises"]
+        return 9, kw.get("cps", [{"ip": "172.19.1.65", "status": "Down"}]), []
+
+    monkeypatch.setattr(
+        "traffic_flows.lispsessiontroubleshooting.fabricEnabledWirelessSession",
+        flow)
+    return ApWlcCpLispSessionTrigger(WLC, "wlc").run_ap(ctx), seen
 
 
-def test_a_down_control_plane_queues_the_flow_against_the_controller():
-    r = _run(_ctx())
+def test_a_down_control_plane_runs_the_controllers_own_session_flow(monkeypatch):
+    r, seen = _run(_ctx(), monkeypatch)
     assert r.status is CheckStatus.WARN
     assert "172.19.1.65" in r.message
     assert "3891.b70f.2600" in r.message
-    # Three switch-side + thirteen per CP + one inter-CP + the verdict.
-    assert len(r.data["queue_checks"]) == 3 + 13 + 1 + 1
+    assert seen["endpoint"].mac == "3891.b70f.2600"
 
 
-def test_the_flow_reads_the_controller_not_the_edge():
-    """Every xtr_* key names the edge. Carrying them into this flow would
-    profile the edge and report its fabric under the controller's name."""
-    r = _run(_ctx())
-    t = r.data["queue_checks"][0].target
-    assert t.xtr_mgmtip == "10.31.136.74"
-    assert t.xtr_hostname == WLC
-    assert t.eid == "3891.b70f.2600"
-    assert t.iid == "8188"
-    assert t.af == "ethernet"
+def test_the_flow_registers_from_the_wireless_management_interface(monkeypatch):
+    """The WMI is the source RLOC: the controller registers the radio MAC from
+    it, and it is the socket every per-control-plane check measures."""
+    _r, seen = _run(_ctx(), monkeypatch)
+    assert seen["endpoint"].endpointinfo["fabric"]["rloc"] == "10.31.136.74"
 
 
-def test_findings_land_on_the_control_plane_they_are_about():
-    """Not all piled onto the controller's own node."""
-    r = _run(_ctx())
-    per_cp = [c for c in r.data["queue_checks"]
-              if c.target_node_id == "wlccp-2"]
-    assert len(per_cp) == 14          # thirteen plus the inter-CP check
-    switch_side = [c for c in r.data["queue_checks"]
-                   if c.target_node_id == "wlc"]
-    assert len(switch_side) == 4      # the three plus the verdict
+def test_the_instance_is_the_infra_vn_l2_vnid(monkeypatch):
+    """An AP onboards in the INFRA_VN. The legacy flow takes the instance from
+    a client's fabric attributes; an AP has none, so it comes from the
+    controller's own VNID mapping."""
+    _r, seen = _run(_ctx(), monkeypatch)
+    assert seen["endpoint"].endpointinfo["fabric"]["vnid"] == "8188"
 
 
-def test_the_node_is_known_before_the_check_runs():
-    """check_started routes on target_node_id before run() is called, so a
-    check that assigns it while running is announced on the wrong node."""
-    for c in _run(_ctx()).data["queue_checks"]:
-        assert c.target_node_id in ("wlc", "wlccp-1", "wlccp-2")
-
-
-def test_every_session_up_skips():
-    r = _run(_ctx(ap_wlc_cp_down=[]))
+def test_an_ambiguous_management_interface_skips_rather_than_guessing(monkeypatch):
+    """`wmi_ip` returns None with zero or several interfaces. Every check
+    below measures from that address, so a guess misdirects all of them
+    silently."""
+    info = _info()
+    info.wmi_information = {"interfaces": []}
+    r, _seen = _run(_ctx(info=info), monkeypatch)
     assert r.status is CheckStatus.SKIP
-    assert "queue_checks" not in (r.data or {})
+    assert "management interface" in r.message
 
 
-def test_an_unknown_radio_mac_skips_rather_than_guessing():
-    """The radio MAC is what the controller registers; without it there is
-    no EID to trace and the flow would ask about the wrong address."""
-    r = _run(_ctx(ap_wlc_radio_mac=""))
+def test_no_infra_vn_instance_skips(monkeypatch):
+    info = _info()
+    info.fabric_state = {"fabric_vnid_mapping": {"l2_vnid": {}}}
+    r, _seen = _run(_ctx(info=info), monkeypatch)
+    assert r.status is CheckStatus.SKIP
+    assert "INFRA_VN" in r.message
+
+
+def test_every_control_plane_up_skips(monkeypatch):
+    r, _seen = _run(_ctx(ap_wlc_cp_down=[]), monkeypatch)
+    assert r.status is CheckStatus.SKIP
+
+
+def test_an_unknown_radio_mac_skips(monkeypatch):
+    r, _seen = _run(_ctx(ap_wlc_radio_mac=""), monkeypatch)
     assert r.status is CheckStatus.SKIP
     assert "radio MAC" in r.message
 
 
-def test_a_missing_instance_or_address_skips():
-    assert _run(_ctx(ap_wlc_l2_vnid=None)).status is CheckStatus.SKIP
-    assert _run(_ctx(ap_wlc_mgmtip="")).status is CheckStatus.SKIP
+def test_a_fatal_finding_warns_rather_than_stopping_the_run(monkeypatch):
+    """The legacy flow calls sys.exit on its own findings. Those are
+    statements about the fabric, and the manifest's rule is that a fabric
+    fault warns -- a FAIL would skip every remaining AP validation."""
+    r, _seen = _run(_ctx(), monkeypatch,
+                    raises=SystemExit("Error: LISP Sessions - All Down"))
+    assert r.status is CheckStatus.WARN
+    assert "All Down" in r.message
+
+
+def test_an_unreadable_controller_warns(monkeypatch):
+    r, _seen = _run(_ctx(), monkeypatch, raises=RuntimeError("unreachable"))
+    assert r.status is CheckStatus.WARN
+    assert "RuntimeError" in r.message
+
+
+def test_uncollected_controller_skips(monkeypatch):
+    r, _seen = _run(_ctx(ap_wlc_collected={}), monkeypatch)
+    assert r.status is CheckStatus.SKIP
+
+
+def test_the_node_is_known_before_the_check_runs():
+    """The runner routes check_started before run(), so a check that only
+    assigns its node while running is announced against the previous default
+    and renders on the wrong node until it finishes."""
+    assert ApWlcCpLispSessionTrigger(WLC, "wlc-1").target_node_id == "wlc-1"

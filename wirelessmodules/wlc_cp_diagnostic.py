@@ -40,3 +40,35 @@ def wmi_ip(info):
     if len(interfaces) != 1:
         return None
     return interfaces[0].get("ipaddress")
+
+
+def ap_endpoint_attributes(info, radio_mac, control_plane_name):
+    """An AP posing as the endpoint `fabricEnabledWirelessSession` expects.
+
+    That function reads a wireless CLIENT's fabric attributes -- the ones
+    `show wireless client mac-address <mac> detail` reports. An AP is not a
+    client and has no such record, but it registers through the controller the
+    same way, so the flow applies unchanged once the four attributes it reads
+    are supplied from the controller's own fabric state instead.
+
+    `rloc` is the WMI: the controller registers from its wireless management
+    interface, and that address is the source of the TCP socket every per-
+    control-plane check measures. None when the WMI is ambiguous, which the
+    caller must treat as "do not run" rather than substituting a guess.
+
+    `sgt` is not carried: an AP's registration has no client SGT, and the flow
+    only logs it.
+    """
+    from types import SimpleNamespace
+
+    vnid = infra_vn_vnid(info)
+    return SimpleNamespace(
+        mac=radio_mac,
+        endpointinfo={"fabric": {
+            "status": "Enabled",
+            "rloc": wmi_ip(info),
+            "vnid": vnid,
+            "sgt": None,
+            "control_plane_name": control_plane_name,
+        }},
+    )
