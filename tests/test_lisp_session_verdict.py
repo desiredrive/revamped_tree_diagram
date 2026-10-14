@@ -193,3 +193,57 @@ def test_a_walked_cp_absent_from_the_peer_table_still_counts(monkeypatch):
     r = LispSessionVerdict(_target()).run_session(ctx)
     assert r.status is CheckStatus.WARN
     assert "172.19.1.65" in r.message
+
+
+def test_every_session_down_does_not_stop_the_flow_at_the_global_check(monkeypatch):
+    """All sessions down is when the per-CP checks matter MOST.
+
+    LispGlobalSession used to _stop here, which skipped the fourteen checks
+    per control plane that say why none of them came up -- so three sessions
+    down produced three checks and a halt, while one session down produced
+    the full flow. The worse fault gave less diagnostic output. The verdict
+    is the only thing that stops the flow now.
+    """
+    import checks.lisp_session as m
+
+    etr = _etr_with_peers({"172.19.1.64": "Down", "172.19.1.65": "Down",
+                           "172.19.1.100": "Down"})
+    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: etr)
+
+    t = _target()
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    r = m.LispGlobalSession(t).run_session(ctx)
+
+    assert r.status is CheckStatus.WARN
+    assert not ctx.state.get(t.key(STOP_KEY))      # the flow continues
+    assert "172.19.1.64" in r.message
+
+
+def test_all_down_still_fans_out_over_every_control_plane():
+    """The checks that explain a total outage have to be built for each CP."""
+    import checks.lisp_session as m
+
+    t = _target()
+    pairs = [("172.19.1.64", "cp1", "172.19.1.64"),
+             ("172.19.1.65", "cp2", "172.19.1.65"),
+             ("172.19.1.100", "cp3", "172.19.1.100")]
+    names = [type(c).__name__ for c in m.lisp_session_checks(t, map_servers=pairs)]
+
+    # Three switch-side, thirteen per CP, one inter-CP each, one verdict.
+    assert len(names) == 3 + 13 * 3 + 3 + 1
+    assert names.count("LispSessionRouting") == 3
+    assert names.count("LispAuthenticationKey") == 3
+    assert names[-1] == "LispSessionVerdict"
+
+
+def test_the_verdict_is_what_stops_a_total_outage(monkeypatch):
+    """Still down after the troubleshooting is where the flow ends."""
+    import checks.lisp_session as m
+
+    etr = _etr_with_peers({"172.19.1.64": "Down", "172.19.1.65": "Down"})
+    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: etr)
+
+    ctx = _ctx({"172.19.1.64": "Down", "172.19.1.65": "Down"})
+    r = LispSessionVerdict(_target()).run_session(ctx)
+    assert r.status is CheckStatus.FAIL
+    assert ctx.state[_target().key(STOP_KEY)]

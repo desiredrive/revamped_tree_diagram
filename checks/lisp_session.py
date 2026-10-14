@@ -384,13 +384,21 @@ class LispGlobalSession(_SessionCheck):
 
         if not up:
             listed = ", ".join(f"{p} ({s})" for p, s in down) or "none"
-            return self._stop(
-                ctx,
-                f"every LISP session on {t.xtr_hostname} is down",
+            # Reported, NOT stopped. Every session being down is the case
+            # where the per-control-plane checks below matter most: the
+            # underlay, the path MTU, the authentication key, the TCP socket
+            # and the access lists are what say WHY none of them came up, and
+            # a cause common to all three shows up there. Stopping here
+            # skipped exactly those checks, so the worse fault produced less
+            # diagnostic output than a single down session did. The verdict
+            # stops the flow at the end, once that troubleshooting has run.
+            return CheckResult(
+                CheckStatus.WARN,
                 f"No LISP session from {t.xtr_hostname} is up — {listed}. "
                 f"Registrations cannot leave the switch at all, which is why "
-                f"no control plane has {t.label}. The session state is the "
-                f"thing to fix first.",
+                f"no control plane has {t.label}. The checks that follow "
+                f"examine each control plane's path, configuration and "
+                f"counters to say why none of them is up.",
                 data={"lisp_sessions_up": [], "lisp_sessions_down": down},
             )
 
