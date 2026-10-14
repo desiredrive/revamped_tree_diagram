@@ -339,9 +339,13 @@ def test_the_path_checks_run_on_the_control_plane_towards_the_wmi():
 
 
 def test_the_near_side_path_checks_are_not_queued_against_the_controller():
-    """Routing and PathMtu read the xTR unconditionally -- `show ip cef`,
-    `show ip route` and the IGP -- so they are not wired here pending a live
-    check of what a C9800 answers."""
+    """The controller is not where this flow's path questions are answered.
+
+    Routing and PathMtu read the xTR unconditionally -- `show ip cef`,
+    `show ip route` and the IGP -- which are IOS-XE switch commands, and they
+    have no control-plane side to run instead. The path from the control
+    plane towards the WMI is covered by the ACL and SGT checks above.
+    """
     from checks.wlc_cp_session import wlc_cp_session_checks
     from checks.lisp_session import LispSessionRouting, LispSessionPathMtu
 

@@ -248,9 +248,13 @@ def wlc_cp_session_checks(wmi, vnid, radio_mac, control_planes, catc_name,
         # border and an ACL or an SGT policy there blocks registrations while
         # every other check on this control plane passes.
         #
-        # Only the control-plane side. The near side would read CEF, ACLs and
-        # CTS policy on the C9800 with IOS-XE switch commands, which is the
-        # same wrong-device mistake the edge readers made earlier.
+        # Control-plane side only, by design: the underlay routing, CEF and
+        # path policy are read from the control plane towards the WMI. The
+        # near side is not checked on the controller at all -- those reads
+        # are IOS-XE switch commands and the C9800 is not where this flow's
+        # path questions get answered. `LispSessionRouting` and
+        # `LispSessionPathMtu` have no control-plane side, so they have no
+        # place in this chain.
         checks.append(LispSessionAccessLists(target, addr, host, True, mgmt))
         checks.append(LispSessionTrustSec(target, addr, host, True, mgmt))
 
