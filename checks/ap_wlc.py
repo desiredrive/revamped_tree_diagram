@@ -2321,7 +2321,9 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         cp_rlocs = ctx.state.get("ap_cp_rlocs") or {}
         cp_mgmts = ctx.state.get("ap_cp_mgmts") or {}
         cp_targets = ctx.state.get("ap_cp_targets") or {}
-        by_rloc = {rloc: host for host, rloc in cp_rlocs.items()}
+        # `cp_rloc`, not `rloc`: the loop variable would shadow the
+        # controller's own RLOC, read above and printed below.
+        by_rloc = {cp_rloc: host for host, cp_rloc in cp_rlocs.items()}
         node_by_host = {host: nid for nid, host in cp_targets.items()}
 
         cp_nodes, planes_out, unmatched = {}, [], []
@@ -2343,6 +2345,22 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
                 cp_nodes[host] = node_id
             planes_out.append((addr, host, cp_mgmts.get(host) or host))
         ctx.state["ap_wlc_cp_nodes"] = cp_nodes
+        # The controller registers the AP's radio MAC to each of these
+        # control planes, over its own LISP session -- so draw it. Without
+        # the link the per-control-plane findings below land on nodes the
+        # edge drew for the EDGE's sessions, with nothing on the canvas
+        # saying the controller peers with them too, and a reader has no way
+        # to tell which relationship a finding is about.
+        #
+        # Only the matched ones: an unmatched control plane has no node to
+        # draw to, and is named in the message instead.
+        cp_edges = [
+            {"source": self.target_node_id, "target": nid,
+             "label": f"LISP Session ({status})" if status else "LISP Session"}
+            for nid, status in (
+                (cp_nodes.get(p["ip_address"]), (p.get("status") or "").strip())
+                for p in planes)
+            if nid]
         # (RLOC, hostname, management IP) -- the three the session flow needs.
         ctx.state["ap_wlc_cp_planes"] = planes_out
         ctx.state["ap_wlc_cp_unmatched"] = unmatched
@@ -2413,9 +2431,11 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
                   f"The session flow below says why "
                   f"{'that session' if one else 'those sessions'} "
                   f"{'is' if one else 'are'} down.",
-                data={"control_planes": addresses})
+                data={"control_planes": addresses,
+                      "add_edges": cp_edges})
         return CheckResult(CheckStatus.OK, "\n".join(lines),
-                           data={"control_planes": addresses})
+                           data={"control_planes": addresses,
+                                 "add_edges": cp_edges})
 
 
 class ApWlcCpLispSessionTrigger(_ApCheck):

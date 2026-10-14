@@ -253,3 +253,38 @@ def test_a_control_plane_the_edge_never_saw_is_reported_not_guessed():
     assert unmatched == ["172.19.1.99"]
     assert [p[0] for p in planes] == ["172.19.1.64"]
     assert "172.19.1.99" not in nodes
+
+
+def _edges(cp_nodes, planes):
+    """The edge block of ApWlcFabricControlPlane, as it runs there."""
+    return [
+        {"source": "wlc", "target": nid,
+         "label": f"LISP Session ({status})" if status else "LISP Session"}
+        for nid, status in (
+            (cp_nodes.get(p["ip_address"]), (p.get("status") or "").strip())
+            for p in planes)
+        if nid]
+
+
+def test_the_controller_is_linked_to_the_control_planes_it_registers_to():
+    """The controller is an xTR in its own right and peers with the same
+    control planes the edge does. Without the link its per-control-plane
+    findings land on nodes the edge drew for the EDGE's sessions, with
+    nothing on the canvas saying the controller peers with them too."""
+    nodes, _p, _u = _resolve(_fabric_ctx(), ["172.19.1.64", "172.19.1.65"])
+    edges = _edges(nodes, [{"ip_address": "172.19.1.64", "status": "Up"},
+                           {"ip_address": "172.19.1.65", "status": "Down"}])
+    assert [(e["source"], e["target"]) for e in edges] == [
+        ("wlc", "apcp-1"), ("wlc", "apcp-2")]
+    assert edges[0]["label"] == "LISP Session (Up)"
+    assert edges[1]["label"] == "LISP Session (Down)"
+
+
+def test_no_link_is_drawn_to_a_control_plane_with_no_node():
+    """An unmatched control plane -- a different site, or an SDA transit CP --
+    has no node to draw to. It is named in the message instead."""
+    nodes, _p, _u = _resolve(_fabric_ctx(), ["172.19.1.64", "172.19.1.99"])
+    edges = _edges(nodes, [{"ip_address": "172.19.1.64", "status": "Up"},
+                           {"ip_address": "172.19.1.99", "status": "Up"}])
+    assert len(edges) == 1
+    assert edges[0]["target"] == "apcp-1"
