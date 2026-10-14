@@ -618,8 +618,13 @@ class LispControlPlaneConfiguration(_SessionCheck):
             # Reported against this control plane, and NOT set as a global
             # stop: another control plane may be configured correctly, and its
             # findings are still worth having.
+            # WARN, not FAIL: a site configuration that rejects this
+            # registration is a statement about the fabric, and the manifest's
+            # rule is that those must not stop the run -- the remaining
+            # control planes and every later check still have diagnostic
+            # value. FAIL is for when the tool cannot continue.
             return CheckResult(
-                CheckStatus.FAIL,
+                CheckStatus.WARN,
                 f"The site configuration on {self.cp_hostname} does not "
                 f"accept this registration:\n\n{e}",
                 data={"cp": self.cp_hostname},
@@ -632,11 +637,45 @@ class LispControlPlaneConfiguration(_SessionCheck):
                 data={"cp": self.cp_hostname},
             )
 
-        return CheckResult(
-            CheckStatus.OK,
+        # `rloc_members` and `domains` are read above and were never graded:
+        # the five checks in `cp_configuration_validation` cover the site and
+        # the roles, and stop there. Neither is fatal on its own, so both are
+        # reported alongside the pass rather than raised through it.
+        notes = []
+        if getattr(cfg, "rloc_members_distribute", None) is not True:
+            notes.append(
+                f"• `map-server rloc members distribute` is not configured on "
+                f"{self.cp_hostname}. The control plane does not advertise "
+                f"its site's locators to the other map-servers, so an xTR "
+                f"registering here may be unknown to the rest of the fabric.")
+        domain = getattr(cfg, "domainid", 0)
+        multihoming = getattr(cfg, "multihomingid", 0)
+        if not domain:
+            notes.append(
+                f"• No LISP domain ID is set on {self.cp_hostname}. Publish "
+                f"and subscribe between map-servers is keyed on it, so "
+                f"without one this control plane cannot share registrations "
+                f"with its peers.")
+
+        lines = [
             f"• The site configuration on {self.cp_hostname} covers instance "
-            f"{t.iid} and allows the locators this switch registers from.",
-            data={"cp": self.cp_hostname},
+            f"{t.iid}: it is a map-server and map-resolver, site_uci is "
+            f"defined, and the instance is configured under it."
+        ]
+        if domain:
+            lines.append(f"• Domain ID {domain}, multihoming ID "
+                         f"{multihoming}.")
+        if notes:
+            return CheckResult(
+                CheckStatus.WARN, "\n".join(lines + [""] + notes),
+                data={"cp": self.cp_hostname,
+                      "rloc_members_distribute": getattr(
+                          cfg, "rloc_members_distribute", None),
+                      "domain_id": domain})
+        return CheckResult(
+            CheckStatus.OK, "\n".join(lines),
+            data={"cp": self.cp_hostname,
+                  "rloc_members_distribute": True, "domain_id": domain},
         )
 
 

@@ -397,3 +397,98 @@ def test_a_foreign_target_does_not_borrow_the_edges_rloc():
 
     assert _wlc_target().rloc(ctx, etr) == "10.31.136.74"
     assert _target().rloc(ctx, etr) == "172.19.1.68"
+
+
+# --------------------------------------------------------------------------
+# `rloc_members` and `domains` are read by the configuration check and were
+# never graded: the five checks in `cp_configuration_validation` stop at the
+# site and the roles. A control plane that does not distribute its locators,
+# or has no domain ID, passed silently while the OK message claimed it
+# "allows the locators this switch registers from" -- which nothing had read.
+# --------------------------------------------------------------------------
+
+
+def _cfg_check(monkeypatch, **attrs):
+    """The configuration check, with the CP's parsed config stubbed."""
+    import checks.lisp_session as m
+
+    monkeypatch.setattr(m, "_cp_device",
+                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
+                            profiled_device=types.SimpleNamespace(hostname=h)))
+
+    class Cfg:
+        def __init__(self, _h):
+            for k, v in attrs.items():
+                setattr(self, k, v)
+        def __getattr__(self, _n):
+            return lambda *a, **k: None
+    monkeypatch.setattr("routingmodules.lisp.L2LISPControlPlane", Cfg)
+    monkeypatch.setattr(
+        "traffic_flows.lispsessiontroubleshooting.cp_configuration_validation",
+        lambda *a: None)
+
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    return m.LispControlPlaneConfiguration(_target(), "cp1").run_session(ctx)
+
+
+def test_a_fully_configured_control_plane_passes(monkeypatch):
+    r = _cfg_check(monkeypatch, rloc_members_distribute=True,
+                   domainid=1, multihomingid=0)
+    assert r.status is CheckStatus.OK
+    assert "Domain ID 1" in r.message
+
+
+def test_locators_not_distributed_is_reported(monkeypatch):
+    """Without it the CP does not advertise its site's locators to its peers,
+    so an xTR registering here can be unknown to the rest of the fabric."""
+    r = _cfg_check(monkeypatch, rloc_members_distribute=False,
+                   domainid=1, multihomingid=0)
+    assert r.status is CheckStatus.WARN
+    assert "rloc members distribute" in r.message
+
+
+def test_no_domain_id_is_reported(monkeypatch):
+    """Publish and subscribe between map-servers is keyed on it."""
+    r = _cfg_check(monkeypatch, rloc_members_distribute=True,
+                   domainid=0, multihomingid=0)
+    assert r.status is CheckStatus.WARN
+    assert "domain ID" in r.message
+    assert "Domain ID" not in r.message     # nothing to report
+
+
+def test_both_faults_are_reported_in_one_run(monkeypatch):
+    """Neither is fatal, so the reader gets both rather than the first."""
+    r = _cfg_check(monkeypatch, rloc_members_distribute=None, domainid=0)
+    assert r.status is CheckStatus.WARN
+    assert "rloc members distribute" in r.message and "domain ID" in r.message
+
+
+def test_a_rejected_registration_warns_rather_than_stopping_the_run(monkeypatch):
+    """A site configuration that rejects this registration is a fabric fault.
+
+    It returned FAIL, which stopped the AP run -- while the other control
+    planes, and every check below, still had diagnostic value.
+    """
+    import checks.lisp_session as m
+
+    monkeypatch.setattr(m, "_cp_device",
+                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
+                            profiled_device=types.SimpleNamespace(hostname=h)))
+
+    class Cfg:
+        def __init__(self, _h): pass
+        def __getattr__(self, _n):
+            return lambda *a, **k: None
+    monkeypatch.setattr("routingmodules.lisp.L2LISPControlPlane", Cfg)
+
+    def reject(*a):
+        raise SystemExit("site_uci is not defined")
+    monkeypatch.setattr(
+        "traffic_flows.lispsessiontroubleshooting.cp_configuration_validation",
+        reject)
+
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    r = m.LispControlPlaneConfiguration(_target(), "cp1").run_session(ctx)
+
+    assert r.status is CheckStatus.WARN
+    assert "site_uci" in r.message
