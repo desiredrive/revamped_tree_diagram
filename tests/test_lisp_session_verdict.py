@@ -274,3 +274,34 @@ def test_a_control_plane_without_the_instance_warns_rather_than_failing(monkeypa
     assert r.status is CheckStatus.WARN
     assert "4097" in r.message
     assert "KeyError" not in r.message
+
+
+def test_a_blocking_acl_names_the_interface_and_reads_as_prose(monkeypatch):
+    """The deny reached the user as a Python tuple, and never said where.
+
+    `_evaluate_acls` returns (flow, detail) pairs for the shared renderer to
+    lay out; interpolating them directly printed the repr. The interface is
+    per-path rather than per-deny, so it only appears once the renderer's
+    `path` argument is used -- which is the first thing a reader needs, since
+    an ACL blocking TCP/4342 is actionable only on a named port.
+    """
+    import checks.lisp_session as m
+
+    etr = types.SimpleNamespace(
+        profiled_device=types.SimpleNamespace(
+            hostname="Edge2", loopback="172.19.1.68"))
+    monkeypatch.setattr(m, "_profile_xtr", lambda ctx, t: etr)
+    monkeypatch.setattr(m, "_cef_interfaces",
+                        lambda ctx, h, d: ["TenGigabitEthernet1/0/3"])
+    monkeypatch.setattr(m, "_evaluate_acls", lambda ctx, h, i, f: (
+        ["nolisp"],
+        [("172.19.1.68 → 172.19.1.65 TCP/4342", "nolisp, sequence 1")],
+        [], []))
+
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    r = m.LispSessionAccessLists(_target(), "172.19.1.65", "cp2").run_session(ctx)
+
+    assert r.status is CheckStatus.WARN
+    assert "TenGigabitEthernet1/0/3" in r.message
+    assert "nolisp, sequence 1" in r.message
+    assert "('" not in r.message            # no tuple repr

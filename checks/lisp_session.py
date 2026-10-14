@@ -24,7 +24,8 @@ already drawn for its control planes.
 """
 
 from checks.base import Check, CheckResult, CheckStatus, RunContext
-from checks.shared import _cef_interfaces, _evaluate_acls
+from checks.shared import (_cef_interfaces, _evaluate_acls,
+                           render_acl_section)
 
 
 # State key holding the reason the session flow cannot usefully continue. Set by
@@ -1528,39 +1529,48 @@ class LispSessionAccessLists(_SessionCheck):
         data.update({"interfaces": interfaces, "acls": names,
                      "denies": denies, "unevaluated": unevaluated})
 
-        gaps = (["• Could not be read: " + "; ".join(unevaluated)]
-                if unevaluated else [])
+        # `denies`, `permits` and `unevaluated` are tuples -- (flow, detail)
+        # pairs and (acl, flows, reason) triples -- which the shared renderer
+        # lays out. Interpolating them directly printed the Python repr.
+        path = ", ".join(interfaces)
+        header = (f"{src} → {dst}, LISP control (TCP/4342 and UDP/4342), "
+                  f"on {host}")
 
         # A deny outranks an unreadable ACL: it is the actionable finding.
         if denies:
             return CheckResult(
                 CheckStatus.WARN,
-                f"An ACL on the underlay path is blocking the LISP session "
-                f"(TCP/4342 and UDP/4342):\n\n"
-                + "\n".join([f"• {d}" for d in denies] + gaps), data=data)
+                "An ACL on the underlay path is blocking the LISP session:"
+                "\n\n" + render_acl_section(
+                    header, path, blocked=denies, permitted=permits,
+                    unread=unevaluated),
+                data=data)
 
         # An ACL that could not be parsed is applied to the path whether or
         # not we can read it, so reporting the path clear on the strength of
         # it would be a guess.
         if unevaluated:
             return CheckResult(
-                CheckStatus.FAIL,
-                f"The ACLs between {src} and {dst} could not be fully "
-                f"evaluated:\n\n" + "\n".join(gaps), data=data)
+                CheckStatus.WARN,
+                "The ACLs on the underlay path could not be fully evaluated:"
+                "\n\n" + render_acl_section(
+                    header, path, blocked=denies, permitted=permits,
+                    unread=unevaluated),
+                data=data)
 
         if not names:
             return CheckResult(
                 CheckStatus.OK,
                 f"No ACL is applied on the underlay interfaces between "
-                f"{src} and {dst}, so nothing there can block the session.",
-                data=data)
+                f"{src} and {dst} (via {path}), so nothing there can block "
+                f"the session.", data=data)
 
-        detail = "\n".join(f"• {p}" for p in permits) or \
-            f"• Checked: {', '.join(names)}"
         return CheckResult(
             CheckStatus.OK,
-            f"No ACL on the path between {src} and {dst} blocks TCP/4342 "
-            f"or UDP/4342:\n\n{detail}", data=data)
+            "No ACL on the underlay path blocks the LISP session:\n\n"
+            + render_acl_section(header, path, blocked=denies,
+                                 permitted=permits, unread=unevaluated),
+            data=data)
 
 
 class LispSessionTrustSec(_SessionCheck):
