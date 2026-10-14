@@ -2329,39 +2329,53 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         if vnid.get("l2_vnid"):
             ctx.state["ap_wlc_l2_vnid"] = vnid["l2_vnid"]
 
+        # One bullet per fact, which is how every other check in the chain
+        # reads. The grouped headings and padded columns this used to print
+        # were the only block of their kind in the report.
+        # CIDR, which is how every other check in the chain prints a subnet.
+        # A mask that will not parse is printed as it was read rather than
+        # dropped -- it is still the value the controller reported.
+        subnet = "—"
+        if vnid.get("ip_address"):
+            mask = vnid.get("subnet") or ""
+            try:
+                import ipaddress
+                bits = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+                subnet = f"{vnid['ip_address']}/{bits}"
+            except (ValueError, ipaddress.AddressValueError):
+                subnet = f"{vnid['ip_address']}/{mask}" if mask \
+                    else str(vnid["ip_address"])
         lines = [
-            f"{name} is fabric-enabled on {self.hostname} and resolves to "
-            f"{len(planes)} control plane{'' if len(planes) == 1 else 's'}.",
+            f"{name} is fabric-enabled on {self.hostname} and registers to "
+            f"{len(planes)} control plane"
+            f"{'' if len(planes) == 1 else 's'}:",
             "",
-            "  Fabric",
-            f"    Fabric status:      {fabric_status or '—'}",
-            f"    RLOC:               {rloc or '—'}",
-            f"    Control plane name: {cp_name or '—'}",
-            "",
-            f"  L3-VNID {INFRA_VN_L3_VNID}",
-            f"    Mapping:            {vnid.get('name') or '—'}",
-            f"    Subnet:             {vnid.get('ip_address') or '—'}"
-            f" / {vnid.get('subnet') or '—'}",
-            f"    AP address:         {ap_ip or '— (not resolved)'}",
-            "",
-            "  Control planes",
+            f"• Fabric status: {fabric_status or '—'}",
+            f"• Controller RLOC: {rloc or '—'}",
+            f"• Control plane name: {cp_name or '—'}",
+            f"• L3-VNID {INFRA_VN_L3_VNID}: {vnid.get('name') or '—'}, "
+            f"subnet {subnet}",
+            f"• AP address: {ap_ip or '— (not resolved)'}",
         ]
         for plane in planes:
-            lines.append(f"    {plane['ip_address']:<16} {plane.get('status')}")
+            lines.append(
+                f"• Control plane {plane['ip_address']}: "
+                f"{plane.get('status') or '—'}")
 
         # A control plane that is down is a fabric fault, not a tool one: the
         # manifest's warn-and-continue rule applies, because the other plane
         # of the pair may still be carrying the registration.
         if down:
-            listed = ", ".join(f"{ip} ({st})" for ip, st in
-                               ctx.state["ap_wlc_cp_down"])
+            listed = ", ".join(ip for ip, _st in ctx.state["ap_wlc_cp_down"])
+            one = len(down) == 1
             return CheckResult(
                 CheckStatus.WARN,
                 "\n".join(lines) + "\n\n"
-                + f"{listed} {'is' if len(down) == 1 else 'are'} not Up. The "
-                  f"controller cannot register the AP's radio MAC there, so "
-                  f"that control plane holds no record of it — the session "
-                  f"flow below says why.",
+                + f"The controller cannot register the AP's radio MAC to "
+                  f"{listed}, so that control plane holds no record of it. "
+                  f"The session flow below says why "
+                  f"{'that session' if one else 'those sessions'} "
+                  f"{'is' if one else 'are'} down.",
                 data={"control_planes": addresses, "add_nodes": add_nodes})
         return CheckResult(CheckStatus.OK, "\n".join(lines),
                            data={"control_planes": addresses,
