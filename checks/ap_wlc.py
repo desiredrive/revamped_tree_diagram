@@ -2354,12 +2354,20 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         #
         # Only the matched ones: an unmatched control plane has no node to
         # draw to, and is named in the message instead.
+        # Labelled exactly as the edge's own control-plane links are, by
+        # `ApCpDiscovery` via `connect_to`/`edge_label`: the same
+        # relationship drawn the same way, so the canvas reads as one
+        # picture. The session state is NOT in the label for the same
+        # reason -- the edge's links do not carry it, and the state is
+        # already reported by the per-control-plane checks.
+        #
+        # These do not collide with the edge's: `connect_to` builds
+        # `<node>-edge` while `add_edges` builds `link-<sorted pair>`, so
+        # both the edge's link and the controller's render.
         cp_edges = [
             {"source": self.target_node_id, "target": nid,
-             "label": f"LISP Session ({status})" if status else "LISP Session"}
-            for nid, status in (
-                (cp_nodes.get(p["ip_address"]), (p.get("status") or "").strip())
-                for p in planes)
+             "label": "LISP Session"}
+            for nid in (cp_nodes.get(p["ip_address"]) for p in planes)
             if nid]
         # (RLOC, hostname, management IP) -- the three the session flow needs.
         ctx.state["ap_wlc_cp_planes"] = planes_out

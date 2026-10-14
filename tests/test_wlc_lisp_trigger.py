@@ -258,11 +258,8 @@ def test_a_control_plane_the_edge_never_saw_is_reported_not_guessed():
 def _edges(cp_nodes, planes):
     """The edge block of ApWlcFabricControlPlane, as it runs there."""
     return [
-        {"source": "wlc", "target": nid,
-         "label": f"LISP Session ({status})" if status else "LISP Session"}
-        for nid, status in (
-            (cp_nodes.get(p["ip_address"]), (p.get("status") or "").strip())
-            for p in planes)
+        {"source": "wlc", "target": nid, "label": "LISP Session"}
+        for nid in (cp_nodes.get(p["ip_address"]) for p in planes)
         if nid]
 
 
@@ -276,8 +273,9 @@ def test_the_controller_is_linked_to_the_control_planes_it_registers_to():
                            {"ip_address": "172.19.1.65", "status": "Down"}])
     assert [(e["source"], e["target"]) for e in edges] == [
         ("wlc", "apcp-1"), ("wlc", "apcp-2")]
-    assert edges[0]["label"] == "LISP Session (Up)"
-    assert edges[1]["label"] == "LISP Session (Down)"
+    # Labelled as the edge's own control-plane links are, so the same
+    # relationship reads the same way on the canvas.
+    assert {e["label"] for e in edges} == {"LISP Session"}
 
 
 def test_no_link_is_drawn_to_a_control_plane_with_no_node():
