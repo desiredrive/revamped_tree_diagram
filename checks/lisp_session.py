@@ -48,7 +48,7 @@ class LispSessionTarget:
     def __init__(self, eid, xtr_hostname, catc_name, iid=None, af=None,
                  vrf="default", vlan=None, control_planes=None, cp_nodes=None,
                  xtr_node_id="xtr", label=None, xtr_mgmtip=None,
-                 xtr_loopback=None):
+                 xtr_loopback=None, few=False):
         self.eid = eid
         self.xtr_hostname = xtr_hostname
         # Which device this flow reads. The AP chain's xtr_* state keys name
@@ -58,6 +58,16 @@ class LispSessionTarget:
         # under the controller's name. None means "the chain's xTR".
         self.xtr_mgmtip = xtr_mgmtip
         self.xtr_loopback = xtr_loopback
+        # Fabric Enabled Wireless: no EID identification phase.
+        #
+        # `singleETRLISPSessionOnlyFEW` drops it because a controller cannot
+        # answer it -- the radio MAC is a LISP database entry, never a
+        # switched MAC, so MATM has nothing; there is no access VLAN; and the
+        # instance cannot be resolved from a VLAN that does not exist. The
+        # two values that phase would have produced, the IID and the
+        # map-servers, are supplied by the caller instead. Everything below
+        # the head is the same flow either way.
+        self.few = few
         self.catc_name = catc_name
         self.iid = iid
         self.af = af                      # "ipv4" | "ethernet", None = derive
@@ -339,10 +349,25 @@ class LispMapServerConfiguration(_SessionCheck):
     name = "LISP Map-Server Configuration"
     running_note = "Reading the running configuration."
 
+    @staticmethod
+    def _few_map_servers(t):
+        """The map-servers the caller named, as plain addresses."""
+        out = []
+        for cp in t.control_planes:
+            out.append(cp[0] if isinstance(cp, (tuple, list)) else cp)
+        return out
+
     def run_session(self, ctx: RunContext) -> CheckResult:
         t = self.target
         self.target_node_id = t.xtr_node_id
         props = ctx.state.get("_lisp_session_eid_props")
+        if props is None and t.few:
+            # What `singleETRLISPSessionOnlyFEW` hands `eid_configuration`:
+            # `mapservers` is the only field the reader uses, and in FEW it
+            # comes from the caller rather than from a database entry.
+            from types import SimpleNamespace
+            props = SimpleNamespace(
+                mapservers=[{"map_server": ms} for ms in self._few_map_servers(t)])
         if props is None:
             return CheckResult(
                 CheckStatus.SKIP,
@@ -763,13 +788,21 @@ def lisp_session_checks(target: LispSessionTarget, map_servers=None):
     identification check discovers the map-servers, but too late to build
     checks from here, so a caller that wants the per-CP steps passes them in.
     """
-    checks = [
-        LispEidIdentification(target),
-        LispMapServerConfiguration(target),
-        LispGlobalSession(target),
-    ]
+    # FEW drops the EID identification head: see LispSessionTarget.few. The
+    # phase is unanswerable on a controller, and the two values it would have
+    # produced -- the IID and the map-servers -- are supplied by the caller.
+    checks = []
+    if not target.few:
+        checks.append(LispEidIdentification(target))
+    checks.append(LispMapServerConfiguration(target))
+    checks.append(LispGlobalSession(target))
 
     servers = list(map_servers or [])
+    if target.few and servers and not target.control_planes:
+        # The map-server configuration check reads them from the target; the
+        # caller passes them here, so mirror them across rather than making
+        # every FEW caller supply the same list twice.
+        target.control_planes = list(servers)
     if not servers:
         for cp in target.control_planes:
             host = getattr(cp, "hostname", None) or getattr(cp, "mgmtip", None) or cp

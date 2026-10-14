@@ -46,7 +46,8 @@ def test_a_down_control_plane_queues_the_flow_against_the_controller():
     assert "172.19.1.65" in r.message
     assert "3891.b70f.2600" in r.message
     # Three switch-side + thirteen per CP + one inter-CP + the verdict.
-    assert len(r.data["queue_checks"]) == 3 + 13 + 1 + 1
+    # Two switch-side, not three: FEW has no EID identification phase.
+    assert len(r.data["queue_checks"]) == 2 + 13 + 1 + 1
 
 
 def test_the_flow_reads_the_controller_not_the_edge():
@@ -69,7 +70,7 @@ def test_findings_land_on_the_control_plane_they_are_about():
     assert len(per_cp) == 14          # thirteen plus the inter-CP check
     switch_side = [c for c in r.data["queue_checks"]
                    if c.target_node_id == "wlc"]
-    assert len(switch_side) == 4      # the three plus the verdict
+    assert len(switch_side) == 3      # the two plus the verdict
 
 
 def test_the_node_is_known_before_the_check_runs():
@@ -136,3 +137,53 @@ def test_an_ambiguous_management_interface_skips_rather_than_guessing():
 
     assert r.status is CheckStatus.SKIP
     assert "management interface" in r.message
+
+
+# --------------------------------------------------------------------------
+# FEW: the flow without an EID identification phase.
+# --------------------------------------------------------------------------
+
+
+def test_the_controller_is_not_asked_to_identify_the_eid():
+    """A controller cannot answer that phase, and the live run said so:
+
+        Error: EID Identification - MAC Learning | The following MAC
+        3891.b70f.2600 is NOT found in the MAC Address Table for VLAN None.
+
+    The radio MAC is a LISP database entry, never a switched MAC, so MATM has
+    nothing to find; there is no access VLAN; and the instance cannot be
+    resolved from a VLAN that does not exist. `singleETRLISPSessionOnlyFEW`
+    drops the phase for exactly this reason.
+    """
+    from checks.lisp_session import LispEidIdentification
+
+    names = [type(c).__name__ for c in _run(_ctx()).data["queue_checks"]]
+    assert LispEidIdentification.__name__ not in names
+    assert names[0] == "LispMapServerConfiguration"
+
+
+def test_dropping_the_head_does_not_skip_the_map_server_configuration():
+    """The head's only consumer is `_lisp_session_eid_props`, and in FEW the
+    caller supplies what it would have produced. Without that the check would
+    skip, and the flow would lose the proxy-reply and authentication-key
+    reading for every control plane."""
+    from checks.lisp_session import LispMapServerConfiguration
+
+    chk = _run(_ctx()).data["queue_checks"][0]
+    assert isinstance(chk, LispMapServerConfiguration)
+
+    servers = LispMapServerConfiguration._few_map_servers(chk.target)
+    assert "172.19.1.65" in servers
+
+
+def test_the_edge_flow_still_identifies_the_eid():
+    """FEW is the controller's path only. The edge learns the AP's address in
+    its MAC table, and dropping the phase there would discard the check that
+    says whether the switch has anything to register at all."""
+    from checks.lisp_session import LispSessionTarget, lisp_session_checks
+
+    t = LispSessionTarget(eid="172.19.5.10", xtr_hostname="Edge2",
+                          catc_name="c", iid=4097, af="ipv4")
+    names = [type(c).__name__ for c in lisp_session_checks(
+        t, map_servers=[("172.19.1.65", "cp2", "172.19.1.65")])]
+    assert names[0] == "LispEidIdentification"
