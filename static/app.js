@@ -2008,12 +2008,16 @@ function handleEvent(msg) {
     case 'run_started':
       break;
     case 'check_started': {
-      const nodeId = msg.target_node_id || 'xtr';
+      // Through the alias map: a node merged into another (same device
+      // discovered a second time under a new role) keeps answering to the id
+      // the backend knew it by. Without this the check is filed against an id
+      // no node has, and disappears from the report.
+      const nodeId = resolveNodeId(msg.target_node_id) || 'xtr';
       appendCheck(nodeId, { name: msg.name, status: 'running', message: msg.note || '' });
       break;
     }
     case 'check_finished': {
-      let nodeId = msg.target_node_id || 'xtr';
+      let nodeId = resolveNodeId(msg.target_node_id) || 'xtr';
       // Merge first so subsequent relabel/tags/rloc land on the merged node.
       if (msg.merge_into && msg.merge_into.target) {
         const ok = mergeNodeInto(
