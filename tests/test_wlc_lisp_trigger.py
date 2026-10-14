@@ -22,7 +22,10 @@ def _ctx(**over):
         "ap_wlc_radio_mac": "3891.b70f.2600",
         "ap_wlc_l2_vnid": "8188",
         "ap_wlc_mgmtip": "10.31.136.74",
+        # The AP's RLOC (the edge's address) and the controller's WMI are
+        # different addresses; the flow must trace from the WMI.
         "ap_wlc_rloc": "172.19.1.68",
+        "ap_wlc_wmi": "10.31.136.74",
         "ap_wlc_cp_nodes": {"172.19.1.64": "wlccp-1", "172.19.1.65": "wlccp-2"},
         "catc_name": "mxc-dnac5",
         # The edge, which this flow must not read.
@@ -93,3 +96,43 @@ def test_an_unknown_radio_mac_skips_rather_than_guessing():
 def test_a_missing_instance_or_address_skips():
     assert _run(_ctx(ap_wlc_l2_vnid=None)).status is CheckStatus.SKIP
     assert _run(_ctx(ap_wlc_mgmtip="")).status is CheckStatus.SKIP
+
+
+# --------------------------------------------------------------------------
+# The address the controller registers FROM.
+# --------------------------------------------------------------------------
+
+
+def test_the_flow_traces_from_the_wmi_not_the_aps_rloc():
+    """`ap_wlc_rloc` is the AP's RLOC -- the edge's address -- read from
+    `show ap name <ap> config general`. The controller registers the radio MAC
+    from its wireless management interface instead.
+
+    Passing the AP's RLOC as the controller's aimed routing, MTU, the TCP
+    socket, the ACLs and TrustSec at the edge. Each answered plausibly for the
+    wrong box, which is why it reads as a finding rather than an error.
+    """
+    from checks.ap_wlc import ApWlcCpLispSessionTrigger
+
+    ctx = _ctx()
+    ctx.state["ap_wlc_wmi"] = "10.31.136.74"
+    ctx.state["ap_wlc_rloc"] = "172.19.1.68"        # the edge's
+    r = ApWlcCpLispSessionTrigger("wlc", "wlc-1").run_ap(ctx)
+
+    target = r.data["queue_checks"][0].target
+    assert target.xtr_loopback == "10.31.136.74"
+    assert target.xtr_loopback != ctx.state["ap_wlc_rloc"]
+
+
+def test_an_ambiguous_management_interface_skips_rather_than_guessing():
+    """`wmi_ip` returns None with zero or several interfaces, mirroring
+    lispsessiontroubleshooting.py:1839. Every check below traces from that
+    address, so a guess misdirects all of them silently."""
+    from checks.ap_wlc import ApWlcCpLispSessionTrigger
+
+    ctx = _ctx()
+    ctx.state["ap_wlc_wmi"] = None
+    r = ApWlcCpLispSessionTrigger("wlc", "wlc-1").run_ap(ctx)
+
+    assert r.status is CheckStatus.SKIP
+    assert "management interface" in r.message

@@ -2295,6 +2295,13 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         ctx.state["ap_cp_set"] = addresses
         ctx.state["ap_cp_name"] = cp_name
         ctx.state["ap_wlc_rloc"] = rloc
+        # The WMI, not `rloc` above: that field is the AP's RLOC -- the edge's
+        # address -- while the controller registers the radio MAC *from* its
+        # wireless management interface. Passing the AP's RLOC as the
+        # controller's aimed every path check below at the edge, and each one
+        # answered plausibly for the wrong box.
+        from wirelessmodules.wlc_cp_diagnostic import wmi_ip
+        ctx.state["ap_wlc_wmi"] = wmi_ip(self._info(ctx))
         ctx.state["ap_infra_l3_vnid"] = INFRA_VN_L3_VNID
 
         down = [p for p in planes
@@ -2351,7 +2358,7 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
             f"{'' if len(planes) == 1 else 's'}:",
             "",
             f"• Fabric status: {fabric_status or '—'}",
-            f"• Controller RLOC: {rloc or '—'}",
+            f"• AP's RLOC: {rloc or '—'}",
             f"• Control plane name: {cp_name or '—'}",
             f"• L3-VNID {INFRA_VN_L3_VNID}: {vnid.get('name') or '—'}, "
             f"subnet {subnet}",
@@ -2420,6 +2427,19 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
                 "is no EID to trace.")
 
         iid = ctx.state.get("ap_wlc_l2_vnid")
+        # No guess: `wmi_ip` returns None with zero or several management
+        # interfaces, and the WMI is the source RLOC every path check below
+        # is aimed from. Tracing from the wrong address answers for the wrong
+        # box without saying so.
+        wmi = (ctx.state.get("ap_wlc_wmi") or "").strip()
+        if not wmi:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — {self.hostname} has no single wireless management "
+                f"interface, so the address it registers the radio MAC from "
+                f"is ambiguous (see Management Interface). Every check below "
+                f"traces from that address.")
+
         mgmt = (ctx.state.get("ap_wlc_mgmtip") or "").strip()
         if not iid or not mgmt:
             return CheckResult(
@@ -2441,7 +2461,7 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
             # The controller, not the edge: without this the flow profiles
             # the chain's xTR and reports its fabric under this name.
             xtr_mgmtip=mgmt,
-            xtr_loopback=ctx.state.get("ap_wlc_rloc"),
+            xtr_loopback=wmi,
         )
 
         listed = ", ".join(f"{ip} ({state})" for ip, state in down)
@@ -2450,10 +2470,7 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
             f"The LISP session from {self.hostname} to {listed} is not up. "
             f"The controller registers {mac} to that control plane, so a "
             f"session that is down leaves the radio MAC unregistered there "
-            f"while every edge-side check still passes.\n\n"
-            f"The session flow runs against the controller to say why: its "
-            f"own database and map-server configuration, its sessions, and "
-            f"each control plane's path, configuration and counters.",
+            f"while every edge-side check still passes.",
             data={"queue_checks": lisp_session_checks(
                 target, map_servers=[(ip, ip, ip) for ip, _s in down])},
         )
