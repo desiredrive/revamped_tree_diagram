@@ -97,9 +97,14 @@ def test_down_peers_are_walked_by_their_rloc(both_sessions_down):
     assert "172.19.1.64" in servers and "172.19.1.65" in servers
 
 
-def test_an_unaccounted_peer_is_still_walked(monkeypatch):
-    """A session down to something the fabric does not list is itself worth
-    the flow -- it must not be silently dropped."""
+def test_a_peer_outside_the_aps_control_planes_is_named_not_walked(monkeypatch):
+    """A fabric edge peers with map-servers this AP never registers to.
+
+    A down session to one of those explains nothing about why THIS EID is
+    unregistered, and walking it spends a full per-control-plane pass on a
+    device the question does not involve. It is reported so the reading is
+    not silently dropped, and the flow does not run for it.
+    """
     from checks.ap_onboarding import ApLispSessionTrigger
 
     monkeypatch.setattr(
@@ -107,8 +112,24 @@ def test_an_unaccounted_peer_is_still_walked(monkeypatch):
         staticmethod(lambda ctx: [("10.9.9.9", "Init")]))
     ctx = _ctx()
     r = ApLispSessionTrigger().run_ap(ctx)
-    assert r.status is CheckStatus.WARN
+    assert r.status is CheckStatus.SKIP
     assert "10.9.9.9" in r.message
+    assert "not walked" in r.message
+    assert "queue_checks" not in (r.data or {})
+
+
+def test_a_down_peer_that_is_an_aps_control_plane_is_walked(monkeypatch):
+    """The other side of the same rule: a CP discovery resolved is walked."""
+    from checks.ap_onboarding import ApLispSessionTrigger
+
+    ctx = _ctx()
+    rloc = next(iter((ctx.state.get("ap_cp_rlocs") or {}).values()))
+    monkeypatch.setattr(
+        ApLispSessionTrigger, "_down_sessions",
+        staticmethod(lambda ctx: [(rloc, "Down")]))
+    r = ApLispSessionTrigger().run_ap(ctx)
+    assert r.status is CheckStatus.WARN
+    assert r.data["queue_checks"]
 
 
 def test_everything_healthy_skips(no_sessions_down):

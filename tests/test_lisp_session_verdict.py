@@ -247,3 +247,30 @@ def test_the_verdict_is_what_stops_a_total_outage(monkeypatch):
     r = LispSessionVerdict(_target()).run_session(ctx)
     assert r.status is CheckStatus.FAIL
     assert ctx.state[_target().key(STOP_KEY)]
+
+
+def test_a_control_plane_without_the_instance_warns_rather_than_failing(monkeypatch):
+    """`lisp_id` missing means the CP serves no such instance.
+
+    That is a fabric fault -- a statement about the device -- not the tool
+    failing to work, so it warns and the remaining control planes are still
+    walked. It reached the user as "KeyError: 'lisp_id'", which named the
+    parser key and not the condition.
+    """
+    import checks.lisp_session as m
+
+    monkeypatch.setattr(m, "_cp_device",
+                        lambda ctx, h, c, mgmt=None: types.SimpleNamespace(
+                            profiled_device=types.SimpleNamespace(hostname=h)))
+
+    class Boom:
+        def __init__(self, *a): pass
+        def eidStatistics(self, af, svc): raise KeyError("lisp_id")
+    monkeypatch.setattr("routingmodules.lisp.LISPInstanceStatus", Boom)
+
+    ctx = types.SimpleNamespace(service=object(), payload={}, state={})
+    r = m.LispControlPlaneStatistics(_target(), "cp1").run_session(ctx)
+
+    assert r.status is CheckStatus.WARN
+    assert "4097" in r.message
+    assert "KeyError" not in r.message

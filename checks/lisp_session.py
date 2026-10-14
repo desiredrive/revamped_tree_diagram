@@ -629,6 +629,20 @@ class LispControlPlaneStatistics(_SessionCheck):
                 CheckStatus.FAIL,
                 f"Reading the LISP counters on {self.cp_hostname} stopped:"
                 f"\n\n{e}", data={"cp": self.cp_hostname})
+        except KeyError as e:
+            # The parsed output carried no LISP instance -- `lisp_id` is the
+            # key the statistics walk indexes by. That is a statement about
+            # the device, not a tool failure: this control plane has no LISP
+            # instance matching the one the AP registers into. A fabric fault
+            # is a warning, so the remaining control planes still get walked.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{self.cp_hostname} returned no LISP instance {t.iid} when "
+                f"its counters were read (missing {e}), so it cannot be told "
+                f"whether registrations for {t.label} are arriving. A control "
+                f"plane with no instance {t.iid} cannot accept them at all — "
+                f"check that it serves this instance.",
+                data={"cp": self.cp_hostname})
         except BaseException as e:
             return CheckResult(
                 CheckStatus.FAIL,

@@ -4418,15 +4418,41 @@ class ApLispSessionTrigger(_ApCheck):
                           mgmts.get(host) or host))
 
         # Trigger 1 names its control planes by RLOC -- the peer address the
-        # session is to -- not by hostname, so they are mapped back to the
-        # CP they belong to. A peer that matches no known CP is still walked
-        # under its own address: a session down to something the fabric does
-        # not account for is itself worth the flow.
+        # session is to -- not by hostname, so they are mapped back to the CP
+        # they belong to.
+        #
+        # Only the AP's own control planes are walked. A fabric edge peers
+        # with map-servers this AP never registers to -- another site's
+        # control plane, a different instance -- and a down session to one of
+        # those explains nothing about why THIS EID is unregistered, while
+        # costing a full per-CP walk against a device the question does not
+        # involve. Control Plane Discovery already resolved the set; peers
+        # outside it are named in the message instead.
+        unrelated = []
         if not pairs:
             by_rloc = {rloc: host for host, rloc in rlocs.items()}
-            for peer, _state in down:
-                host = by_rloc.get(peer, peer)
+            for peer, state in down:
+                host = by_rloc.get(peer)
+                if host is None:
+                    unrelated.append((peer, state))
+                    continue
                 pairs.append((peer, host, mgmts.get(host) or peer))
+
+        aside = ""
+        if unrelated:
+            listed = ", ".join(f"{peer} ({state})" for peer, state in unrelated)
+            aside = (f"\n\nAlso down, but not walked: {listed} — the switch "
+                     f"peers with these, but they are not control planes this "
+                     f"AP registers to, so they cannot explain a missing "
+                     f"registration for {ip}.")
+
+        # Every down session belongs to some other fabric purpose: there is
+        # nothing here to explain this AP's registration path.
+        if not pairs:
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — every control plane this AP registers to holds "
+                f"its registration and has its session up.{aside}")
 
         checks = lisp_session_checks(target, map_servers=pairs)
         if missing:
@@ -4434,14 +4460,15 @@ class ApLispSessionTrigger(_ApCheck):
             why = (f"{names} {'does' if len(missing) == 1 else 'do'} not hold "
                    f"a registration for {ip}")
         else:
-            names = ", ".join(f"{peer} ({state})" for peer, state in down)
+            names = ", ".join(f"{peer} ({state})" for peer, _s in down
+                              if (peer, _s) not in unrelated)
             why = (f"the LISP session to {names} is not up, though the "
                    f"registration for {ip} is still held")
         return CheckResult(
             CheckStatus.WARN,
             f"{why}, so the LISP session flow runs to say why: the switch's "
             f"own database and map-server configuration, its sessions, and "
-            f"each control plane's configuration and counters.",
+            f"each control plane's configuration and counters.{aside}",
             data={"queue_checks": checks},
         )
 
