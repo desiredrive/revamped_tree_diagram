@@ -43,8 +43,8 @@ if ! ls "${STAGE}/radkit-wheels/"cisco_radkit_*.whl > /dev/null 2>&1; then
 fi
 
 # Drop a SUPPORTED-PLATFORMS note so TAC users know what this beta covers.
-cat > "${STAGE}/SUPPORTED-PLATFORMS.txt" <<'EOF'
-SDA Pathfinder 1.0.0-beta.2 — supported platforms
+cat > "${STAGE}/SUPPORTED-PLATFORMS.txt" <<EOF
+SDA Pathfinder ${VERSION} — supported platforms
 ==================================================
 
 Tested:

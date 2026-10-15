@@ -4,6 +4,60 @@ All notable changes to SDA Pathfinder are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.9] — 2026-10-14
+
+### Added
+- **AP onboarding troubleshooting flow.** A new scenario that traces an
+  access point from the switchport it is plugged into through to the
+  SSIDs it broadcasts, on the web check engine. The flow walks the
+  wired access port, the AP's address and gateway against INFRA_VN,
+  the CAPWAP path to its controllers, the LISP sessions carrying its
+  registration, the access tunnel the edge builds for it, and what the
+  controller says it is serving. Each validation reports on its own
+  so one failure does not hide the ones below it.
+- **Access tunnel validation on the edge.** The tunnel statistics, the
+  platform's tunnel ceiling, the L2 LISP counters that explain a tunnel
+  that was asked for and never appeared, and the interface descriptor
+  block IOS built for it. The tunnel is drawn on the topology as a
+  VXLAN overlay alongside the physical port when it is up.
+- **SSID and BSSID verification on the controller.** Which WLANs exist,
+  which are fabric-enabled, the policy tag the AP wears, the fabric and
+  non-fabric SSIDs that tag carries, and what the AP is operationally
+  broadcasting per radio with each BSSID. A WLAN the AP broadcasts that
+  is not fabric-enabled is reported: a client joining it has no fabric
+  data path, and nothing else in the flow surfaces that.
+- **LISP session flow** ported to the check engine, including the
+  controller's own sessions to its control planes.
+- **Cloud entrypoint**, container image and OpenShift manifests, with a
+  TLS terminator for single-host deployments.
+
+### Fixed
+- **A tunnel's hardware interface descriptor block was reported missing
+  on devices that had one.** The hardware block was matched to the
+  software block by interface name, but the two commands disagree on
+  spelling -- `show access-tunnel statistics` abbreviates it to `Ac0`
+  while the IDB table writes `AccessTunnel0` -- so the join never
+  matched. They are now joined on the shared hardware index.
+- **The controller's WLAN tables were misread when an SSID contained a
+  space.** Genie's `show wlan summary` parser splits each row on
+  whitespace, which shifts every field after the first on an SSID like
+  `MX EWA SDA`. These tables are now cut from their header offsets.
+- Several shared forwarding modules silently dropped device data.
+- Unreadable ACLs no longer skip every check below them.
+- The RADKit key password is no longer defaulted inside a committed
+  script. It must now come from the environment.
+
+### Changed
+- An AP IP marked with `*` by the edge is reported, not graded. The
+  device defines it as a past address change, which says nothing about
+  whether the tunnel is healthy now.
+- A radio serving no WLANs is noted rather than graded. FRA legitimately
+  assigns the Monitor role to a flexible radio when coverage is already
+  maximal, and a monitor radio advertises no BSSIDs.
+- The NETCONF path was removed. RADKit reports NETCONF unavailable on
+  every device in this fabric, so the reads it carried were ported to
+  CLI.
+
 ## [1.0.0-beta.8] — 2026-06-04
 
 ### Fixed
