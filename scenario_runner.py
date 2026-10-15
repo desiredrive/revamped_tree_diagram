@@ -123,7 +123,7 @@ def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
         # Pass through any data the check wanted the UI to act on.
         for key in ("node_relabel", "relabel_nodes", "add_endpoint", "add_nodes",
                     "add_edges", "node_rloc", "merge_into", "mark_fabric_wlc",
-                    "mark_fabric_ap", "lisp_session_state"):
+                    "mark_fabric_ap", "lisp_session_state", "tag_nodes"):
             if result.data.get(key):
                 event[key] = result.data[key]
         # node_tags is meaningful when empty (it clears the tags), so it is

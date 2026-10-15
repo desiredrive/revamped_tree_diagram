@@ -439,7 +439,19 @@ class ApWlcApStateProfile(_ApCheck):
             # block because it is gated on the access tunnel that
             # ApAccessTunnelStatistics leaves in state -- without a tunnel
             # there is no fabric data path and the question does not arise.
-            queued.append(ApWlcSsidMapping(hostname, node))
+            # Three checks, not one: what the controller offers, which of
+            # those are fabric-enabled, and what the AP is actually on air
+            # with. Each gets its own badge so a fault in one does not
+            # colour the other two.
+            #
+            # The order is load-bearing, and they are coupled through
+            # `ctx.state` rather than by being one function body: the first
+            # publishes the WLAN-id and profile maps the other two join
+            # against, and the second publishes the fabric set the third
+            # groups by.
+            queued.append(ApWlcWlans(hostname, node))
+            queued.append(ApWlcFabricWlans(hostname, node))
+            queued.append(ApWlcApBroadcastWlans(hostname, node))
         # Last: every controller has been looked at by the time this runs.
         # After every controller's ApWlcControlPlanes has written its
         # INFRA_VN state, which is what this grades.
@@ -2832,35 +2844,219 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
         )
 
 
-class ApWlcSsidMapping(_PerWlcCheck):
-    """The SSIDs this AP actually carries, each with its BSSID.
+class _ApWlanCheck(_PerWlcCheck):
+    """Shared gate for the three WLAN checks.
 
-    Gated on the access tunnel being up: until the AP has a tunnel on the
-    edge there is no fabric data path for a client to use, so what the
-    controller advertises is not yet the question being asked.
+    All three are gated on the access tunnel being up: until the AP has a
+    tunnel on the edge there is no fabric data path for a client to use, so
+    what the controller advertises is not yet the question being asked.
 
-    Three reads, each answering a different question:
-
-    `show wlan summary`      every WLAN the controller offers
-    `show ap name <ap> wlan dot11 24ghz` / `5ghz`
-                             the WLANs this AP is broadcasting, with BSSIDs
-    `show fabric wlan summary`
-                             which of those WLANs are fabric-enabled
-
-    `show fabric ap summary` is deliberately NOT read: it repeats what
-    `show ap summary` already established for this AP, and the access
-    tunnel this check is gated on already implies the controller treats it
-    as a fabric AP.
-
-    Radios are deliberately not graded: the user settled that slot usage and
-    per-band differences are out of scope for this flow.
+    Written once here rather than three times: the two SKIP conditions are
+    the same question, and three copies drift.
     """
 
-    aspect = "SSID mapping"
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        if not (ctx.state.get("ap_access_tunnel") or {}):
+            return CheckResult(
+                CheckStatus.SKIP,
+                "The AP has no access tunnel on the edge, so its SSID "
+                "mapping on the controller is not yet the question.")
 
-    #: The band commands. Both are read because an AP carrying a WLAN on one
-    #: band and not the other is still carrying it.
-    _BANDS = (("2.4GHz", "24ghz"), ("5GHz", "5ghz"))
+        ap_name = ctx.state.get("ap_wlc_ap_name")
+        if not ap_name:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "The AP's name on this controller is not known, so its "
+                "per-AP WLAN mapping cannot be read.")
+
+        return self.run_wlan(ctx, ap_name)
+
+    def run_wlan(self, ctx: RunContext, ap_name: str) -> CheckResult:
+        raise NotImplementedError
+
+
+class ApWlcWlans(_ApWlanCheck):
+    """Every WLAN the controller offers.
+
+    The first of three: this is the catalogue the other two join against.
+    `show wlan summary` is the only read that carries both the WLAN id and
+    the profile name, which is what lets the AP's on-air rows (named by
+    profile) be matched to the fabric list (named by id).
+    """
+
+    aspect = "WLANs"
+    running_note = "Reading the controller's WLANs…"
+
+    def run_wlan(self, ctx: RunContext, ap_name: str) -> CheckResult:
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import parse_wlan_summary
+
+        try:
+            raw = get_any_single_output(
+                self.hostname, "show wlan summary", ctx.service)
+        except BaseException as e:
+            from checks.shared import _legacy_fail
+            return _legacy_fail(e, "show wlan summary")
+
+        wlans = parse_wlan_summary(raw)
+        data = {"wlc": self.hostname, "ap_name": ap_name, "wlans": wlans}
+
+        # Hostname-keyed: the flow loops over every Fabric WLC at the site,
+        # and a flat key would be clobbered by the second controller.
+        #
+        # WLAN ids are normalised to str here, once, at the seam. The two
+        # parsers disagree -- `parse_wlan_summary` yields int, while
+        # `parse_fabric_wlan_summary` yields str -- so every join between
+        # them otherwise needs its own cast, and one missed cast silently
+        # drops a WLAN from the fabric/non-fabric split rather than erroring.
+        ctx.state.setdefault("ap_wlc_wlans", {})[self.hostname] = wlans
+        ctx.state.setdefault("ap_wlc_wlans_by_id", {})[self.hostname] = {
+            str(w["wlan_id"]): w for w in wlans}
+        # Same normalisation as `by_id`: this map is what the on-air rows
+        # reach the fabric list through, so its ids must compare equal.
+        ctx.state.setdefault("ap_wlc_wlans_by_prof", {})[self.hostname] = {
+            w["profile_name"]: dict(w, wlan_id=str(w["wlan_id"]))
+            for w in wlans}
+
+        lines = [f"• WLANs on {self.hostname}: {len(wlans)}"]
+        for w in wlans:
+            lines.append(
+                f"    {w['wlan_id']}: {w['ssid']}  [{w['status']}]  "
+                f"{w['security']}")
+
+        # No finding here by design. A controller offering nothing is
+        # already caught downstream -- the AP broadcasts no SSIDs, or the
+        # policy tag carries none -- and a new warning here would say the
+        # same thing a second time on a different badge.
+        return CheckResult(
+            CheckStatus.OK,
+            f"{self.hostname} offers {len(wlans)} WLAN"
+            f"{'' if len(wlans) == 1 else 's'}.\n\n" + "\n".join(lines),
+            data)
+
+
+class ApWlcFabricWlans(_ApWlanCheck):
+    """Which of the controller's WLANs are fabric-enabled.
+
+    A WLAN can be UP on the controller and still have no fabric data path,
+    and nothing else in the flow would show that -- so this is not
+    redundant with the WLAN list before it.
+
+    `show fabric ap summary` is deliberately NOT read: it repeats the name,
+    MACs, address and Registered state that `show ap summary` has already
+    established, and the one fabric-specific fact it carries -- that the
+    controller treats this AP as a fabric AP -- is already implied by the
+    access tunnel these checks are gated on.
+    """
+
+    aspect = "Fabric Enabled WLANs"
+    running_note = "Reading the controller's fabric-enabled WLANs…"
+
+    def run_wlan(self, ctx: RunContext, ap_name: str) -> CheckResult:
+        from radkit_cli import get_any_single_output
+        from wirelessmodules.accesspointinfo import parse_fabric_wlan_summary
+
+        if self.hostname not in (ctx.state.get("ap_wlc_wlans") or {}):
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — the controller's WLAN list was not read "
+                "(see WLC WLANs).")
+
+        try:
+            fraw = get_any_single_output(
+                self.hostname, "show fabric wlan summary", ctx.service)
+        except BaseException:
+            fraw = None
+
+        if not fraw:
+            # SKIP, deliberately -- not FAIL and not WARN.
+            #
+            # Not FAIL: `_ApCheck.run` sets `ap_stop` on any FAIL, which
+            # would skip the AP's own broadcast check behind this one. A
+            # controller that will not answer this command is not a reason
+            # to stop reading what the AP is on air with.
+            #
+            # Not WARN: the manifest reserves that for a fabric fault, and
+            # an unanswered command is not evidence of one.
+            #
+            # The state key is left UNSET, which is the signal the next
+            # check tests for: it declines to split fabric from non-fabric
+            # rather than calling everything non-fabric on a missing read.
+            return CheckResult(
+                CheckStatus.SKIP,
+                f"Skipped — {self.hostname} did not answer `show fabric "
+                f"wlan summary`, so which WLANs are fabric-enabled is not "
+                f"known. The SSIDs the AP is broadcasting are still read "
+                f"and reported; they are simply not grouped by fabric "
+                f"membership.")
+
+        fab = parse_fabric_wlan_summary(fraw)
+        wlans = fab["wlans"]
+        data = {"wlc": self.hostname, "ap_name": ap_name,
+                "fabric_wlans": wlans}
+
+        # Published only on a successful read. Absence is the sentinel --
+        # never set this to None or [] on failure, or the check below reads
+        # "no WLAN is fabric-enabled" from a command that never answered.
+        ctx.state.setdefault("ap_wlc_fabric_wlans", {})[self.hostname] = wlans
+        ctx.state.setdefault("ap_wlc_fabric_wlan_ids", {})[self.hostname] = {
+            w["wlan_id"] for w in wlans}
+        ctx.state.setdefault(
+            "ap_wlc_fabric_wlan_profiles", {})[self.hostname] = {
+                w["profile_name"] for w in wlans}
+
+        lines = [f"• Fabric-enabled WLANs on {self.hostname}: {len(wlans)}"]
+        for w in wlans:
+            lines.append(f"    {w['wlan_id']:<4} {w['ssid']}  ({w['status']})")
+
+        if not wlans:
+            # The controller is fabric-enabled -- the AP has an access
+            # tunnel -- but offers no fabric WLAN, so there is nothing a
+            # fabric client could join.
+            return CheckResult(
+                CheckStatus.WARN,
+                "\n".join(lines) + f"\n\n  ⚠ {self.hostname} has no "
+                f"fabric-enabled WLANs, so no SSID on {ap_name} has a "
+                f"fabric data path.", data)
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"{self.hostname} has {len(wlans)} fabric-enabled WLAN"
+            f"{'' if len(wlans) == 1 else 's'}.\n\n" + "\n".join(lines),
+            data)
+
+
+class ApWlcApBroadcastWlans(_ApWlanCheck):
+    """What the AP is actually on air with, grouped by fabric membership.
+
+    The third of three. The first two establish what the controller offers
+    and which of those are fabric-enabled; this one answers what the AP is
+    really beaconing, which is the question a client's experience depends
+    on.
+
+    `show ap wlan summary` is read rather than the two
+    `show ap name <ap> wlan dot11 <band>` commands it replaces: it carries
+    the same BSSID-per-WLAN mapping plus `AP WLAN State`, which is the
+    operational answer -- whether the AP is really beaconing that WLAN on
+    that radio, not merely configured to. Genie has no parser for it; the
+    parser index was checked.
+
+    Radios are deliberately not graded: the user settled that slot usage
+    and per-band differences are out of scope for this flow.
+    """
+
+    aspect = "AP Broadcasted WLANs"
+    running_note = "Reading what the AP is broadcasting…"
+
+    #: The AP's node on the canvas. The same literal `mark_fabric_ap` uses.
+    AP_NODE_ID = "ap"
+
+    def __init__(self, hostname: str, node_id: str):
+        super().__init__(hostname, node_id)
+        # Deliberately not the `WLC <aspect> — <host>` template: this check
+        # is about the AP, not the controller it is joined to.
+        self.name = (f"AP Broadcasted WLANs (Fabric and Non Fabric) "
+                     f"— {hostname}")
 
     def _radio_roles(self, ctx, ap_name):
         """`Radio Role` and `Radio Role Op` per 5GHz slot.
@@ -2898,52 +3094,48 @@ class ApWlcSsidMapping(_PerWlcCheck):
             }
         return out
 
-    def run_ap(self, ctx: RunContext) -> CheckResult:
-        if not (ctx.state.get("ap_access_tunnel") or {}):
-            return CheckResult(
-                CheckStatus.SKIP,
-                "The AP has no access tunnel on the edge, so its SSID "
-                "mapping on the controller is not yet the question.")
+    @staticmethod
+    def _row_line(r, with_band):
+        """One on-air row. The band is a column when the rows are grouped by
+        fabric membership instead of by radio, so no per-radio detail is
+        lost in the regrouping."""
+        live = r["state"].lower() == "enabled"
+        mark = "✓" if live else "·"
+        band = f"{(r['capabilities'] or '—'):<9} " if with_band else ""
+        return (
+            f"    {mark} {r['ssid']:<16} {band}BSSID {r['bssid']}  "
+            f"{r['state']}"
+            + (f"  up {r['wlan_uptime']}" if live else "")
+            + (f"  {r['client_count']} clients"
+               if r["client_count"] not in ("", "0") else ""))
 
-        ap_name = ctx.state.get("ap_wlc_ap_name")
-        if not ap_name:
-            return CheckResult(
-                CheckStatus.SKIP,
-                "The AP's name on this controller is not known, so its "
-                "per-AP WLAN mapping cannot be read.")
-
+    def run_wlan(self, ctx: RunContext, ap_name: str) -> CheckResult:
         from radkit_cli import get_any_single_output
-        from wirelessmodules.accesspointinfo import (
-            parse_ap_wlan_dot11, parse_wlan_summary)
+        from wirelessmodules.accesspointinfo import parse_ap_wlan_summary
 
         data = {"wlc": self.hostname, "ap_name": ap_name}
         lines = []
         findings = []
 
-        # Every WLAN the controller offers.
-        try:
-            raw = get_any_single_output(
-                self.hostname, "show wlan summary", ctx.service)
-        except BaseException as e:
-            from checks.shared import _legacy_fail
-            return _legacy_fail(e, "show wlan summary")
-        wlans = parse_wlan_summary(raw)
-        by_id = {w["wlan_id"]: w for w in wlans}
-        data["wlans"] = wlans
-        lines.append(f"• WLANs on {self.hostname}: {len(wlans)}")
-        for w in wlans:
-            lines.append(
-                f"    {w['wlan_id']}: {w['ssid']}  [{w['status']}]  "
-                f"{w['security']}")
+        # The catalogue, from the first check. Absent only if that read
+        # failed -- the id-based joins below are impossible without it, but
+        # the on-air rows are still worth reporting, so this degrades
+        # rather than skipping.
+        by_id = (ctx.state.get("ap_wlc_wlans_by_id") or {}).get(
+            self.hostname)
+        by_prof = (ctx.state.get("ap_wlc_wlans_by_prof") or {}).get(
+            self.hostname)
+        known_wlans = by_id is not None and by_prof is not None
 
-        # What this AP is actually broadcasting, with the operational state
-        # per radio. `show ap wlan summary` is read instead of the two
-        # `show ap name <ap> wlan dot11 <band>` commands it replaces: it
-        # carries the same BSSID-per-WLAN mapping plus `AP WLAN State`,
-        # which is the operational answer -- whether the AP is really
-        # beaconing that WLAN on that radio, not merely configured to.
-        # Genie has no parser for it; the parser index was checked.
-        from wirelessmodules.accesspointinfo import parse_ap_wlan_summary
+        # Fabric membership, from the second check. ABSENCE is the signal:
+        # when that command went unanswered the key is unset, and the
+        # fabric/non-fabric grouping is not attempted at all. Grouping
+        # anyway would put every SSID under "Non-fabric" and state as a
+        # finding something no command ever reported.
+        fab_ids = (ctx.state.get("ap_wlc_fabric_wlan_ids") or {}).get(
+            self.hostname)
+        known_fabric = fab_ids is not None
+
         try:
             raw = get_any_single_output(
                 self.hostname, "show ap wlan summary", ctx.service)
@@ -2953,32 +3145,61 @@ class ApWlcSsidMapping(_PerWlcCheck):
         ap_rows = parse_ap_wlan_summary(raw, ap_name=ap_name)
         data["ap_wlan_rows"] = ap_rows
 
-        # Grouped by radio. `Physical Capabilities` carries the band --
-        # there is no slot column -- and the same WLAN has a DIFFERENT
-        # BSSID on each radio, so one BSSID per SSID would be wrong.
+        # Grouped by radio internally regardless of how it is printed:
+        # the dark-radio note below is computed from this, and the same
+        # WLAN has a DIFFERENT BSSID on each radio, so one BSSID per SSID
+        # would be wrong.
         carried, broadcasting = set(), set()
         by_radio = {}
         for r in ap_rows:
             by_radio.setdefault(r["capabilities"] or "—", []).append(r)
-        lines.append("")
-        for radio in sorted(by_radio):
-            rows = by_radio[radio]
-            on = sum(1 for r in rows if r["state"].lower() == "enabled")
-            lines.append(f"• {radio}: {on} of {len(rows)} broadcasting")
-            for r in rows:
-                live = r["state"].lower() == "enabled"
-                carried.add(r["wlan_profile"])
-                if live:
-                    broadcasting.add(r["wlan_profile"])
-                mark = "✓" if live else "·"
-                lines.append(
-                    f"    {mark} {r['ssid']:<16} BSSID {r['bssid']}  "
-                    f"{r['state']}"
-                    + (f"  up {r['wlan_uptime']}" if live else "")
-                    + (f"  {r['client_count']} clients"
-                       if r["client_count"] not in ("", "0") else ""))
+            carried.add(r["wlan_profile"])
+            if r["state"].lower() == "enabled":
+                broadcasting.add(r["wlan_profile"])
         data["carried_profiles"] = sorted(carried)
         data["broadcasting_profiles"] = sorted(broadcasting)
+
+        def _is_fabric(row):
+            """A row is fabric iff its profile resolves to a WLAN id that
+            the fabric list holds. Profile name is the only field
+            `show ap wlan summary` and `show wlan summary` share."""
+            w = (by_prof or {}).get(row["wlan_profile"])
+            return bool(w) and str(w["wlan_id"]) in fab_ids
+
+        on = sum(1 for r in ap_rows if r["state"].lower() == "enabled")
+        bands = ", ".join(sorted(by_radio)) or "—"
+        lines.append(f"• {ap_name} on air: {on} of {len(ap_rows)} BSSIDs "
+                     f"enabled across {bands}")
+
+        if known_fabric and known_wlans:
+            # The two grouped lists.
+            fab_rows = [r for r in ap_rows if _is_fabric(r)]
+            non_rows = [r for r in ap_rows if not _is_fabric(r)]
+            lines.append("")
+            lines.append("  Fabric SSIDs")
+            lines.extend([self._row_line(r, True) for r in fab_rows]
+                         or ["    —"])
+            lines.append("  Non-fabric SSIDs")
+            lines.extend([self._row_line(r, True) for r in non_rows]
+                         or ["    —"])
+        else:
+            # Fall back to the per-radio listing. Not a lesser view -- it
+            # is the only honest one when fabric membership was not read,
+            # because every row would otherwise be called non-fabric.
+            lines.append("")
+            for radio in sorted(by_radio):
+                rows = by_radio[radio]
+                live = sum(1 for r in rows
+                           if r["state"].lower() == "enabled")
+                lines.append(f"• {radio}: {live} of {len(rows)} broadcasting")
+                lines.extend(self._row_line(r, False) for r in rows)
+            if not known_fabric:
+                lines.append("")
+                lines.append("• Fabric membership was not read, so the "
+                             "SSIDs are not grouped by it.")
+            if not known_wlans:
+                lines.append("• The controller's WLAN list was not read, so "
+                             "the WLAN-id joins are not made.")
 
         # A radio serving nothing is NOT graded. Cisco's RRM does take
         # radios out of client service: FRA assigns the Monitor role to a
@@ -3022,79 +3243,52 @@ class ApWlcSsidMapping(_PerWlcCheck):
                 lines.append("• Radios not serving clients (not a fault):")
                 lines.extend(notes)
 
-        # Mapped back to WLAN ids for the fabric join below, which works in
-        # ids. The join is on the profile name because that is the only
-        # field `show ap wlan summary` and `show wlan summary` share.
-        by_prof = {w["profile_name"]: w for w in wlans}
-        carried = {by_prof[p]["wlan_id"] for p in carried if p in by_prof}
-        data["carried_wlan_ids"] = sorted(carried)
-        any_rows = bool(broadcasting)
+        # Mapped back to WLAN ids for the findings below, which work in ids.
+        carried_ids = set()
+        if known_wlans:
+            carried_ids = {str(by_prof[p]["wlan_id"]) for p in carried
+                           if p in by_prof}
+            data["carried_wlan_ids"] = sorted(carried_ids)
+        ctx.state.setdefault(
+            "ap_wlc_broadcasting_profiles", {})[self.hostname] = sorted(
+                broadcasting)
+        ctx.state.setdefault(
+            "ap_wlc_carried_wlan_ids", {})[self.hostname] = sorted(carried_ids)
 
-        if not any_rows:
+        if not broadcasting:
             findings.append(
                 f"  ⚠ {ap_name} is broadcasting no SSIDs on any radio, "
                 f"although it has an access tunnel on the edge. A client "
                 f"has nothing to associate to.")
 
-        # A WLAN the AP carries that the controller does not list is a real
-        # inconsistency between the two reads, not a band question.
-        unknown = sorted(w for w in carried if w not in by_id)
-        if unknown:
-            data["unknown_wlan_ids"] = unknown
-            findings.append(
-                f"  ⚠ {ap_name} is broadcasting WLAN "
-                f"{', '.join(str(u) for u in unknown)}, which "
-                f"{self.hostname} does not list in its WLAN summary.")
-
-        # A WLAN that is administratively down should not be on air.
-        down = sorted(w for w in carried
-                      if (by_id.get(w, {}).get("status") or "").upper()
-                      not in ("UP", ""))
-        if down:
-            data["down_wlan_ids"] = down
-            findings.append(
-                f"  ⚠ {ap_name} is broadcasting WLAN "
-                f"{', '.join(str(d) for d in down)}, which the controller "
-                f"reports as not UP.")
-
-        # Which of those WLANs are fabric-enabled. `show fabric ap summary`
-        # was considered for this and dropped: it repeats the name, MACs,
-        # address and Registered state that `show ap summary` has already
-        # established, and the one fabric-specific fact it carries -- that
-        # the controller treats this AP as a fabric AP -- is already implied
-        # by the access tunnel this check is gated on. The WLAN side is not
-        # redundant: a WLAN can be UP on the controller and still have no
-        # fabric data path, and nothing read so far would show that.
-        try:
-            fraw = get_any_single_output(
-                self.hostname, "show fabric wlan summary", ctx.service)
-        except BaseException:
-            # A controller that will not answer this is not a fabric fault
-            # and must not mask the SSID findings above.
-            fraw = None
-        if fraw:
-            from wirelessmodules.accesspointinfo import (
-                parse_fabric_wlan_summary)
-            fab = parse_fabric_wlan_summary(fraw)
-            data["fabric_wlans"] = fab["wlans"]
-            fab_ids = {w["wlan_id"] for w in fab["wlans"]}
-            lines.append("")
-            lines.append(f"• Fabric-enabled WLANs on {self.hostname}: "
-                         f"{len(fab['wlans'])}")
-            if not fab["wlans"]:
-                # The controller is fabric-enabled -- the AP has an access
-                # tunnel -- but offers no fabric WLAN, so there is nothing
-                # a fabric client could join.
+        if known_wlans:
+            # A WLAN the AP carries that the controller does not list is a
+            # real inconsistency between the two reads, not a band question.
+            unknown = sorted(w for w in carried_ids if w not in by_id)
+            if unknown:
+                data["unknown_wlan_ids"] = unknown
                 findings.append(
-                    f"  ⚠ {self.hostname} has no fabric-enabled WLANs, so "
-                    f"no SSID on {ap_name} has a fabric data path.")
-            for w in fab["wlans"]:
-                lines.append(f"    {w['wlan_id']:<4} {w['ssid']}  "
-                             f"({w['status']})")
-            # The join that matters: the AP is broadcasting it, the
-            # controller offers it, but it is not fabric-enabled, so a
-            # client on it has no path over the access tunnel.
-            nonfab = sorted(i for i in carried if str(i) not in fab_ids)
+                    f"  ⚠ {ap_name} is broadcasting WLAN "
+                    f"{', '.join(str(u) for u in unknown)}, which "
+                    f"{self.hostname} does not list in its WLAN summary.")
+
+            # A WLAN that is administratively down should not be on air.
+            down = sorted(w for w in carried_ids
+                          if (by_id.get(w, {}).get("status") or "").upper()
+                          not in ("UP", ""))
+            if down:
+                data["down_wlan_ids"] = down
+                findings.append(
+                    f"  ⚠ {ap_name} is broadcasting WLAN "
+                    f"{', '.join(str(d) for d in down)}, which the "
+                    f"controller reports as not UP.")
+
+        # The join that matters: the AP is broadcasting it, the controller
+        # offers it, but it is not fabric-enabled, so a client on it has no
+        # path over the access tunnel. Only judged when fabric membership
+        # was actually read.
+        if known_fabric and known_wlans:
+            nonfab = sorted(int(i) for i in carried_ids if i not in fab_ids)
             if nonfab:
                 data["non_fabric_broadcast"] = nonfab
                 named = ", ".join(
@@ -3105,9 +3299,9 @@ class ApWlcSsidMapping(_PerWlcCheck):
                     f"{self.hostname} does not list as fabric-enabled. A "
                     f"client joining it has no fabric data path.")
 
-        # Step 3: the policy tag the AP wears. Read from the config the
-        # state check already pulled rather than asking again -- it is the
-        # same command, and ApWlcApState runs first.
+        # The policy tag the AP wears. Read from the config the state check
+        # already pulled rather than asking again -- it is the same command,
+        # and ApWlcApState runs first.
         ptag = ((ctx.state.get("ap_wlc_tags") or {})
                 .get(self.hostname) or {}).get("policy_tag")
         if not ptag:
@@ -3123,9 +3317,9 @@ class ApWlcSsidMapping(_PerWlcCheck):
                 ptag = None
         data["policy_tag"] = ptag
 
-        # Step 4: what that tag actually carries. A WLAN absent from the
-        # tag cannot be broadcast by this AP no matter what the controller
-        # offers, so this is the set the AP is entitled to.
+        # What that tag actually carries. A WLAN absent from the tag cannot
+        # be broadcast by this AP no matter what the controller offers, so
+        # this is the set the AP is entitled to.
         if ptag:
             lines.append("")
             lines.append(f"• Policy tag: {ptag}")
@@ -3140,14 +3334,14 @@ class ApWlcSsidMapping(_PerWlcCheck):
                     parse_wireless_tag_policy_detailed)
                 tag = parse_wireless_tag_policy_detailed(traw)
                 data["policy_tag_maps"] = tag["maps"]
+                fab_profiles = (
+                    ctx.state.get("ap_wlc_fabric_wlan_profiles") or {}
+                ).get(self.hostname) or set()
                 # The fabric/non-fabric split is only meaningful if the
                 # fabric list was actually read. When that command failed,
                 # every profile would fall on the non-fabric side and the
                 # tag would be reported as carrying no fabric WLAN -- a
                 # conclusion drawn from a missing read, not from evidence.
-                known_fabric = "fabric_wlans" in data
-                fab_profiles = {w["profile_name"]
-                                for w in (data.get("fabric_wlans") or [])}
                 if known_fabric:
                     in_tag_fab, in_tag_nonfab = [], []
                     for mp in tag["maps"]:
@@ -3174,6 +3368,24 @@ class ApWlcSsidMapping(_PerWlcCheck):
                         f"WLAN, so {ap_name} offers no SSID with a fabric "
                         f"data path.")
 
+        # The fabric SSIDs actually on air, onto the AP's node on the
+        # canvas. Named rather than counted: "which fabric SSIDs is this AP
+        # serving" is the question, and the answer belongs on the AP, not
+        # buried in the controller's check text.
+        #
+        # `tag_nodes` rather than `node_tags`: this check runs on the WLC
+        # node, and `node_tags` applies to the emitting check's own node --
+        # it would tag the controller.
+        if known_fabric and known_wlans:
+            on_air_fabric = sorted(
+                {r["ssid"] for r in ap_rows
+                 if r["state"].lower() == "enabled" and _is_fabric(r)})
+            data["fabric_ssids_on_air"] = on_air_fabric
+            if on_air_fabric:
+                data["tag_nodes"] = [{"id": self.AP_NODE_ID,
+                                      "tags": on_air_fabric,
+                                      "broadcasting": True}]
+
         body = "\n".join(lines)
         if findings:
             return CheckResult(
@@ -3182,5 +3394,5 @@ class ApWlcSsidMapping(_PerWlcCheck):
                 f"{body}\n\n" + "\n".join(findings), data)
         return CheckResult(
             CheckStatus.OK,
-            f"{ap_name} is broadcasting {len(carried)} of "
-            f"{len(wlans)} WLANs on {self.hostname}.\n\n{body}", data)
+            f"{ap_name} is broadcasting {len(broadcasting)} of "
+            f"{len(carried)} WLANs on {self.hostname}.\n\n{body}", data)
