@@ -519,6 +519,10 @@ scenarioForm.addEventListener('submit', (e) => {
 // else keeps the darker blue.
 const FABRIC_ROLE_FILL = '#29B5E5';
 const DEFAULT_NODE_FILL = '#1e40af';
+// The on-air WiFi mark. Green, not the fabric blue: it says "broadcasting
+// right now", which is a different statement from "in the fabric", and
+// colouring it like a fabric role would blur the two.
+const BROADCAST_FILL = '#16a34a';
 
 // One icon SVG per status — the badge is drawn directly inside the SVG so the
 // position is exact and there are no multi-background-image quirks.
@@ -768,6 +772,48 @@ function apIconSvg(bodyFill) {
     "</svg>"
   );
 }
+// A green WiFi mark: three concentric quarter-arcs fanning out of a dot.
+//
+// Each arc is the quarter from 90 to 180 degrees -- straight up round to
+// straight left of the dot -- so the mark opens toward the upper LEFT and
+// the dot sits at its lower-right corner. The mark hangs to the left of
+// the AP, so this points the opening back at the device it belongs to:
+// drawn the other way the arcs radiate off into empty canvas and the AP
+// sits behind the dot.
+//
+// The origin is the dot, and every arc extends UP and LEFT of it, so both
+// extents have to stay inside the 100-unit box (top = 90 - r - stroke/2
+// >= 0, left = 90 - r - stroke/2 >= 0). Get that wrong and the arcs clip
+// into slivers that read as a green blob rather than a signal.
+//
+// This is its own node rather than part of the AP's icon. The AP icon says
+// what the device is; the mark says what it is doing right now, and the two
+// answer different questions -- an AP that stops broadcasting is still an
+// AP. Keeping them separate also lets the mark carry the SSID names in its
+// own label instead of crowding the AP's.
+function wifiMarkIconSvg(stroke) {
+  const col = stroke || BROADCAST_FILL;
+  // sweep-flag 0: anticlockwise, the short way from the top point round to
+  // the left point rather than the long way back under the dot.
+  const arc = (r, w) =>
+    "<path d='M 0 " + (-r) + " A " + r + " " + r + " 0 0 0 " + (-r) + " 0' " +
+      "fill='none' stroke='" + col + "' stroke-width='" + w + "' " +
+      "stroke-linecap='round'/>";
+  return (
+    "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
+    // Sized by measuring the rendered ink, not by matching numbers in the
+    // markup: the AP's filled body and a quarter-arc sweep with the same
+    // bounding box do NOT read as the same size, because the arc reaches
+    // its corner while the rounded square does not. At 88px the AP inks
+    // 66x66, so the outer arc plus its stroke is held to the same 66.
+    "<g transform='translate(70 70)'>" +
+      arc(16, 5) + arc(30, 5) + arc(44, 5) +
+      "<circle cx='0' cy='0' r='5' fill='" + col + "'/>" +
+    "</g>" +
+    "</svg>"
+  );
+}
+
 const AP_ICON_URL =
   "data:image/svg+xml;utf8," + encodeURIComponent(apIconSvg());
 // Used once `show ap name <ap> config general` reports Fabric Status:
@@ -775,6 +821,9 @@ const AP_ICON_URL =
 // icons use, so "this device is in the fabric" reads identically everywhere.
 const AP_FABRIC_ICON_URL =
   "data:image/svg+xml;utf8," + encodeURIComponent(apIconSvg(FABRIC_ROLE_FILL));
+// The on-air mark that rides beside a broadcasting AP.
+const WIFI_MARK_ICON_URL =
+  "data:image/svg+xml;utf8," + encodeURIComponent(wifiMarkIconSvg());
 
 const ROLE_ICON = {
   endpoint: ENDPOINT_ICON_URL,
@@ -922,6 +971,12 @@ function showTopology(payload) {
       { selector: 'node[role = "wlc"][fabric = "yes"][status = "skip"]',    style: { 'background-image': WLC_FABRIC_ICON_URL.skip } },
       { selector: 'node[role = "access-point"]', style: {
           'background-image': AP_ICON_URL,
+          // Left-justified, unlike every other node: the AP's label is the
+          // longest on the canvas (name, model, version, address, then the
+          // tag list) and centring ragged lines of that length reads as
+          // untidy next to the mark's right-justified block.
+          'text-justification': 'left',
+          'text-margin-x': 10,
           'width': 88,
           'height': 88,
           'text-margin-y': 10,
@@ -929,6 +984,36 @@ function showTopology(payload) {
       }},
       { selector: 'node[role = "access-point"][fabric = "yes"]', style: {
           'background-image': AP_FABRIC_ICON_URL } },
+      // The on-air mark. No box and no border: it is a mark beside the AP,
+      // not a device of its own, so it must not read as another node on the
+      // topology. The label carries the SSIDs it is broadcasting.
+      { selector: 'node[role = "wifi-mark"]', style: {
+          'background-image': WIFI_MARK_ICON_URL,
+          'background-color': 'transparent',
+          'background-opacity': 0,
+          'border-width': 0,
+          'shape': 'rectangle',
+          'width': 88,
+          'height': 88,
+          'label': 'data(label)',
+          'color': BROADCAST_FILL,
+          'font-size': 11,
+          'font-weight': 'bold',
+          // Below the mark, with the lines right-aligned to each other.
+          // halign stays 'center' -- it places the whole block relative to
+          // the node, and 'left'/'right' would push the block out to the
+          // node's side instead of under it. The alignment the SSID names
+          // actually get comes from text-justification.
+          'text-valign': 'bottom',
+          'text-halign': 'center',
+          'text-margin-y': 4,
+          // The arcs sit in the upper-left of the icon box and the dot in
+          // the lower-right, so the mark's visual centre is left of the
+          // node's. Nudge the label the same way or it reads as hanging
+          // off the mark's right edge.
+          'text-margin-x': -22,
+          'text-justification': 'right',
+          'text-wrap': 'wrap' } },
       { selector: 'edge', style: {
           'line-color': '#94a3b8',
           'width': 2,
@@ -992,15 +1077,19 @@ function showTopology(payload) {
       }},
       // The VXLAN access tunnel, drawn only when it is up. Cyan, to match
       // the fabric-node colouring. Drawn as a straight line running
-      // parallel to the physical Edge-to-AP port and offset below it, not
-      // as a curve: the tunnel follows that cable, so the two belong
-      // alongside each other. `segments` with both bend points at the same
-      // distance gives a straight run displaced from the direct path --
-      // a bezier would bow away from the port it is meant to parallel.
+      // parallel to the physical Edge-to-AP port and offset below it: the
+      // tunnel follows that cable, so the two belong alongside each other.
+      //
+      // The offset comes from moving BOTH endpoints down by the same amount,
+      // not from bend points. `segments` with two bend points gave a run
+      // that was straight in the middle but angled out at each end to reach
+      // the node centres -- a trapezoid. Shifting the endpoints instead
+      // displaces the whole line, so every part of it stays parallel to the
+      // port. A bezier would bow away from the port it is meant to mirror.
       { selector: 'edge[accessTunnel = "true"]', style: {
-          'curve-style': 'segments',
-          'segment-distances': [26, 26],
-          'segment-weights': [0.08, 0.92],
+          'curve-style': 'straight',
+          'source-endpoint': '0 26',
+          'target-endpoint': '0 26',
           'line-style': 'dashed',
           'line-dash-pattern': [8, 4],
           'line-color': '#06b6d4',
@@ -2144,6 +2233,87 @@ function handleEvent(msg) {
         msg.mark_fabric_ap.forEach(id => {
           const n = cy && cy.getElementById(id);
           if (n && !n.empty()) n.data('fabric', 'yes');
+        });
+      }
+      // --------------------------------------------------------------
+      // Companion nodes.
+      //
+      // A companion is a mark that belongs to another node rather than a
+      // device of its own: it is drawn beside its anchor and holds that
+      // position for good, including when the anchor is dragged. Cytoscape
+      // has no such relation built in -- compound parents would box the two
+      // together and draw a container around them -- so the offset is kept
+      // on the companion and reapplied on every move of the anchor.
+      // --------------------------------------------------------------
+      if (!window.__companionsWired && cy) {
+        window.__companionsWired = true;
+        // `position` fires for programmatic moves and layout runs too, not
+        // just drags, so the companion keeps up with a re-layout as well.
+        cy.on('position', 'node', evt => {
+          const anchorNode = evt.target;
+          const followers = cy.nodes('[companionOf = "' + anchorNode.id() + '"]');
+          followers.forEach(f => {
+            const p = anchorNode.position();
+            f.position({ x: p.x + (f.data('offsetX') || 0),
+                         y: p.y + (f.data('offsetY') || 0) });
+          });
+        });
+      }
+
+      // Idempotent: a re-run re-emits the same tags, and the mark must not
+      // be added twice or jump to a new offset.
+      function attachWifiMark(anchorId, ssids) {
+        const anchorNode = cy.getElementById(anchorId);
+        if (anchorNode.empty()) return;
+        const markId = anchorId + '-wifi-mark';
+        // Centre-to-centre, measured rather than guessed: the AP's drawn
+        // body starts 33px left of its centre and the mark's dot ends 21px
+        // right of its own, so -64 leaves a 10px gap between the two. The
+        // node boxes are both 88px but neither icon fills its box, so the
+        // box edges are not what the eye reads as the gap.
+        const dx = -64, dy = 6;
+        const label = ssids.join('\n');
+        const existing = cy.getElementById(markId);
+        if (!existing.empty()) {
+          existing.data('label', label);
+          return;
+        }
+        const p = anchorNode.position();
+        cy.add({
+          group: 'nodes',
+          data: {
+            id: markId,
+            label: label,
+            role: 'wifi-mark',
+            companionOf: anchorId,
+            offsetX: dx,
+            offsetY: dy,
+          },
+          position: { x: p.x + dx, y: p.y + dy },
+        });
+        // Dragging the mark itself would break the pairing silently; the
+        // mark is not a thing you position, it is a thing that follows.
+        cy.getElementById(markId).ungrabify();
+      }
+
+      // Tags onto a NAMED node, not the emitting check's own. The AP's
+      // fabric SSIDs are found by a check that runs on the WLC node, so
+      // `node_tags` -- which applies to `nodeId` above -- would put them on
+      // the controller. Same two calls, against an id the check chooses.
+      if (Array.isArray(msg.tag_nodes)) {
+        msg.tag_nodes.forEach(spec => {
+          if (!spec || !spec.id || !Array.isArray(spec.tags)) return;
+          const id = resolveNodeId(spec.id) || spec.id;
+          const n = cy.getElementById(id);
+          if (n.empty()) return;
+          updateNode(id, { tags: spec.tags });
+          applyNodeLabel(id);
+          // An AP given fabric SSIDs is on air with them -- that is what
+          // the check emits these for -- so it gets the mark beside it,
+          // carrying the SSID names in its own label.
+          if (spec.broadcasting && spec.tags.length) {
+            attachWifiMark(id, spec.tags);
+          }
         });
       }
       if (Array.isArray(msg.relabel_nodes)) {
