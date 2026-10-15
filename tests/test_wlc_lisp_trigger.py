@@ -37,7 +37,15 @@ def _info():
 
 def _ctx(info=None, **over):
     state = {
-        "ap_wlc_cp_down": [("172.19.1.65", "Down")],
+        # What ApWlcControlPlanes grades and publishes -- the trigger's
+        # input. It was `ap_wlc_cp_down` (from ApWlcFabricControlPlane) until
+        # that check was found to return early on several faults, leaving the
+        # key unwritten and this flow skipping with "every session is up"
+        # while the controller had every session down.
+        "ap_wlc_control_planes": {WLC: {
+            "local": [{"ip_address": "172.19.1.64", "status": "Up"},
+                      {"ip_address": "172.19.1.65", "status": "Down"}],
+            "multisite": []}},
         "ap_wlc_radio_mac": "3891.b70f.2600",
         "ap_cp_name": "default-control-plane",
         "catc_name": "mxc-dnac5",
@@ -155,8 +163,31 @@ def test_no_resolved_control_plane_skips():
 
 
 def test_every_control_plane_up_skips():
-    r = _run(_ctx(ap_wlc_cp_down=[]))
+    r = _run(_ctx(ap_wlc_control_planes={WLC: {
+        "local": [{"ip_address": "172.19.1.64", "status": "Up"},
+                  {"ip_address": "172.19.1.65", "status": "Up"}],
+        "multisite": []}}))
     assert r.status is CheckStatus.SKIP
+
+
+def test_a_down_multisite_control_plane_does_not_trigger_the_flow():
+    """Only site-local sessions decide, as in ApWlcControlPlanes' grading.
+
+    A Multi-Site control plane serves a remote site, so its session being
+    down is not what keeps THIS AP from registering -- triggering on it
+    would walk a flow with nothing to find.
+    """
+    r = _run(_ctx(ap_wlc_control_planes={WLC: {
+        "local": [{"ip_address": "172.19.1.64", "status": "Up"}],
+        "multisite": [{"ip_address": "172.19.1.100", "status": "Down"}]}}))
+    assert r.status is CheckStatus.SKIP
+
+
+def test_no_graded_control_planes_skips_without_claiming_they_are_up():
+    """An ungraded controller is unknown, not healthy."""
+    r = _run(_ctx(ap_wlc_control_planes={}))
+    assert r.status is CheckStatus.SKIP
+    assert "no site control plane was graded" in r.message.lower()
 
 
 def test_an_unknown_radio_mac_skips():
@@ -285,3 +316,138 @@ def test_no_link_is_drawn_to_a_control_plane_with_no_node():
                            {"ip_address": "172.19.1.99", "status": "Up"}])
     assert len(edges) == 1
     assert edges[0]["target"] == "apcp-1"
+
+
+# --------------------------------------------------------------------------
+# A missing registration is the second reason to walk this flow. It does not
+# need a session to be down -- a radio MAC absent from every control plane
+# while every session is UP is exactly the fault only this flow explains, and
+# the verdict that finds it sets `ap_stop`, which would otherwise skip it.
+# --------------------------------------------------------------------------
+
+
+def _all_up():
+    return {WLC: {"local": [{"ip_address": "172.19.1.64", "status": "Up"},
+                            {"ip_address": "172.19.1.65", "status": "Up"}],
+                  "multisite": []}}
+
+
+def test_a_missing_registration_runs_the_flow_though_every_session_is_up():
+    r = _run(_ctx(ap_wlc_control_planes=_all_up(),
+                  ap_radio_reg={"cp1": False, "cp2": False}))
+    assert r.status is not CheckStatus.SKIP
+
+
+def test_sessions_up_and_registration_present_still_skips():
+    """The flow must not run when there is nothing to explain."""
+    r = _run(_ctx(ap_wlc_control_planes=_all_up(),
+                  ap_radio_reg={"cp1": True, "cp2": True}))
+    assert r.status is CheckStatus.SKIP
+
+
+def test_the_flow_is_not_suppressed_by_ap_stop():
+    """`ap_stop` is set by the verdict that queues this flow.
+
+    Honouring it would suppress the explanation for the fault that raised
+    it, which is why this check overrides _ApCheck.run.
+    """
+    ctx = _ctx(ap_wlc_control_planes=_all_up(),
+               ap_radio_reg={"cp1": False, "cp2": False},
+               ap_stop="radio MAC registered on no control plane")
+    from checks.ap_wlc import ApWlcCpLispSessionTrigger
+    r = ApWlcCpLispSessionTrigger(WLC, "wlc").run(ctx)
+    assert r.status is not CheckStatus.SKIP
+
+
+# --------------------------------------------------------------------------
+# Resolution happens where the flow is QUEUED, not only where it used to.
+#
+# The live fault: `ApWlcControlPlanes` was moved ahead of
+# `ApWlcFabricControlPlane` so a down session triggers the flow straight away.
+# But only the fabric check resolved the (RLOC, hostname, management IP)
+# triples, so on every-session-down -- the one run this flow exists for -- the
+# trigger it queued skipped with "no control plane was resolved", and the run
+# went straight on to radio MAC registration having walked nothing.
+# --------------------------------------------------------------------------
+
+
+def _unresolved_ctx():
+    """The live state: three control planes down, the EDGE's discovery maps
+    published, but no WLC triples yet."""
+    ctx = _ctx(ap_wlc_control_planes={WLC: {
+        "local": [{"ip_address": "172.19.1.64", "status": "Down"},
+                  {"ip_address": "172.19.1.65", "status": "Down"}],
+        "multisite": [{"ip_address": "172.19.1.100", "status": "Down"}]}})
+    for key in ("ap_wlc_cp_planes", "ap_wlc_cp_nodes"):
+        ctx.state.pop(key, None)
+    ctx.state.update({
+        "ap_cp_rlocs": {"cp1": "172.19.1.64", "cp2": "172.19.1.65"},
+        "ap_cp_mgmts": {"cp1": "10.31.136.64", "cp2": "10.31.136.65"},
+        "ap_cp_targets": {"apcp-1": "cp1", "apcp-2": "cp2"},
+    })
+    return ctx
+
+
+def test_without_resolution_the_flow_skips():
+    """Characterises the fault, so the fix below is shown to be what moves
+    it rather than something else in the fixture."""
+    r = _run(_unresolved_ctx())
+    assert r.status is CheckStatus.SKIP
+    assert "no control plane was resolved" in r.message
+
+
+def test_resolving_the_control_planes_lets_the_whole_flow_run():
+    """Nine checks per control plane plus one inter-CP check each."""
+    from checks.ap_wlc import resolve_wlc_control_planes
+
+    ctx = _unresolved_ctx()
+    graded = ctx.state["ap_wlc_control_planes"][WLC]
+    resolve_wlc_control_planes(
+        ctx, graded["local"] + graded["multisite"], "wlc")
+
+    r = _run(ctx)
+    assert r.status is CheckStatus.WARN
+    assert len(r.data["queue_checks"]) == 9 * 2 + 2
+
+
+def test_the_management_ip_is_resolved_not_taken_from_the_summary():
+    """The original fault this resolution exists for: no device is managed at
+    the RLOC, so a triple filled from the summary kills every per-CP check
+    with "Error Retrieving Device Details from Catalyst Center API"."""
+    from checks.ap_wlc import resolve_wlc_control_planes
+
+    ctx = _unresolved_ctx()
+    graded = ctx.state["ap_wlc_control_planes"][WLC]
+    _n, planes, _u = resolve_wlc_control_planes(
+        ctx, graded["local"] + graded["multisite"], "wlc")
+    assert planes == [("172.19.1.64", "cp1", "10.31.136.64"),
+                      ("172.19.1.65", "cp2", "10.31.136.65")]
+
+
+def test_a_multisite_control_plane_the_edge_never_saw_is_not_invented():
+    """172.19.1.100 serves a remote site: no profiled device, no node. It is
+    reported as unmatched rather than given a guessed triple."""
+    from checks.ap_wlc import resolve_wlc_control_planes
+
+    ctx = _unresolved_ctx()
+    graded = ctx.state["ap_wlc_control_planes"][WLC]
+    _n, planes, unmatched = resolve_wlc_control_planes(
+        ctx, graded["local"] + graded["multisite"], "wlc")
+    assert unmatched == ["172.19.1.100"]
+    assert "172.19.1.100" not in [p[0] for p in planes]
+
+
+def test_the_check_that_queues_the_flow_also_resolves_the_planes():
+    """Order-independence, stated as a rule: whichever check queues the flow
+    must publish what the flow reads, or the two can be reordered apart
+    again."""
+    import inspect
+    from checks.ap_wlc import ApWlcControlPlanes
+
+    src = inspect.getsource(ApWlcControlPlanes.run_ap)
+    assert "resolve_wlc_control_planes(" in src, (
+        "ApWlcControlPlanes queues the session flow but does not resolve the "
+        "control planes it needs, so the flow skips when it is reached first")
+    assert src.index("resolve_wlc_control_planes(") < \
+        src.index("ApWlcCpLispSessionTrigger"), \
+        "the planes must be resolved before the trigger is queued"

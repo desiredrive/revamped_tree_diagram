@@ -343,12 +343,22 @@ def test_no_resolved_control_plane_skips():
 
 def test_the_registration_is_read_before_the_session_trigger():
     """A control plane holding no registration is what the session flow
-    exists to explain, so reading it afterwards inverts the causality."""
+    exists to explain, so reading it afterwards inverts the causality.
+
+    NOTE: ApWlcControlPlanes now runs immediately after ApWlcApState, which
+    puts the session flow it queues BEFORE the registration read. That is the
+    requested order, so this no longer asserts the old sequence -- it pins
+    only that the flow is queued from the control-plane check, which is what
+    keeps it from being suppressed by an earlier `ap_stop`.
+
+    The causality concern this test was written for is therefore not
+    enforced here any more; the session flow may report before the
+    registration it explains has been read.
+    """
     import inspect
     from checks import ap_wlc
-    src = inspect.getsource(ap_wlc.ApWlcApStateProfile)
-    assert src.index("ApRadioMacRegistrationTrigger(hostname, node)") < \
-        src.index("ApWlcCpLispSessionTrigger(hostname, node)")
+    cp = inspect.getsource(ap_wlc.ApWlcControlPlanes)
+    assert "ApWlcCpLispSessionTrigger(" in cp
 
 
 # --------------------------------------------------------------------------
@@ -576,3 +586,44 @@ def test_a_genuinely_empty_payload_is_still_a_fault(monkeypatch):
     assert r.status is CheckStatus.WARN
     assert "carries no WLC metadata" in r.message
     assert "does not report the WLC metadata section" not in r.message
+
+
+# --------------------------------------------------------------------------
+# A registration missing from every control plane must still be EXPLAINED.
+# That branch sets `ap_stop`, so the session flow has to be queued from the
+# verdict itself -- a separately-queued _ApCheck would skip on that stop.
+# --------------------------------------------------------------------------
+
+
+def _verdict(reg, host="wlc-jalejand-cisco-com"):
+    import types
+    from checks.ap_radio_registration import ApRadioMacRegistrationVerdict
+    ctx = types.SimpleNamespace(service=object(), payload={},
+                                state={"ap_radio_reg": reg})
+    v = ApRadioMacRegistrationVerdict("3891.b70f.2600", "8188", "wlc", host)
+    return v.run(ctx), ctx
+
+
+def test_registered_nowhere_queues_the_session_flow():
+    from checks.ap_wlc import ApWlcCpLispSessionTrigger
+    r, ctx = _verdict({"cp1": False, "cp2": False})
+    assert r.status is CheckStatus.FAIL
+    queued = (r.data or {}).get("queue_checks") or []
+    assert any(isinstance(c, ApWlcCpLispSessionTrigger) for c in queued)
+    # The stop is still set -- the flow is queued despite it, not instead.
+    assert ctx.state.get("ap_stop")
+
+
+def test_registered_on_some_queues_the_session_flow_too():
+    """The WARN branch already promised the session checks would say why."""
+    from checks.ap_wlc import ApWlcCpLispSessionTrigger
+    r, _ = _verdict({"cp1": True, "cp2": False})
+    assert r.status is CheckStatus.WARN
+    queued = (r.data or {}).get("queue_checks") or []
+    assert any(isinstance(c, ApWlcCpLispSessionTrigger) for c in queued)
+
+
+def test_registered_everywhere_queues_nothing():
+    r, _ = _verdict({"cp1": True, "cp2": True})
+    assert r.status is CheckStatus.OK
+    assert not (r.data or {}).get("queue_checks")

@@ -21,6 +21,7 @@ def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
     logfile:   path this run's collection log should be written to
     """
     emit({"type": "run_started", "scenario": payload.get("scenario")})
+    _trace_reset(str(payload.get("scenario")))
 
     # Bind the collection log for this run. Set here, on the thread that runs
     # the checks, so the checks -- and the border thread pool in
@@ -130,11 +131,20 @@ def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
         if result.data.get("node_tags") is not None:
             event["node_tags"] = result.data["node_tags"]
         emit(event)
+        # One line per check, for reading the run back without the UI.
+        _trace(f"{result.status.value:<5} [{target}] {check.name} :: "
+               f"{' '.join((result.message or '').split())}")
 
         # Splice any dynamically-queued follow-up Checks right after the
         # current position so they run before any later static Checks.
         extra = result.data.get("queue_checks")
         if extra:
+            # Which checks a trigger queued is the fact that separates "the
+            # chain was never built" from "it was built and every check
+            # gated" -- indistinguishable from the finished events alone.
+            _trace("      queued by %s: %s" % (
+                check.name,
+                ", ".join(type(c).__name__ for c in extra)))
             chain[i+1:i+1] = list(extra)
 
         if result.status == CheckStatus.FAIL:
@@ -144,3 +154,36 @@ def run_scenario(payload: dict, service, emit, cancelled, logfile) -> None:
         i += 1
 
     emit({"type": "run_complete", "ok": not any_fail})
+
+
+# --------------------------------------------------------------------------
+# Check trace. One line per check, written as the run goes, to a fixed path so
+# it can be read back without the user having to copy anything out of the UI.
+#
+# Deliberately NOT the collection log: that carries full device output and is
+# hundreds of kilobytes, so the one fact wanted here -- which checks ran, on
+# which node, with what status -- is unfindable in it.
+# --------------------------------------------------------------------------
+
+CHECK_TRACE_PATH = "check_trace.txt"
+
+
+def _trace(line: str) -> None:
+    """Append one line to the check trace, never raising into the run."""
+    try:
+        with open(CHECK_TRACE_PATH, "a") as fh:
+            fh.write(line.rstrip("\n") + "\n")
+    except Exception:
+        pass
+
+
+def _trace_reset(scenario: str) -> None:
+    """Start a fresh trace for this run."""
+    import datetime
+    try:
+        with open(CHECK_TRACE_PATH, "w") as fh:
+            fh.write(f"=== run {scenario} "
+                     f"{datetime.datetime.now().isoformat(timespec='seconds')}"
+                     f" ===\n")
+    except Exception:
+        pass

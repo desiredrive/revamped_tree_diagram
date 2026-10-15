@@ -133,9 +133,11 @@ def test_it_is_queued_after_the_control_planes_and_before_the_session_flow():
 
     src = inspect.getsource(m)
     assert "ApFabricEdgeWlcDatabase()" in src, "the check is never queued"
+    # ApWlcControlPlanes (which queues the session flow) now runs right after
+    # ApWlcApState, ahead of both of these -- so only the first half of the
+    # original ordering still holds.
     assert (src.index("ApRadioMacRegistrationTrigger(hostname, node)")
-            < src.index("ApFabricEdgeWlcDatabase()")
-            < src.index("ApWlcCpLispSessionTrigger(hostname, node)"))
+            < src.index("ApFabricEdgeWlcDatabase()"))
 
 
 # --------------------------------------------------------------------------

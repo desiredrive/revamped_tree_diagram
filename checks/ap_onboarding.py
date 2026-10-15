@@ -3728,6 +3728,30 @@ def _global_lisp_instance(ctx, hostname):
     return getattr(dev, "iid", None)
 
 
+def _instance_tables_from_text(text):
+    """`Locator table:` and `EID table:` read straight from the CLI output.
+
+    Genie is preferred, but its schema for `show lisp instance-id <id> ipv4`
+    requires `itr.proxy_itr_router`, and the parser only sets that when the
+    PITR line reads a bare `enabled`/`disabled`. An SDA edge prints
+    "Proxy-ITR Router (PITR): enabled RLOCs: 172.19.1.67 (not local)", the
+    regex misses, the key is absent, and Genie discards the WHOLE result --
+    status FAILURE, data None -- although every other field parsed. The two
+    fields this check actually needs are plain one-liners, so they are read
+    directly rather than lost to a schema violation elsewhere in the output.
+
+    Returns {"locator_table": ..., "eid_table": ...} with whatever was found.
+    """
+    found = {}
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        for label, key in (("Locator table:", "locator_table"),
+                           ("EID table:", "eid_table")):
+            if stripped.startswith(label) and key not in found:
+                found[key] = stripped[len(label):].strip()
+    return found
+
+
 class ApL3LispInstance(_ApCheck):
     """Whether the AP's LISP instance is bound to the global routing table.
 
@@ -3759,19 +3783,41 @@ class ApL3LispInstance(_ApCheck):
 
         from radkit_cli import get_single_output_genie
         cmd = f"show lisp instance-id {iid} ipv4"
+        why = ""
         try:
             parsed = _as_mapping(get_single_output_genie(hostname, cmd, ctx.service))
             path = _as_mapping(parsed["lisp_id"][0]["instance_id"][iid])
-        except BaseException:
+        except BaseException as e:
+            # Keep the reason. Without it the message cannot say whether the
+            # command errored, returned nothing, or parsed to a shape that
+            # does not carry the instance -- three different next steps.
             path = {}
+            why = f" ({type(e).__name__}: {e})"
 
         if not path:
+            # Genie gave nothing usable. The command itself answers, so read
+            # the two fields from the text before giving up on them.
+            from radkit_cli import get_any_single_output
+            try:
+                raw = get_any_single_output(hostname, cmd, ctx.service)
+            except BaseException:
+                raw = None
+            path = _instance_tables_from_text(raw)
+
+        if not path:
+            # WARN, not FAIL: the mapping to the global table was read
+            # successfully and is the thing this check is named for. Only the
+            # per-instance detail failed to parse. Grading this FAIL also lost
+            # `ap_l3_iid` below, which Control Plane Discovery needs -- a
+            # failed read silently cancelled the registration checks.
+            ctx.state["ap_l3_iid"] = iid
             return CheckResult(
-                CheckStatus.FAIL,
-                f"LISP instance {iid} is mapped to the global routing table on "
-                f"{hostname} but the instance itself could not be read, so it "
-                f"cannot be confirmed as usable for the AP.",
-                data={"l3_iid": iid},
+                CheckStatus.WARN,
+                f"LISP instance {iid} is mapped to the global routing table "
+                f"on {hostname}, but `{cmd}` could not be read{why}, so its "
+                f"locator and EID tables could not be confirmed as "
+                f"`default`. The flow continues with instance {iid}.",
+                data={"l3_iid": iid, "instance_unread": True},
             )
 
         locator = (path.get("locator_table") or "").strip()
@@ -3800,6 +3846,105 @@ class ApL3LispInstance(_ApCheck):
             data={"l3_iid": iid, "locator_table": locator, "eid_table": eid},
         )
 
+
+class ApL3LispPitr(_ApCheck):
+    """Whether the switch's PITR RLOC is its own Loopback0.
+
+    The PITR RLOC is the locator this switch advertises as the proxy ingress
+    tunnel router. SD-Access automation sets it to the device's own
+    Loopback0, which is also the locator every registration this flow checks
+    is written with. When the two disagree the switch is advertising a
+    locator that is not itself: traffic proxied through it is steered at
+    another box, which may not have a path to this AP at all.
+
+    Read from `show lisp service ipv4` rather than `show lisp instance-id
+    <id> ipv4`. Both carry the field, but Genie's schema for the instance
+    form requires `itr.proxy_itr_router`, which its parser fails to set when
+    the PITR line carries an `RLOCs: ... (not local)` suffix -- and a single
+    missing key makes Genie discard the entire parse. The service form has
+    no such schema requirement and parses cleanly on the same device, so it
+    is what this check reads. See `_instance_tables_from_text` for the other
+    half of that same defect.
+    """
+
+    name = "AP L3 LISP PITR"
+    target_node_id = "xtr"
+
+    def run_ap(self, ctx: RunContext) -> CheckResult:
+        hostname = ctx.state.get("xtr_hostname")
+
+        # The AP chain runs neither CpLoopback nor RlocDefinition, so
+        # xtr_loopback may be unset. Resolve it the same way
+        # ApWlcFabricControlPlane does rather than skip: without it there is
+        # nothing to compare the PITR against.
+        loopback = (ctx.state.get("xtr_loopback") or "").strip()
+        if not loopback:
+            try:
+                from checks.lisp import _query_loopback0
+                ip, mask, _err = _query_loopback0(ctx)
+                if ip:
+                    loopback = ip
+                    ctx.state["xtr_loopback"] = ip
+                    if mask:
+                        ctx.state["xtr_loopback_mask"] = mask
+            except BaseException:
+                pass
+
+        from radkit_cli import get_single_output_genie
+        cmd = "show lisp service ipv4"
+        why = ""
+        pitr = ""
+        try:
+            parsed = _as_mapping(get_single_output_genie(hostname, cmd,
+                                                         ctx.service))
+            pitr = str(_as_mapping(
+                _as_mapping(parsed["lisp_id"][0])["itr"]
+            ).get("proxy_itr_rloc") or "").strip()
+        except BaseException as e:
+            why = f" ({type(e).__name__}: {e})"
+
+        if not pitr:
+            # WARN, not FAIL: an unread PITR is an unanswered question, and
+            # the manifest reserves FAIL for the tool being unable to
+            # continue. Everything after this reads other commands.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"The proxy-ITR RLOC could not be read from `{cmd}` on "
+                f"{hostname}{why}, so it could not be confirmed as this "
+                f"switch's own Loopback0.",
+                data={"pitr_unread": True},
+            )
+
+        if not loopback:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} advertises {pitr} as its proxy-ITR RLOC, but "
+                f"its Loopback0 could not be resolved, so the two could not "
+                f"be compared.",
+                data={"pitr": pitr, "comparable": False},
+            )
+
+        if pitr != loopback:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{hostname} advertises {pitr} as its proxy-ITR RLOC, but "
+                f"its own Loopback0 is {loopback}. The locator it proxies "
+                f"traffic through is therefore another device, while the "
+                f"AP's registrations are written with {loopback} -- so "
+                f"proxied traffic is steered at a box that may have no path "
+                f"to this AP. SD-Access automation aligns these; if this was "
+                f"not deliberate, set `proxy-itr {loopback}` under `router "
+                f"lisp` / `service ipv4`.",
+                data={"pitr": pitr, "loopback0": loopback, "match": False},
+            )
+
+        return CheckResult(
+            CheckStatus.OK,
+            f"{hostname} advertises its own Loopback0 ({loopback}) as its "
+            f"proxy-ITR RLOC, so proxied traffic is steered at the same "
+            f"locator the AP's registrations are written with.",
+            data={"pitr": pitr, "loopback0": loopback, "match": True},
+        )
 
 def _l3_dyneid_lookup(ctx, hostname, iid, ip):
     """Ask the switch about ONE address: is it a dynamic EID in this instance?
@@ -4219,8 +4364,8 @@ class ApCpRegistration(_ApCheck):
                 CheckStatus.FAIL,
                 f"Could not read the registration record for {ip} from "
                 f"{self.cp_host}: the control plane returned nothing. This is "
-                f"a problem reading the device, not a finding about the AP -- "
-                f"whether {self.cp_host} holds the registration is still "
+                f"a problem reading the device, not a finding about the AP. "
+                f"Whether {self.cp_host} holds the registration is still "
                 f"unknown.",
                 data=dict(data, query_failed=True),
             )
@@ -4247,12 +4392,13 @@ class ApCpRegistration(_ApCheck):
                     CheckStatus.WARN,
                     f"{self.cp_host} is rejecting the AP's registration. It "
                     f"holds no entry for {ip} in instance {iid}, and has "
-                    f"recorded {auth} authentication failure(s) against "
-                    f"{covering or 'the covering prefix'} -- so the switch IS "
-                    f"registering and this control plane is discarding it "
-                    f"because the LISP authentication key does not match. "
-                    f"Correct the key between "
-                    f"{ctx.state.get('xtr_hostname')} and {self.cp_host}.",
+                    f"recorded {auth} authentication "
+                    f"{'failure' if auth == 1 else 'failures'} against "
+                    f"{covering or 'the covering prefix'}. The registrations "
+                    f"are therefore arriving and being discarded, which "
+                    f"indicates a LISP authentication key mismatch. Correct "
+                    f"the key between {ctx.state.get('xtr_hostname')} and "
+                    f"{self.cp_host}.",
                     data=data,
                 )
 
@@ -4267,8 +4413,9 @@ class ApCpRegistration(_ApCheck):
                 CheckStatus.WARN,
                 f"{self.cp_host} holds no registration for {ip} in instance "
                 f"{iid}, and has recorded no authentication failures against "
-                f"{covering or 'the covering prefix'} -- so registrations are "
-                f"not being rejected for a bad key; they are not arriving."
+                f"{covering or 'the covering prefix'}. Nothing is being "
+                f"rejected for a bad key; the registrations are not arriving "
+                f"at all."
                 + locator_note,
                 data=data,
             )
@@ -4477,20 +4624,26 @@ class ApLispSessionTrigger(_ApCheck):
                 f"its registration and has its session up.{aside}")
 
         checks = lisp_session_checks(target, map_servers=pairs)
+        # The consequence is not the same in the two branches, so neither is
+        # the wording. A missing registration means the fabric cannot locate
+        # the address at all; a down session with the registration still held
+        # means it can locate it today, until the entry ages out unrefreshed.
         if missing:
-            names = ", ".join(missing)
-            why = (f"{names} {'does' if len(missing) == 1 else 'do'} not hold "
-                   f"a registration for {ip}")
+            names = ", ".join(sorted(missing))
+            why = (f"{ip} is not registered on "
+                   f"{'the control plane' if len(missing) == 1 else 'either control plane'} "
+                   f"({names}), so the fabric cannot locate it")
         else:
             names = ", ".join(f"{peer} ({state})" for peer, _s in down
                               if (peer, _s) not in unrelated)
-            why = (f"the LISP session to {names} is not up, though the "
-                   f"registration for {ip} is still held")
+            why = (f"the registration for {ip} is still held, but the LISP "
+                   f"session to {names} is down, so nothing is refreshing it")
         return CheckResult(
             CheckStatus.WARN,
-            f"{why}, so the LISP session flow runs to say why: the switch's "
-            f"own database and map-server configuration, its sessions, and "
-            f"each control plane's configuration and counters.{aside}",
+            f"{why}. The checks below trace the registration path from both "
+            f"ends: the switch's own database and map-server configuration, "
+            f"its sessions, and each control plane's configuration and "
+            f"counters.{aside}",
             data={"queue_checks": checks},
         )
 

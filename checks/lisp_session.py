@@ -283,9 +283,14 @@ class LispEidIdentification(_SessionCheck):
                 data={"lisp_db_status": False, "iid": t.iid},
             )
 
+        # "Map-server" is the LISP term and what the device prints; in SDA
+        # the map-servers ARE the control plane nodes, and that is the word
+        # the rest of the report and the operator use. Said once here so the
+        # two names are tied together, then Control Plane throughout.
         lines = [
             f"• {t.label} is in the LISP database on {t.xtr_hostname} for "
-            f"instance {t.iid}, learned by {getattr(props, 'db_method', None) or 'an unknown method'}."
+            f"instance {t.iid}, learned by "
+            f"{getattr(props, 'db_method', None) or 'an unknown method'}."
         ]
         acked, unacked = [], []
         if mapservers:
@@ -294,17 +299,24 @@ class LispEidIdentification(_SessionCheck):
             unacked = [m.get("map_server") for m in mapservers
                         if str(m.get("ack", "")).lower() != "yes"]
             if acked:
+                plural = "Control Planes" if len(acked) > 1 else "Control Plane"
                 lines.append(
-                    f"• The switch has registered it to {', '.join(acked)}, "
+                    f"• Registered to {plural} {', '.join(acked)}, "
                     f"which acknowledged.")
             if unacked:
+                plural = "Control Planes" if len(unacked) > 1 else "Control Plane"
+                # The consequence, not just the silence: an unacknowledged
+                # registration is the same as no registration as far as the
+                # fabric is concerned, and that is what the reader acts on.
                 lines.append(
-                    f"• {', '.join(unacked)} did not acknowledge the "
-                    f"registration.")
+                    f"• {plural} {', '.join(unacked)} never acknowledged it, "
+                    f"so {t.label} is not registered there and the fabric "
+                    f"cannot resolve it through "
+                    f"{'them' if len(unacked) > 1 else 'it'}.")
         else:
             lines.append(
-                "• The database entry names no map-server, so this switch is "
-                "not registering the address anywhere.")
+                "• The database entry names no Control Plane, so this switch "
+                "is not registering the address anywhere.")
 
         # Grading is about the ACKs, not about whether map-servers are listed.
         # An entry naming two map-servers that both stay silent is the failure
@@ -555,10 +567,14 @@ class LispPerMapServerSession(_SessionCheck):
                 data=data,
             )
 
+        # Some readers hand back the uptime already parenthesised, as the
+        # device prints it ("Session State: Up (12:19:59)"); printing that
+        # inside a sentence gives "has been for (12:19:59)".
+        up_for = str(uptime).strip().strip("()").strip() if uptime else ""
         lines = [
             f"• The session to {self.map_server} is up"
-            + (f" and has been for {uptime}" if uptime else "")
-            + f", with {msgs_out} message(s) sent and {msgs_in} received."
+            + (f" and has been for {up_for}" if up_for else "")
+            + f", with {msgs_out} sent and {msgs_in} received."
         ]
         status = CheckStatus.OK
         if seen:
@@ -566,8 +582,8 @@ class LispPerMapServerSession(_SessionCheck):
             lines.append(
                 "• The session reports "
                 + ", ".join(f"{v} {k}" for k, v in seen.items())
-                + ". A session can be up and still not carry a registration "
-                  "successfully, and these counters are where that shows.")
+                + ". A session can be up and still fail to carry a "
+                  "registration, which is what these counters record.")
         return CheckResult(status, "\n".join(lines), data=data)
 
 
@@ -866,14 +882,22 @@ class LispAuthenticationKey(_SessionCheck):
         cp_decrypted = getattr(cfg, "decrypted", False)
 
         if cp_decrypted is False:
+            # Name the device that HOLDS the key and the peer it is FOR.
+            # Either end can be the unreadable one, and naming only the peer
+            # reads as though the peer's key was what could not be read.
+            cp_type = getattr(cfg, "key_type", None)
             return CheckResult(
                 CheckStatus.WARN,
-                f"The key on {self.cp_hostname} is stored in a form that "
-                f"cannot be read off the device, so it cannot be compared "
-                f"with the switch's. If registration is failing, the "
-                f"authentication-failure counters on this control plane are "
+                f"{self.cp_hostname} stores its key for {t.xtr_hostname} as "
+                + (f"type {cp_type}, which " if cp_type is not None
+                   else "a type that ")
+                + f"cannot be read off the device, so the two keys cannot be "
+                f"compared. If registration is failing, the "
+                f"authentication-failure counters on {self.cp_hostname} are "
                 f"what settle it.",
-                data={"cp": self.cp_hostname, "comparable": False})
+                data={"cp": self.cp_hostname, "comparable": False,
+                      "unreadable_side": self.cp_hostname,
+                      "key_type": cp_type})
 
         for ms in ms_config:
             if ms.get("map_server_ip") != cp_loopback:
@@ -883,14 +907,20 @@ class LispAuthenticationKey(_SessionCheck):
             except (KeyError, IndexError, TypeError):
                 etr_key = None
             if not ms.get("decrypted", True):
+                etr_type = ms.get("key_type")
                 return CheckResult(
                     CheckStatus.WARN,
-                    f"The switch's key for {self.cp_hostname} (type "
-                    f"{ms.get('key_type')}) cannot be read off the device, so "
-                    f"the two keys cannot be compared. Check this control "
-                    f"plane's authentication-failure counters if registration "
-                    f"is failing.",
-                    data={"cp": self.cp_hostname, "comparable": False})
+                    f"{t.xtr_hostname} stores its key for {self.cp_hostname} "
+                    f"as "
+                    + (f"type {etr_type}, which " if etr_type is not None
+                       else "a type that ")
+                    + f"cannot be read off the device, so the two keys cannot "
+                    f"be compared. If registration is failing, the "
+                    f"authentication-failure counters on {self.cp_hostname} "
+                    f"are what settle it.",
+                    data={"cp": self.cp_hostname, "comparable": False,
+                          "unreadable_side": t.xtr_hostname,
+                          "key_type": etr_type})
             if etr_key == cp_key:
                 return CheckResult(
                     CheckStatus.OK,

@@ -47,6 +47,7 @@ from checks.ap_onboarding import (
     ApL2LispRegistration,
     ApIpAddress,
     ApL3LispInstance,
+    ApL3LispPitr,
     ApL3LispDynamicEid,
     ApL3LispDatabase,
     ApL3LispRegistration,
@@ -292,6 +293,11 @@ def build_check_chain(payload: dict) -> list[Check]:
             # edge-side check above.
             ApBorderDiscovery(),
             ApL3LispInstance(),
+            # Immediately after the instance: both read the same box about
+            # the same LISP process, and a wrong PITR explains a registration
+            # that is present and still unreachable -- which is what the
+            # three checks below go on to examine.
+            ApL3LispPitr(),
             ApL3LispDynamicEid(),
             ApL3LispDatabase(),
             ApL3LispRegistration(),

@@ -100,21 +100,124 @@ def test_a_group_resolves_to_every_matching_row_not_the_first(patched):
     assert "172.19.1.100" not in ctx.state["ap_cp_set"]
 
 
-def test_disabled_fabric_status_stops_the_run(patched, monkeypatch):
-    """Not a fabric AP: it registers nowhere and gets no access tunnel."""
+def test_disabled_fabric_status_warns_without_stopping_the_run(
+        patched, monkeypatch):
+    """Not a fabric AP -- but this must NOT cancel the rest of the flow.
+
+    Fabric status is downstream of the controller's LISP sessions to its
+    control planes, not a cause. All sessions down makes Disabled the
+    expected consequence; a session up makes it the anomaly, pointing at the
+    Map Request (UDP 4342) being blocked. The WLC->CP session flow is what
+    tells those apart, and it is queued AFTER this check -- so an `ap_stop`
+    here cancelled the one flow that explains this result.
+    """
     import radkit_cli
     from checks.ap_wlc import ApWlcFabricControlPlane
 
-    monkeypatch.setattr(
-        radkit_cli, "get_any_single_output",
-        lambda h, c, s, **k: AP_CONFIG_GENERAL.replace(
-            "Fabric status                                   : Enabled",
-            "Fabric status                                   : Disabled"))
+    # Both commands must answer properly. The check no longer returns on
+    # Disabled -- it falls through to resolve the CONTROLLER's control planes
+    # and L2 instance, which the registration and session checks downstream
+    # read -- so a stub that returned the AP config for the fabric summary
+    # too would fail CP resolution and fire a different rule entirely.
+    def fake(host, command, service, **kw):
+        if "config general" in command:
+            return AP_CONFIG_GENERAL.replace(
+                "Fabric status                                   : Enabled",
+                "Fabric status                                   : Disabled")
+        return FABRIC_SUMMARY
+
+    monkeypatch.setattr(radkit_cli, "get_any_single_output", fake)
     ctx = _ctx()
     r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
-    assert r.status is CheckStatus.FAIL
+    assert r.status is CheckStatus.WARN
     assert "Disabled" in r.message
-    assert "fabric-enabled" in ctx.state["ap_stop"]
+    # The whole point of the change: nothing downstream is suppressed.
+    assert not ctx.state.get("ap_stop")
+    # And the state those downstream checks run on is still published --
+    # returning early left them skipping with "no INFRA_VN L2 instance was
+    # resolved", which reads as a fabric fault when resolution never ran.
+    # (This ctx profiles no edge devices, so the planes resolve as unmatched
+    # rather than into ap_wlc_cp_planes -- which is this fixture's shape, not
+    # the behaviour under test. What matters is that resolution RAN.)
+    assert ctx.state["ap_wlc_l2_vnid"] == "8188"
+    assert ctx.state["ap_wlc_cp_unmatched"]
+    # Sessions are up in this fixture, so ONE cause is named -- the blocked
+    # Map Request -- not a menu of two for the reader to choose between.
+    assert "4342" in r.message
+    assert "firewall" in r.message
+    assert "consequence" not in r.message
+
+
+def test_disabled_with_every_session_down_blames_the_sessions(
+        patched, monkeypatch):
+    """The other half of the rule, and the opposite conclusion.
+
+    Fabric status follows the controller's LISP sessions. With every session
+    down, Disabled is their consequence -- so the sessions are the fault to
+    pursue, and naming UDP 4342 here would send the reader after a firewall
+    that is not the problem.
+    """
+    import radkit_cli
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    def fake(host, command, service, **kw):
+        if "config general" in command:
+            return AP_CONFIG_GENERAL.replace(
+                "Fabric status                                   : Enabled",
+                "Fabric status                                   : Disabled")
+        return FABRIC_SUMMARY.replace("Up", "Down")
+
+    monkeypatch.setattr(radkit_cli, "get_any_single_output", fake)
+    ctx = _ctx()
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.WARN
+    assert "consequence" in r.message
+    # The firewall reading belongs to the sessions-up case only.
+    assert "4342" not in r.message
+    assert "firewall" not in r.message
+    assert not ctx.state.get("ap_stop")
+
+
+def test_blank_control_plane_name_is_not_an_unresolvable_name(
+        patched, monkeypatch):
+    """Live case from AP-002: `config general` carries no control-plane name.
+
+    Verbatim from the box: fabric status Disabled, no RLOC line, no
+    control-plane name line, and all three sessions Down.
+
+    The old wording called this "a name the fabric does not resolve" and
+    stopped the run, sending the reader after a typo in a field nothing had
+    written. It is handled by rule 1 -- a blank name is the consequence of
+    the fabric status, and rule 1 returns there, weighing the sessions. This
+    pins the message the reader actually gets for this device.
+    """
+    import radkit_cli
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    def fake(host, command, service, **kw):
+        if "config general" in command:
+            # The real output: no RLOC and no control-plane name line.
+            return "\n".join(
+                l for l in AP_CONFIG_GENERAL.replace(
+                    "Fabric status                                   : "
+                    "Enabled",
+                    "Fabric status                                   : "
+                    "Disabled").splitlines()
+                if "control-plane name" not in l.lower()
+                and "rloc" not in l.lower())
+        return FABRIC_SUMMARY.replace("Up", "Down")
+
+    monkeypatch.setattr(radkit_cli, "get_any_single_output", fake)
+    ctx = _ctx()
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.WARN
+    # Not the wrong-name wording, and not a stop.
+    assert "does not have" not in r.message
+    assert "registers nowhere" not in r.message
+    assert not ctx.state.get("ap_stop")
+    # Sessions are all down here, so they are the named cause.
+    assert "consequence" in r.message
+    assert "4342" not in r.message
 
 
 def test_unresolvable_control_plane_name_stops_the_run(patched, monkeypatch):
@@ -148,19 +251,23 @@ def test_ap_addressed_outside_the_l3vnid_subnet_stops_the_run(patched):
     assert ctx.state.get("ap_stop")
 
 
-def test_the_three_faults_are_reported_as_distinct_causes(patched, monkeypatch):
-    """Each stop says which of the three happened.
+def test_the_two_stopping_faults_are_reported_as_distinct_causes(
+        patched, monkeypatch):
+    """Each stop says which of the two happened.
 
-    They are different faults -- not a fabric AP, a name that resolves to
-    nothing, an AP addressed outside the instance -- and the fix for each is
-    different, so one shared message would lose the only thing that matters.
+    They are different faults -- a name that resolves to nothing, and an AP
+    addressed outside the instance -- and the fix for each is different, so
+    one shared message would lose the only thing that matters.
+
+    Disabled fabric status was a third stop here until it was found to be a
+    consequence rather than a cause; it now warns and lets the flow continue
+    (see test_disabled_fabric_status_warns_without_stopping_the_run).
     """
     import radkit_cli
     from checks.ap_wlc import ApWlcFabricControlPlane
 
     stops = []
     for cfg_sub, ap_ip in (
-            (("Enabled", "Disabled"), "172.19.5.10"),
             (("default-control-plane", "typo-cp"), "172.19.5.10"),
             ((None, None), "172.19.9.10")):
         def fake(host, command, service, _sub=cfg_sub, **kw):
@@ -172,7 +279,7 @@ def test_the_three_faults_are_reported_as_distinct_causes(patched, monkeypatch):
         ctx = _ctx(ap_ip=ap_ip)
         ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
         stops.append(ctx.state["ap_stop"])
-    assert len(set(stops)) == 3, stops
+    assert len(set(stops)) == 2, stops
 
 
 def test_missing_l3vnid_mapping_stops_the_run(patched, monkeypatch):

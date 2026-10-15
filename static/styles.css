@@ -311,6 +311,34 @@ button:hover { background: #1d4ed8; }
   text-overflow: ellipsis;
 }
 #checksPanelSummary { font-size: 0.72rem; color: #94a3b8; font-weight: 400; }
+#checksPanelFilter {
+  background: transparent;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #94a3b8;
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.15rem 0.4rem;
+  margin: 0;
+  width: auto;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+#checksPanelFilter:hover { color: #e2e8f0; border-color: #475569; }
+/* Amber when engaged, matching the warn badge: the button is itself a
+   status -- the list is being hidden, and a reader who missed the click
+   should still be able to tell the panel is not showing everything. */
+#checksPanelFilter[aria-pressed="true"] {
+  background: #422006;
+  border-color: #a16207;
+  color: #fbbf24;
+}
+#checksPanelEmpty {
+  padding: 0.9rem 0.8rem;
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
 #checksPanelClose {
   background: transparent;
   border: 0;

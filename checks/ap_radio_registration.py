@@ -395,10 +395,13 @@ class ApRadioMacRegistrationVerdict(Check):
     name = "Radio MAC Registration — Summary"
     running_note = "Weighing the registration across the control planes."
 
-    def __init__(self, radio_mac, iid, node_id="wlc"):
+    def __init__(self, radio_mac, iid, node_id="wlc", wlc_hostname=None):
         self.radio_mac = radio_mac
         self.iid = iid
         self.target_node_id = node_id
+        # Needed to queue the controller's LISP session flow when the
+        # registration is missing -- that flow is per-controller.
+        self.wlc_hostname = wlc_hostname
 
     def run(self, ctx: RunContext) -> CheckResult:
         reg = ctx.state.get("ap_radio_reg") or {}
@@ -411,6 +414,18 @@ class ApRadioMacRegistrationVerdict(Check):
         yes = sorted(h for h, ok in reg.items() if ok)
         no = sorted(h for h, ok in reg.items() if not ok)
         data = {"registered_on": yes, "missing_on": no}
+
+        # A missing registration IS a reason to walk the session flow -- it
+        # is the fault that flow explains. Queued from here rather than left
+        # to a separate check because the no-registration branch below sets
+        # `ap_stop`, and every later check is an _ApCheck, so it would skip
+        # exactly the explanation the reader needs. The sessions may all be
+        # up: that is itself the finding, and only this flow can show it.
+        if no and self.wlc_hostname:
+            from checks.ap_wlc import ApWlcCpLispSessionTrigger
+            data["queue_checks"] = [
+                ApWlcCpLispSessionTrigger(self.wlc_hostname,
+                                          self.target_node_id)]
 
         if not yes:
             # The one state that stops the run: no control plane can answer a
@@ -497,7 +512,7 @@ class ApRadioMacRegistrationTrigger(Check):
                 host, mgmt, mac, iid, ctx.state.get("catc_name"), node,
                 edge_lo))
         queued.append(ApRadioMacRegistrationVerdict(
-            mac, iid, self.target_node_id))
+            mac, iid, self.target_node_id, self.hostname))
 
         return CheckResult(
             CheckStatus.OK,

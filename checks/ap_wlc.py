@@ -317,10 +317,17 @@ class ApWlcProfile(_ApCheck):
             queued.append(ApWlcWmi(hostname, node))
             queued.append(ApWlcTrustpoint(hostname, node))
             queued.append(ApWlcFabricEnabled(hostname, node))
-            queued.append(ApWlcControlPlanes(hostname, node))
+            # ApWlcControlPlanes is NOT queued here. It grades the session
+            # states that drive the LISP session flow, and that flow needs
+            # the AP's radio MAC -- which ApWlcApState publishes. It runs in
+            # the step-5 block instead, right after that check.
             queued.append(ApWlcInfraVn(hostname, node))
         # Last: every collection has been attempted by the time this runs.
-        queued.append(ApWlcCollectionVerdict())
+        # NOT ApWlcCollectionVerdict() here. Its INFRA_VN half reads
+        # `ap_wlc_bad_infra_vn`, which ApWlcControlPlanes writes -- and that
+        # check now runs in the step-5 batch, after the registration reads.
+        # Left here it graded an empty dict and passed silently, which is a
+        # worse failure than stopping: it looks like a verdict.
         plural = "" if len(candidates) == 1 else "s"
         return CheckResult(
             CheckStatus.OK,
@@ -378,6 +385,14 @@ class ApWlcApStateProfile(_ApCheck):
             queued.append(ApWlcApDtls(hostname, node))
             queued.append(ApWlcApCountry(hostname, node))
             queued.append(ApWlcApState(hostname, node))
+            # Immediately after the AP's state: the controller's own LISP
+            # sessions. A session down here is what the session flow exists
+            # to explain, and this check queues that flow itself rather than
+            # leaving it to a separate one -- a separate check is an
+            # _ApCheck, so it skips whenever anything earlier set `ap_stop`,
+            # which the controller-level verdicts do exactly when the fabric
+            # is unhealthy: precisely when the flow is worth running.
+            queued.append(ApWlcControlPlanes(hostname, node))
             # After the AP's state: the control-plane set it is configured
             # against, which is what the registration checks below resolve.
             # Runs last of the per-controller checks because an AP that is
@@ -425,12 +440,10 @@ class ApWlcApStateProfile(_ApCheck):
             # ApAccessTunnelStatistics leaves in state -- without a tunnel
             # there is no fabric data path and the question does not arise.
             queued.append(ApWlcSsidMapping(hostname, node))
-            # Trigger 3: a control plane the fabric check found Down leaves
-            # the radio MAC unregistered there, which no edge-side check can
-            # see. Immediately after the check that resolves the set, so the
-            # session flow it queues runs before the next controller's.
-            queued.append(ApWlcCpLispSessionTrigger(hostname, node))
         # Last: every controller has been looked at by the time this runs.
+        # After every controller's ApWlcControlPlanes has written its
+        # INFRA_VN state, which is what this grades.
+        queued.append(ApWlcCollectionVerdict())
         queued.append(ApWlcApStateVerdict())
         plural = "" if len(candidates) == 1 else "s"
         return CheckResult(
@@ -897,6 +910,65 @@ def _cp_is_up(c: dict) -> bool:
     return (c.get("status") or "").strip().lower() == "up"
 
 
+def resolve_wlc_control_planes(ctx, planes, node_id):
+    """Publish the (RLOC, hostname, management IP) triples the session flow
+    needs, resolved against the control planes the EDGE already discovered.
+
+    `show wireless fabric summary` names control planes by RLOC only. Filling
+    hostname and management IP from it too asked Catalyst Center to profile a
+    device at the RLOC, where none is managed, and every per-CP check died
+    with "Error Retrieving Device Details". So the summary is used for what it
+    actually says -- WHICH control planes the controller registers to -- and
+    the rest is looked up here.
+
+    Called from BOTH `ApWlcControlPlanes` and `ApWlcFabricControlPlane`.
+    `ApWlcControlPlanes` queues the session flow, and it now runs first, so
+    resolving only in the fabric check left the trigger skipping with "no
+    control plane was resolved" on exactly the run it exists for -- every
+    session down. Idempotent: the same summary yields the same triples, so
+    whichever runs first wins and the second is a no-op.
+
+    Returns (cp_nodes, planes_out, unmatched).
+    """
+    cp_rlocs = ctx.state.get("ap_cp_rlocs") or {}
+    cp_mgmts = ctx.state.get("ap_cp_mgmts") or {}
+    cp_targets = ctx.state.get("ap_cp_targets") or {}
+    # `cp_rloc`, not `rloc`: in the caller the loop variable would shadow the
+    # controller's own RLOC.
+    by_rloc = {cp_rloc: host for host, cp_rloc in cp_rlocs.items()}
+    node_by_host = {host: nid for nid, host in cp_targets.items()}
+
+    cp_nodes, planes_out, unmatched = {}, [], []
+    for plane in planes:
+        addr = plane["ip_address"]
+        host = by_rloc.get(addr)
+        if not host:
+            # A control plane the controller registers to that the edge never
+            # saw: a different site, or an SDA transit CP. Not an error -- but
+            # it has no profiled device and no node here, so it is reported
+            # rather than guessed at.
+            unmatched.append(addr)
+            continue
+        node_id = node_by_host.get(host)
+        if node_id:
+            # Reuse the node the edge drew. Minting a second one for the same
+            # device splits its findings across two canvas nodes.
+            cp_nodes[addr] = node_id
+            cp_nodes[host] = node_id
+        planes_out.append((addr, host, cp_mgmts.get(host) or host))
+
+    ctx.state["ap_wlc_cp_nodes"] = cp_nodes
+    ctx.state["ap_wlc_cp_planes"] = planes_out
+    ctx.state["ap_wlc_cp_unmatched"] = unmatched
+    # {control plane address: key}, from the `Key` column of
+    # `show wireless fabric summary`. Already plaintext, and the only place
+    # the controller's per-control-plane key appears: a C9800 has no
+    # `etr map-server` lines for it to be read from.
+    ctx.state["ap_wlc_cp_keys"] = {
+        p["ip_address"]: p.get("key") for p in planes if p.get("key")}
+    return cp_nodes, planes_out, unmatched
+
+
 class ApWlcControlPlanes(_PerWlcCheck):
     """LISP control planes the WLC registers wireless clients to.
 
@@ -950,6 +1022,17 @@ class ApWlcControlPlanes(_PerWlcCheck):
             "local": local, "multisite": multisite,
         }
 
+        # Resolve the control planes to (RLOC, hostname, management IP) HERE,
+        # not only in `ApWlcFabricControlPlane`. This check queues the session
+        # flow and now runs first, so leaving the resolution to the later
+        # check left the trigger skipping with "no control plane was resolved"
+        # on exactly the run it exists for -- every session down.
+        #
+        # Both site-local and Multi-Site planes are resolved: the trigger
+        # grades only the site-local ones, but the flow walks whatever it is
+        # handed, and a Multi-Site CP has a node on the canvas too.
+        resolve_wlc_control_planes(ctx, local + multisite, self.target_node_id)
+
         up = [c for c in local if _cp_is_up(c)]
         down = [c for c in local if not _cp_is_up(c)]
 
@@ -964,14 +1047,32 @@ class ApWlcControlPlanes(_PerWlcCheck):
                 "register with; re-provision the WLC from Catalyst Center.",
             )
 
+        # A down session IS the trigger. Queued from here rather than left to
+        # a separate check: that check is an _ApCheck, so it skips whenever
+        # anything earlier set `ap_stop` -- and the controller-level verdicts
+        # that run before it do exactly that when the fabric is unhealthy,
+        # which is precisely when this flow is worth running. Queueing it
+        # where the fault is found keeps the two together.
+        trigger = ([ApWlcCpLispSessionTrigger(self.hostname,
+                                              self.target_node_id)]
+                   if down else [])
+
         if not up:
+            # Graded WARN, not FAIL: a down control plane is a fabric fault,
+            # and the manifest reserves FAIL for the tool being unable to
+            # continue. It can continue here -- the CPs are defined and known,
+            # so Control Plane Discovery resolves them from Catalyst Center
+            # later in the flow and queries each one directly for the AP's
+            # registration. That check grades the CP node itself, which this
+            # one cannot: the WLC only reports its own view of the session.
             return CheckResult(
-                CheckStatus.FAIL,
+                CheckStatus.WARN,
                 "\n".join(lines) + f"\n\nNone of the {len(local)} site control "
                 "plane(s) is Up, so this WLC cannot register wireless clients "
                 "to the fabric and no AP joining it will onboard a client. "
                 "Check the control plane node(s) and the WLC's reachability to "
                 "them.",
+                data={"queue_checks": trigger},
             )
 
         if down:
@@ -981,6 +1082,7 @@ class ApWlcControlPlanes(_PerWlcCheck):
                 "\n".join(lines) + f"\n\n{len(up)} of {len(local)} site "
                 f"control planes is Up. Client registration works today, but "
                 f"the redundancy is gone — {names} should be restored.",
+                data={"queue_checks": trigger},
             )
 
         return CheckResult(CheckStatus.OK, "\n".join(lines))
@@ -2261,20 +2363,33 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         rloc = fields["rloc"]
         cp_name = fields["control_plane_name"]
 
-        # Rule 1. Not fabric-enabled: no control plane applies, and no access
-        # tunnel is ever built for this AP.
-        if fabric_status and fabric_status.lower() != "enabled":
-            ctx.state["ap_stop"] = (
-                f"{name} is not fabric-enabled on {self.hostname} "
-                f"(fabric status {fabric_status}).")
-            return CheckResult(
-                CheckStatus.FAIL,
-                f"{name} has fabric status {fabric_status} on "
-                f"{self.hostname}.\n\n"
-                f"The AP is not operating as a fabric AP, so it registers to "
-                f"no control plane and the edge builds no access tunnel for "
-                f"it. Everything validated below depends on that "
-                f"registration.")
+        # Rule 1. Not fabric-enabled.
+        #
+        # WARN, and deliberately no `ap_stop`. Fabric status is downstream of
+        # the controller's LISP sessions to its control planes, not a cause:
+        # with every session down, Disabled is the expected consequence and
+        # the sessions are the finding. With a session up it is the anomaly --
+        # the Map Request to the control plane (UDP 4342) is not getting
+        # through, typically a firewall in the path.
+        #
+        # Those two cases are told apart by the WLC->CP session flow, which
+        # the registration trigger queues AFTER this check. Stopping here
+        # cancelled exactly the flow that explains this result, so the reader
+        # was left with a provisioning-sounding verdict and no way to see a
+        # firewall behind it. The session states this check cannot see are
+        # read by ApWlcControlPlanes, earlier on this same controller.
+        #
+        # Recorded and carried, NOT returned on. The resolution below reads
+        # the CONTROLLER's fabric configuration -- its control planes and the
+        # INFRA_VN L2 instance -- which exists whatever this one AP's fabric
+        # status is, and which the registration and session checks downstream
+        # need. Returning here left them skipping with "no INFRA_VN L2
+        # instance was resolved", which reads as a fabric misconfiguration
+        # when the resolution had simply never run.
+        fabric_off = bool(fabric_status
+                          and fabric_status.lower() != "enabled")
+        if fabric_off:
+            ctx.state["ap_wlc_fabric_disabled"] = True
 
         try:
             raw_fabric = get_any_single_output(
@@ -2288,16 +2403,52 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         summary, _unreadable = parse_wireless_fabric_summary(raw_fabric)
 
         # Rule 2. The name the AP carries has to exist on the controller.
-        planes = control_planes_named(summary, cp_name)
-        if not planes:
+        #
+        # A BLANK name is not that fault. The controller only assigns a
+        # control-plane name to an AP it is treating as a fabric AP, so an
+        # empty one is the expected consequence of the fabric status read
+        # above -- not an independent misconfiguration, and not something to
+        # stop the run on. Reporting it as "a name the fabric does not
+        # resolve" sent the reader after a typo in a field nothing had
+        # written.
+        # With a name, the planes that name resolves to. WITHOUT one -- which
+        # is what a non-fabric AP leaves behind -- every control plane the
+        # CONTROLLER has, because that is still a fact about the controller
+        # and it is what the verdict below weighs. Hardcoding [] here made
+        # this check report "no control plane was resolved" while
+        # ApWlcControlPlanes listed all three from the same command, and
+        # silently emptied the state every downstream check reads.
+        planes = (control_planes_named(summary, cp_name) if cp_name
+                  else list(summary.get("control_planes") or []))
+        if not cp_name and not fabric_off:
+            # A blank name with fabric ENABLED is its own fault: the
+            # controller should have assigned one and did not.
+            #
+            # With fabric off it is merely the consequence of that, so this
+            # does NOT return -- the single verdict below weighs the sessions
+            # and says which of the two things went wrong. Returning here
+            # gave the reader a bare "see the fabric status" with no cause
+            # attached, and skipped the session reasoning entirely.
+            return CheckResult(
+                CheckStatus.WARN,
+                f"{self.hostname} holds no control-plane name for {name}, "
+                f"although the AP is fabric-enabled. The controller assigns "
+                f"one to every fabric AP, so this is a fault on the "
+                f"controller rather than a consequence of the AP's state.",
+                data={"control_plane_name": None})
+
+        # `not fabric_off`: with fabric off there is no name to resolve, so
+        # an empty `planes` means "nothing was assigned", not "the assigned
+        # name is wrong". Reporting the latter blamed a typo in a field the
+        # controller had never written. The verdict below explains it.
+        if not planes and not fabric_off:
             ctx.state["ap_stop"] = (
-                f"Control plane {cp_name or '(none)'} is not configured on "
+                f"Control plane {cp_name} is not configured on "
                 f"{self.hostname}.")
             return CheckResult(
                 CheckStatus.FAIL,
                 f"{name} is configured against control plane "
-                f"{cp_name or '(none)'}, which {self.hostname} does not "
-                f"have.\n\n"
+                f"{cp_name}, which {self.hostname} does not have.\n\n"
                 f"The LISP control plane for VNI {INFRA_VN_L3_VNID} on this "
                 f"controller is configured with a name the fabric does not "
                 f"resolve, so the AP registers nowhere.")
@@ -2374,6 +2525,7 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         down = [p for p in planes
                 if (p.get("status") or "").strip().lower() != CP_STATUS_UP]
 
+
         # What the session trigger runs on. The controller is an xTR of its
         # own, registering the radio MAC into the L2 instance to these same
         # control planes, so the flow needs its device, its RLOC and the
@@ -2385,40 +2537,8 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
         # each one properly: hostname, RLOC and -- separately -- the
         # management IP, because the ETR peers with the RLOC while profiling
         # a device goes through Catalyst Center by management address.
-        #
-        # `show wireless fabric summary` names control planes by RLOC only.
-        # Filling hostname and management IP from it too asked Catalyst
-        # Center to profile a device at the RLOC, where none is managed, and
-        # every per-CP check died with "Error Retrieving Device Details".
-        # So the summary is used for what it actually says -- WHICH control
-        # planes the controller registers to -- and the rest is looked up.
-        cp_rlocs = ctx.state.get("ap_cp_rlocs") or {}
-        cp_mgmts = ctx.state.get("ap_cp_mgmts") or {}
-        cp_targets = ctx.state.get("ap_cp_targets") or {}
-        # `cp_rloc`, not `rloc`: the loop variable would shadow the
-        # controller's own RLOC, read above and printed below.
-        by_rloc = {cp_rloc: host for host, cp_rloc in cp_rlocs.items()}
-        node_by_host = {host: nid for nid, host in cp_targets.items()}
-
-        cp_nodes, planes_out, unmatched = {}, [], []
-        for plane in planes:
-            addr = plane["ip_address"]
-            host = by_rloc.get(addr)
-            if not host:
-                # A control plane the controller registers to that the edge
-                # never saw: a different site, or an SDA transit CP. Not an
-                # error -- but it has no profiled device and no node here, so
-                # it is reported rather than guessed at.
-                unmatched.append(addr)
-                continue
-            node_id = node_by_host.get(host)
-            if node_id:
-                # Reuse the node the edge drew. Minting a second one for the
-                # same device splits its findings across two canvas nodes.
-                cp_nodes[addr] = node_id
-                cp_nodes[host] = node_id
-            planes_out.append((addr, host, cp_mgmts.get(host) or host))
-        ctx.state["ap_wlc_cp_nodes"] = cp_nodes
+        cp_nodes, planes_out, unmatched = resolve_wlc_control_planes(
+            ctx, planes, self.target_node_id)
         # The controller registers the AP's radio MAC to each of these
         # control planes, over its own LISP session -- so draw it. Without
         # the link the per-control-plane findings below land on nodes the
@@ -2443,21 +2563,56 @@ class ApWlcFabricControlPlane(_PerWlcCheck):
              "label": "LISP Session"}
             for nid in (cp_nodes.get(p["ip_address"]) for p in planes)
             if nid]
-        # (RLOC, hostname, management IP) -- the three the session flow needs.
-        ctx.state["ap_wlc_cp_planes"] = planes_out
-        ctx.state["ap_wlc_cp_unmatched"] = unmatched
-        # {control plane address: key}, from the `Key` column of
-        # `show wireless fabric summary`. Already plaintext, and the only
-        # place the controller's per-control-plane key appears: a C9800 has
-        # no `etr map-server` lines for it to be read from.
-        ctx.state["ap_wlc_cp_keys"] = {
-            p["ip_address"]: p.get("key") for p in planes if p.get("key")}
+        # The triples, the node map, the unmatched list and the per-control
+        # plane keys are all published by `resolve_wlc_control_planes` above.
         # ApWlcCollect recorded it; _PerWlcCheck itself carries no address.
         ctx.state["ap_wlc_mgmtip"] = (
             (ctx.state.get("ap_wlc_profiles") or {})
             .get(self.hostname, {}).get("mgmt_ip"))
         if vnid.get("l2_vnid"):
             ctx.state["ap_wlc_l2_vnid"] = vnid["l2_vnid"]
+
+        # Rule 1, concluded. Both facts are in hand now, so this states ONE
+        # cause instead of handing the reader two readings to choose between.
+        #
+        # Sessions all down -> Disabled is their consequence; they are the
+        # fault, and the session flow queued after this check walks them.
+        # Any session up -> the sessions are not the explanation, so the Map
+        # Request itself is not getting through: UDP 4342 between this
+        # controller and the control plane, typically a firewall.
+        if fabric_off:
+            head = (
+                f"{name} has fabric status {fabric_status} on "
+                f"{self.hostname}, so it is not operating as a fabric AP: it "
+                f"registers to no control plane and the edge builds no "
+                f"access tunnel for it.\n\n")
+            if planes and len(down) == len(planes):
+                why = (
+                    f"Every LISP session this controller has to its control "
+                    f"planes is down "
+                    f"({', '.join(p['ip_address'] for p in down)}), and "
+                    f"fabric status follows those sessions -- so Disabled is "
+                    f"their consequence, not a separate fault. The sessions "
+                    f"are what to pursue; the checks below walk them.")
+            elif planes:
+                up = [p for p in planes if p not in down]
+                why = (
+                    f"This controller's LISP session to "
+                    f"{', '.join(p['ip_address'] for p in up)} is up, so the "
+                    f"sessions are not the explanation. The session carries "
+                    f"the Map Request that registers the AP, and fabric "
+                    f"status says it is not completing -- so the Map Request "
+                    f"to the control plane on UDP 4342 is not getting "
+                    f"through. Check for a firewall between this controller "
+                    f"and the control planes.")
+            else:
+                why = (
+                    f"No control plane was resolved on this controller, so "
+                    f"there were no sessions to weigh this against.")
+            return CheckResult(
+                CheckStatus.WARN, head + why,
+                data={"fabric_status": fabric_status, "fabric_enabled": False,
+                      "cp_total": len(planes), "cp_down": len(down)})
 
         # One bullet per fact, which is how every other check in the chain
         # reads. The grouped headings and padded columns this used to print
@@ -2566,13 +2721,45 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
         self.target_node_id = node_id
         self.name = f"WLC LISP Session Troubleshooting — {hostname}"
 
+    def run(self, ctx: RunContext) -> CheckResult:
+        # Deliberately NOT _ApCheck.run: that skips on `ap_stop`, and the
+        # verdict that sets it -- a radio MAC registered on no control plane
+        # -- is the very thing that queues this flow. Honouring the stop here
+        # would suppress the explanation for the fault that raised it.
+        return self.run_ap(ctx)
+
     def run_ap(self, ctx: RunContext) -> CheckResult:
-        down = ctx.state.get("ap_wlc_cp_down") or []
-        if not down:
+        # Driven by ApWlcControlPlanes, which grades the session states and
+        # runs just after ApWlcApState on this controller. It was previously
+        # driven by `ap_wlc_cp_down`, written by ApWlcFabricControlPlane --
+        # which returns early on several faults, so the key was often never
+        # written and this flow skipped with "every session is up" while the
+        # controller had every session down.
+        #
+        # Site-local only, which is the grading rule there too: a Multi-Site
+        # control plane serves a remote site, so its session being down is
+        # not what keeps THIS AP from registering.
+        graded = (ctx.state.get("ap_wlc_control_planes")
+                  or {}).get(self.hostname) or {}
+        local = graded.get("local") or []
+        down = [c for c in local if not _cp_is_up(c)]
+        if not local:
+            return CheckResult(
+                CheckStatus.SKIP,
+                "Skipped — no site control plane was graded on this "
+                "controller (see WLC Control Planes).")
+        # A missing registration is the other reason to walk this flow, and
+        # it does not require a session to be down -- a registration absent
+        # while every session is up is exactly the case only this flow can
+        # explain. ApRadioMacRegistrationVerdict queues it for that reason.
+        missing = [h for h, ok in (ctx.state.get("ap_radio_reg")
+                                   or {}).items() if not ok]
+        if not down and not missing:
             return CheckResult(
                 CheckStatus.SKIP,
                 "Skipped — every control plane this controller registers to "
-                "has its session up, so there is nothing to explain.")
+                "has its session up and holds the radio MAC, so there is "
+                "nothing to explain.")
 
         mac = (ctx.state.get("ap_wlc_radio_mac") or "").strip()
         if not mac:
@@ -2625,7 +2812,10 @@ class ApWlcCpLispSessionTrigger(_ApCheck):
         # The instance every per-control-plane check reads.
         ctx.state["wlc_cp_vnid"] = fabric["vnid"]
 
-        listed = ", ".join(f"{ip} ({state})" for ip, state in down)
+        # Dicts from ApWlcControlPlanes' grading, not the (ip, status)
+        # tuples the old `ap_wlc_cp_down` carried.
+        listed = ", ".join(f"{c['ip_address']} ({c.get('status')})"
+                           for c in down)
         return CheckResult(
             CheckStatus.WARN,
             f"The LISP session from {self.hostname} to {listed} is not up. "

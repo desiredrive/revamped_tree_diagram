@@ -1047,6 +1047,12 @@ function showTopology(payload) {
   cy.on('tap', 'node', (e) => showChecksPanel(e.target.id()));
   cy.on('tap', (e) => { if (e.target === cy) hideChecksPanel(); });
   document.getElementById('checksPanelClose').addEventListener('click', hideChecksPanel);
+  document.getElementById('checksPanelFilter').addEventListener('click', () => {
+    if (!selectedNodeId) return;
+    if (findingsOnly.has(selectedNodeId)) findingsOnly.delete(selectedNodeId);
+    else findingsOnly.add(selectedNodeId);
+    renderChecksPanel();
+  });
   document.getElementById('topologyRefresh').addEventListener('click', refreshTopology);
   const backBtn = document.getElementById('topologyBackMenu');
   if (backBtn) {
@@ -1305,6 +1311,17 @@ function backToMenu() {
 
 const STATUS_ICON_CHAR = { pending: '·', skip: '—', running: '…', ok: '✓', warn: '!', fail: '✗' };
 
+// Statuses the "Findings" filter keeps. `running` and `pending` are kept
+// deliberately: a check still in flight has no verdict yet, and dropping it
+// would make rows vanish mid-run and reappear as they land -- the filter is
+// for hiding settled good news, not for hiding work in progress.
+const FINDING_STATUSES = new Set(['warn', 'fail', 'running', 'pending']);
+
+// Per node, not global: a reader narrows the one device they are reading and
+// expects the next device to open showing everything. Keyed by node id and
+// held across re-renders, which SSE triggers on every check result.
+const findingsOnly = new Set();
+
 function showChecksPanel(nodeId) {
   selectedNodeId = nodeId;
   document.getElementById('checksPanel').style.display = 'flex';
@@ -1337,11 +1354,31 @@ function renderChecksPanel() {
     (counts.fail || 0) + ' fail' +
     (counts.skip ? ' · ' + counts.skip + ' skipped' : '');
 
+  // The toggle reflects THIS node, and is disabled when there is nothing to
+  // filter down to -- an enabled control that visibly does nothing reads as
+  // a bug. Counts come from the full list, so the summary keeps telling the
+  // truth about the device while the list below shows a subset.
+  const btn = document.getElementById('checksPanelFilter');
+  const findings = (counts.warn || 0) + (counts.fail || 0);
+  const only = findingsOnly.has(selectedNodeId);
+  if (btn) {
+    btn.setAttribute('aria-pressed', only ? 'true' : 'false');
+    btn.disabled = !findings && !only;
+    btn.textContent = findings ? 'Findings (' + findings + ')' : 'Findings';
+  }
+
   const expanded = new Set(
     Array.from(list.querySelectorAll('.check-row.expanded')).map(el => el.dataset.key)
   );
   list.innerHTML = '';
-  items.forEach(it => {
+  const shown = only ? items.filter(it => FINDING_STATUSES.has(it.status)) : items;
+  if (only && !shown.length) {
+    const empty = document.createElement('div');
+    empty.id = 'checksPanelEmpty';
+    empty.textContent = 'No warnings or failures on this device.';
+    list.appendChild(empty);
+  }
+  shown.forEach(it => {
     const key = selectedNodeId + '|' + it.name;
     const row = document.createElement('div');
     row.className = 'check-row' + (expanded.has(key) ? ' expanded' : '');

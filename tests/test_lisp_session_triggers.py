@@ -53,7 +53,8 @@ def test_trigger_2_registration_missing_runs_the_flow(no_sessions_down):
     r = ApLispSessionTrigger().run_ap(ctx)
     assert r.status is CheckStatus.WARN
     assert r.data["queue_checks"]
-    assert "does not hold a registration" in r.message
+    assert "is not registered on" in r.message
+    assert "the fabric cannot locate it" in r.message
 
 
 def test_trigger_1_session_down_runs_the_flow_with_the_record_still_held(
@@ -70,8 +71,9 @@ def test_trigger_1_session_down_runs_the_flow_with_the_record_still_held(
     r = ApLispSessionTrigger().run_ap(ctx)
     assert r.status is CheckStatus.WARN
     assert r.data["queue_checks"]
-    assert "is not up" in r.message
+    assert "is down" in r.message
     assert "still held" in r.message
+    assert "nothing is refreshing it" in r.message
 
 
 def test_a_down_session_supplies_its_own_map_servers(both_sessions_down):
@@ -149,7 +151,8 @@ def test_registration_missing_takes_precedence_in_the_message(
 
     ctx = _ctx(ap_cp_reg_missing=["cp1"])
     r = ApLispSessionTrigger().run_ap(ctx)
-    assert "does not hold a registration" in r.message
+    assert "is not registered on" in r.message
+    assert "the fabric cannot locate it" in r.message
     # Only the CP actually missing the record is walked, as before.
     names = [type(c).__name__ for c in r.data["queue_checks"]]
     assert names.count("LispPerMapServerSession") == 1
