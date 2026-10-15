@@ -17,3 +17,6 @@ dist/
 # Local environment and run artifacts
 testbed.yaml
 anyconnect_results.json
+
+# Lab capture, not part of the tool
+SDA Fabric Underlay   textmode.txt
