@@ -38,6 +38,7 @@ PD_ELIGIBLE = (
     "route",
     "fib_entry",
     "IFM",              # interface manager programming
+    "interface_list",   # the device's own count of a dynamic interface type
     "cts_sgacl_entry",
     "acl_entry",
     "qos_entry",
@@ -4379,12 +4380,20 @@ class ApLispSessionTrigger(_ApCheck):
         # session has since gone down, so waiting for the record to go
         # missing would leave the fault unexamined until it does.
         down = self._down_sessions(ctx)
-        if not missing and not down:
+        # The edge holds no WLC database entry for the AP at all. The
+        # controller signals that entry to the edge over its LISP session, so
+        # an absent entry points at those sessions -- and unlike a missing
+        # registration, which names the one control plane that lacks it, this
+        # names none: the edge was simply never told. Both control planes are
+        # walked, since either session could be the one that failed.
+        edge_entry_missing = bool(ctx.state.get("ap_edge_wlc_db_missing"))
+        suspects = ctx.state.get("ap_edge_wlc_session_suspect") or []
+        if not missing and not down and not edge_entry_missing:
             return CheckResult(
                 CheckStatus.SKIP,
                 "Skipped — every reachable control plane holds the AP's "
-                "registration and every LISP session is up, so there is "
-                "nothing to explain.",
+                "registration, the edge holds its WLC database entry, and "
+                "every LISP session is up, so there is nothing to explain.",
             )
 
         ip = ctx.state.get("ap_ip")
@@ -4416,6 +4425,19 @@ class ApLispSessionTrigger(_ApCheck):
         for host in missing:
             pairs.append((rlocs.get(host) or host, host,
                           mgmts.get(host) or host))
+
+        # The edge has no entry for the AP at all. That fault is not specific
+        # to one control plane -- the edge was never signalled by any of them
+        # -- so every control plane the AP belongs to is walked, not just the
+        # ones a registration check happened to flag.
+        if edge_entry_missing:
+            already = {h for _, h, _ in pairs}
+            for host in suspects:
+                if host in already:
+                    continue
+                pairs.append((rlocs.get(host) or host, host,
+                              mgmts.get(host) or host))
+                already.add(host)
 
         # Trigger 1 names its control planes by RLOC -- the peer address the
         # session is to -- not by hostname, so they are mapped back to the CP
