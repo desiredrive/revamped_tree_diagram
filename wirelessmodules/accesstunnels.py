@@ -159,3 +159,78 @@ class AccessTunnel:
 
         return None
 
+
+
+def parse_access_tunnel_statistics(output):
+    """Parse `show access-tunnel statistics`.
+
+    The counters sit under a `Statistics:` block, and the max is carried in
+    the counter's own label rather than on a line of its own::
+
+        Statistics:
+            Number of Created Access Tunnels (max 200): 1
+            Number of Deleted Access Tunnels: 0
+            Number of Active Access Tunnels (max 200): 1
+
+    Three tables follow -- active tunnels, the last AP IP/MAC changes, and
+    deleted tunnels -- sharing one row shape. A leading `*` on the AP IP
+    means that tunnel's AP IP and MAC have changed at least once during this
+    switch's uptime; the device says so in its own legend above the table.
+
+    Returns {"created", "deleted", "active", "max", "tunnels": [...]}, where
+    each tunnel is {"name", "ifid", "ap_ip", "ip_changed", "vrf_id", "mac",
+    "uptime", "times"}. Counters are None when absent rather than 0, so a
+    parse failure never reads as an empty fabric.
+    """
+    res = {"created": None, "deleted": None, "active": None, "max": None,
+           "tunnels": []}
+    if not output or not isinstance(output, str):
+        return res
+
+    def _count(label):
+        m = re.search(r"Number of " + label + r" Access Tunnels"
+                      r"(?:\s*\(max\s+(\d+)\))?\s*:\s*(\d+)", output)
+        if not m:
+            return None, None
+        return int(m.group(2)), (int(m.group(1)) if m.group(1) else None)
+
+    res["created"], cmax = _count("Created")
+    res["deleted"], _ = _count("Deleted")
+    res["active"], amax = _count("Active")
+    # Both counters carry the same platform limit; either will do.
+    res["max"] = amax if amax is not None else cmax
+
+    # Only the ACTIVE table is read. "Last AP IP and MAC Changes" repeats
+    # rows already listed there, and "Deleted Access Tunnels" is a different
+    # thing entirely -- its last column is Downtime, not Uptime -- so folding
+    # them together would double-count a live tunnel and mix a dead one in.
+    m = re.search(r"Active Access Tunnels:(.*?)(?:Last AP IP|Deleted Access"
+                  r" Tunnels:|\Z)", output, re.S)
+    body = m.group(1) if m else ""
+
+    row = re.compile(
+        r"^(?P<name>\S+)\s+"
+        r"(?P<ifid>0x[0-9a-fA-F]+)\s+"
+        # The `*` is attached to the address with no space between them.
+        r"(?P<star>\*?)(?P<ap_ip>\d+\.\d+\.\d+\.\d+)\s+"
+        r"(?P<vrf>\d+)\s+"
+        r"(?P<mac>[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"
+        r"(?P<uptime>\d+\s+day,\s+[\d:]+)"
+        r"(?:\s*\((?P<times>\d+)\))?")
+
+    for line in body.splitlines():
+        mm = row.match(line.strip())
+        if not mm:
+            continue
+        res["tunnels"].append({
+            "name": mm.group("name"),
+            "ifid": mm.group("ifid"),
+            "ap_ip": mm.group("ap_ip"),
+            # The device's own legend: "* denotes AP IP and MAC change".
+            "ip_changed": mm.group("star") == "*",
+            "vrf_id": int(mm.group("vrf")),
+            "mac": mm.group("mac").lower(),
+            "uptime": re.sub(r"\s+", " ", mm.group("uptime")).strip(),
+            "times": int(mm.group("times")) if mm.group("times") else None,
+        })
+    return res
