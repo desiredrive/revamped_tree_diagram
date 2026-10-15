@@ -3,7 +3,12 @@
 # Each test re-logs in via certificate; expect ~10-20s per test.
 
 set -u
-export RADKIT_KEY_PASSWORD="${RADKIT_KEY_PASSWORD:-Mexico123!}"
+# Supplied by the environment, never defaulted here. A default in a
+# committed script is a published secret.
+if [ -z "${RADKIT_KEY_PASSWORD:-}" ]; then
+  echo "RADKIT_KEY_PASSWORD is not set. Export it before running." >&2
+  exit 1
+fi
 
 HOST="edge-1-jalejand-cisco-com"
 PY=".venv/bin/python -m programming.test_runner"
