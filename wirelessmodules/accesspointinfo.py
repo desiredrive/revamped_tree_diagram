@@ -659,3 +659,313 @@ def parse_ap_fabric_fields(text):
         if cp:
             found["control_plane_name"] = cp.group("name").strip()
     return found
+
+
+def parse_ap_wlan_dot11(text):
+    """`show ap name <ap> wlan dot11 <band>` -> the WLANs on each radio slot.
+
+    The command prints one block per slot, each listing the WLAN IDs the AP
+    is broadcasting on that radio together with the BSSID it uses for them::
+
+        Slot id  : 0
+          WLAN ID    BSSID          MLD MAC
+          -------------------------------------
+          23         3891.b70f.2600 N/A
+
+    Returns {slot_id: [{"wlan_id", "bssid", "mld_mac"}, ...]}, slots in the
+    order printed. A slot that is listed with no WLANs comes back as an empty
+    list rather than being omitted -- "this radio carries nothing" and "this
+    radio was not mentioned" are different answers.
+
+    There is no Genie parser for this command.
+    """
+    slots = {}
+    current = None
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        m = re.match(r"^Slot\s+id\s*:\s*(\d+)\s*$", s, re.IGNORECASE)
+        if m:
+            current = int(m.group(1))
+            slots.setdefault(current, [])
+            continue
+        if current is None:
+            continue
+        # Header and rule lines inside a slot block.
+        if s.startswith("WLAN ID") or set(s) <= set("- "):
+            continue
+        m = re.match(r"^(?P<wlan>\d+)\s+"
+                     r"(?P<bssid>[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\."
+                     r"[0-9a-fA-F]{4})"
+                     r"(?:\s+(?P<mld>\S+))?\s*$", s)
+        if m:
+            slots[current].append({
+                "wlan_id": int(m.group("wlan")),
+                "bssid": m.group("bssid").lower(),
+                # "N/A" on a radio without multi-link; kept as printed.
+                "mld_mac": (m.group("mld") or "").strip(),
+            })
+    return slots
+
+
+def parse_wlan_summary(text):
+    """`show wlan summary` -> [{"wlan_id", "profile_name", "ssid", "status",
+    "security", "security_6ghz"}].
+
+    Genie has a parser for this command and it is WRONG for this fabric. It
+    splits the row on whitespace, which breaks on any SSID containing a space
+    -- and these do. On the real output `MX CWA_profile / MX CWA / UP` comes
+    back as profile_name "MX", ssid "CWA_profile", status "MX", with the rest
+    swept into `security`. Every field after the first is shifted.
+
+    The row is fixed-width, so the columns are cut by offset instead. The
+    offsets are derived from the header line rather than hardcoded, so a
+    release that widens a column does not silently truncate an SSID.
+    """
+    rows = []
+    lines = (text or "").splitlines()
+
+    head_i = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*ID\s+Profile Name\s+SSID\s+Status", line):
+            head_i = i
+            break
+    if head_i is None:
+        return rows
+
+    head = lines[head_i]
+
+    def _col(label, after=0):
+        m = re.search(re.escape(label), head[after:])
+        return (after + m.start()) if m else None
+
+    c_id = _col("ID")
+    c_profile = _col("Profile Name")
+    c_ssid = _col("SSID", c_profile or 0)
+    c_status = _col("Status", c_ssid or 0)
+    c_sec = _col("2.4GHz/5GHz Security", c_status or 0)
+    c_sec6 = _col("6GHz Security", c_sec or 0)
+
+    def _cut(line, start, end):
+        if start is None:
+            return ""
+        return line[start:end].strip() if end else line[start:].strip()
+
+    for line in lines[head_i + 1:]:
+        if not line.strip() or set(line.strip()) <= set("-"):
+            continue
+        wid = _cut(line, c_id, c_profile)
+        if not wid.isdigit():
+            continue
+        rows.append({
+            "wlan_id": int(wid),
+            "profile_name": _cut(line, c_profile, c_ssid),
+            "ssid": _cut(line, c_ssid, c_status),
+            "status": _cut(line, c_status, c_sec),
+            "security": _cut(line, c_sec, c_sec6),
+            "security_6ghz": _cut(line, c_sec6, None),
+        })
+    return rows
+
+
+_FABRIC_WLAN_COUNT = re.compile(r"Number of Fabric wlan\s*:\s*(\d+)",
+                                re.IGNORECASE)
+_FABRIC_WLAN_ROW = re.compile(r"^\s*(?P<wlan_id>\d+)\s+(?P<rest>\S.*?)\s*$")
+
+
+def parse_fabric_wlan_summary(text):
+    """`show fabric wlan summary` -> {"count", "wlans": [...]}.
+
+    The fabric-enabled subset of `show wlan summary`. A WLAN the AP
+    broadcasts that is absent here is a non-fabric WLAN: the controller
+    offers it, but it has no fabric data path, so a client joining it on a
+    fabric AP will not forward over the access tunnel.
+
+    The row is fixed-width like `show wlan summary`, but the header cannot
+    be used to derive the offsets: `WLAN Profile Name` is one header
+    spanning two columns -- the ID and the profile name -- so a cut at its
+    start would keep them together. The ID is a leading integer, which
+    splits off cleanly, and the remaining three columns are cut from the
+    header positions of `SSID` and `Status` measured in the separator row.
+
+    Splitting the rest on whitespace is NOT safe here for the same reason
+    it is not safe on `show wlan summary`: these SSIDs contain spaces.
+    """
+    out = {"count": None, "wlans": []}
+    if not text:
+        return out
+
+    m = _FABRIC_WLAN_COUNT.search(text)
+    if m:
+        out["count"] = int(m.group(1))
+
+    lines = text.splitlines()
+    hdr_i = None
+    for i, ln in enumerate(lines):
+        if "Profile Name" in ln and "SSID" in ln and "Status" in ln:
+            hdr_i = i
+            break
+    if hdr_i is None:
+        return out
+
+    hdr = lines[hdr_i]
+    ssid_at = hdr.find("SSID")
+    status_at = hdr.find("Status")
+
+    for ln in lines[hdr_i + 1:]:
+        if not ln.strip() or set(ln.strip()) <= {"-"}:
+            continue
+        m = _FABRIC_WLAN_ROW.match(ln)
+        if not m:
+            continue
+        # The profile name runs from after the ID to where SSID starts.
+        prof = ln[:ssid_at].strip()
+        prof = prof.split(None, 1)[1].strip() if " " in prof.strip() else ""
+        row = {
+            "wlan_id": m.group("wlan_id"),
+            "profile_name": prof,
+            "ssid": ln[ssid_at:status_at].strip(),
+            "status": ln[status_at:].strip(),
+        }
+        if row["ssid"] or row["profile_name"]:
+            out["wlans"].append(row)
+    return out
+
+
+_PTAG_COUNT = re.compile(r"Number of WLAN-POLICY maps\s*:\s*(\d+)",
+                         re.IGNORECASE)
+_PTAG_NAME = re.compile(r"^Policy Tag Name\s*:\s*(.+?)\s*$",
+                        re.IGNORECASE | re.MULTILINE)
+
+
+def parse_wireless_tag_policy_detailed(text):
+    """`show wireless tag policy detailed <tag>` -> the WLAN-POLICY maps.
+
+    Returns {"tag_name", "count", "maps": [{"wlan_profile", "policy_name"}]}.
+
+    This is the set of WLANs the policy tag actually carries, which is what
+    decides whether an AP wearing that tag can broadcast a given SSID at
+    all. An SSID that is UP on the controller and fabric-enabled is still
+    not reachable on this AP unless its profile appears here.
+
+    Two fixed-width columns, cut from the header rather than split on
+    whitespace: the profile names contain spaces ("MX EWA SDA_profile"),
+    so a split would shear them in half the same way it breaks
+    `show wlan summary`.
+    """
+    out = {"tag_name": None, "count": None, "maps": []}
+    if not text:
+        return out
+
+    m = _PTAG_NAME.search(text)
+    if m:
+        out["tag_name"] = m.group(1).strip()
+    m = _PTAG_COUNT.search(text)
+    if m:
+        out["count"] = int(m.group(1))
+
+    lines = text.splitlines()
+    hdr_i = None
+    for i, ln in enumerate(lines):
+        if "WLAN Profile Name" in ln and "Policy Name" in ln:
+            hdr_i = i
+            break
+    if hdr_i is None:
+        return out
+
+    pol_at = lines[hdr_i].find("Policy Name")
+    for ln in lines[hdr_i + 1:]:
+        if not ln.strip() or set(ln.strip()) <= {"-"}:
+            continue
+        wlan = ln[:pol_at].strip()
+        pol = ln[pol_at:].strip()
+        if wlan:
+            out["maps"].append({"wlan_profile": wlan, "policy_name": pol})
+    return out
+
+
+#: `show ap wlan summary` columns, in the order the header prints them.
+#: Cut by header offset, never by whitespace: SSIDs and profile names
+#: contain spaces, and so do the three uptime columns ("17 hours 57
+#: minutes 3 seconds"), which a split would shatter into six fields.
+_AP_WLAN_COLS = (
+    ("bssid", "BSSID"),
+    ("ssid", "SSID"),
+    ("wlan_profile", "WLAN profile name"),
+    ("state", "AP WLAN State"),
+    ("wlan_uptime", "AP WLAN Uptime"),
+    ("client_count", "Client Count"),
+    ("ap_name", "AP Name"),
+    ("ip_address", "IP Address"),
+    ("capabilities", "Physical Capabilities"),
+    ("ap_mode", "AP Mode"),
+    ("capwap_mtu", "CAPWAP Path MTU"),
+    ("radio_uptime", "Radio Uptime"),
+    ("txpwr", "TxPwr"),
+    ("channel", "Channel"),
+    ("ap_uptime", "AP Up time"),
+    ("assoc_uptime", "Association Up time"),
+)
+
+
+def parse_ap_wlan_summary(text, ap_name=None):
+    """`show ap wlan summary` -> [{column: value}], one row per BSSID.
+
+    Genie has no parser for this command -- checked against the parser
+    index, not guessed -- so the columns are cut here.
+
+    One row per BSSID per radio, so an AP carrying five WLANs on two
+    radios prints ten rows. `state` is the operational answer the user
+    asked for: `Enabled` means the AP is actually broadcasting that WLAN
+    on that radio, `Disabled` means it is not. `capabilities` carries the
+    band ("24ghz-HE", "5ghz-HE"), which is how a row is attributed to a
+    radio -- there is no slot column.
+
+    `ap_name` filters to one AP's rows. The command prints every AP on
+    the controller, and on a real fabric that is far more than the one
+    being traced.
+    """
+    rows = []
+    if not text:
+        return rows
+
+    lines = text.splitlines()
+    hdr_i = None
+    for i, ln in enumerate(lines):
+        if "BSSID" in ln and "AP WLAN State" in ln and "AP Name" in ln:
+            hdr_i = i
+            break
+    if hdr_i is None:
+        return rows
+
+    hdr = lines[hdr_i]
+    # Each column runs from its own header offset to the next one's. A
+    # column whose header is missing in this release is skipped rather
+    # than shifting every column after it.
+    # Searched left to right from the end of the previous column, NOT with
+    # a bare `hdr.find(label)`: "SSID" occurs inside "BSSID", so a plain
+    # find would put the SSID column at offset 1 and shear the BSSID in
+    # half. Scanning forward also keeps the columns in header order even
+    # if a label repeats later in the line.
+    bounds = []
+    cursor = 0
+    for key, label in _AP_WLAN_COLS:
+        at = hdr.find(label, cursor)
+        if at >= 0:
+            bounds.append((key, at))
+            cursor = at + len(label)
+
+    for ln in lines[hdr_i + 1:]:
+        if not ln.strip() or set(ln.strip()) <= {"-"}:
+            continue
+        row = {}
+        for i, (key, start) in enumerate(bounds):
+            end = bounds[i + 1][1] if i + 1 < len(bounds) else len(ln)
+            row[key] = ln[start:end].strip()
+        if not row.get("bssid"):
+            continue
+        if ap_name and row.get("ap_name") != ap_name:
+            continue
+        rows.append(row)
+    return rows
