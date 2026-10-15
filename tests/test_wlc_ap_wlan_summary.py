@@ -113,3 +113,12 @@ def test_unparseable_policy_tag_output_is_empty():
     assert parse_wireless_tag_policy_detailed("% Error")["maps"] == []
     assert parse_wireless_tag_policy_detailed("")["maps"] == []
     assert parse_wireless_tag_policy_detailed(None)["maps"] == []
+
+
+def test_the_table_ends_where_its_two_column_shape_does():
+    """Live capture: the prompt follows the table with no blank line that
+    the loop treated as a terminator, so it came through as a sixth WLAN
+    profile and was reported as a non-fabric WLAN the tag carries."""
+    r = parse_wireless_tag_policy_detailed(PTAG + "WLCv#\nshow mac address-table\n")
+    assert len(r["maps"]) == r["count"]
+    assert all("#" not in m["wlan_profile"] for m in r["maps"])

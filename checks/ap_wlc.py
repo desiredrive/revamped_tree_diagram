@@ -3172,16 +3172,34 @@ class ApWlcApBroadcastWlans(_ApWlanCheck):
                      f"enabled across {bands}")
 
         if known_fabric and known_wlans:
-            # The two grouped lists.
-            fab_rows = [r for r in ap_rows if _is_fabric(r)]
-            non_rows = [r for r in ap_rows if not _is_fabric(r)]
+            # Grouped by what is actually on air first, and by fabric
+            # membership within that. A BSSID that is Disabled carries no
+            # traffic whether or not its WLAN is fabric-enabled, so listing
+            # the dead ones beside the live ones buried the five rows that
+            # matter under four that did not -- and on a radio in Sniffer
+            # or Monitor role every WLAN is Disabled by design, which is
+            # the common case rather than the exception.
+            live_rows = [r for r in ap_rows if r["state"].lower() == "enabled"]
+            dead_rows = [r for r in ap_rows if r["state"].lower() != "enabled"]
             lines.append("")
-            lines.append("  Fabric SSIDs")
-            lines.extend([self._row_line(r, True) for r in fab_rows]
-                         or ["    —"])
-            lines.append("  Non-fabric SSIDs")
-            lines.extend([self._row_line(r, True) for r in non_rows]
-                         or ["    —"])
+            for label, rows in (("Fabric", [r for r in live_rows if _is_fabric(r)]),
+                                ("Non-fabric",
+                                 [r for r in live_rows if not _is_fabric(r)])):
+                if rows:
+                    lines.append(f"  On air — {label.lower()} SSIDs")
+                    lines.extend(self._row_line(r, True) for r in rows)
+            if not live_rows:
+                lines.append("  On air: nothing")
+            if dead_rows:
+                # One line per radio, not one per BSSID: four Disabled rows
+                # on the same silent radio say one thing, not four.
+                lines.append("")
+                by_band = {}
+                for r in dead_rows:
+                    by_band.setdefault(r["capabilities"] or "—", []).append(r)
+                for band in sorted(by_band):
+                    names = ", ".join(sorted({r["ssid"] for r in by_band[band]}))
+                    lines.append(f"  Not on air — {band}: {names}")
         else:
             # Fall back to the per-radio listing. Not a lesser view -- it
             # is the only honest one when fabric membership was not read,
@@ -3228,16 +3246,24 @@ class ApWlcApBroadcastWlans(_ApWlanCheck):
                 num = m.group(1) if m else None
                 hit = [v for v in roles.values()
                        if num and num in (v.get("radio_type") or "")]
+                # One line per distinct role, not per slot. A C9130 has
+                # several 5GHz slots, so matching on the band number alone
+                # hit all of them and printed the same sentence three times
+                # for one silent radio. Two slots in genuinely different
+                # roles are still two lines -- that is a real difference.
+                seen = set()
                 for v in hit or [None]:
                     if v and v.get("role"):
                         who = ("RRM/FRA" if (v.get("role_op") or "").lower()
                                == "auto" else "set manually")
-                        notes.append(
-                            f"    {band}: {v['role']} role ({who})"
-                            + (f", admin {v['admin']}"
-                               if v.get("admin") else ""))
+                        note = (f"    {band}: {v['role']} role ({who})"
+                                + (f", admin {v['admin']}"
+                                   if v.get("admin") else ""))
                     else:
-                        notes.append(f"    {band}: serving no WLANs")
+                        note = f"    {band}: serving no WLANs"
+                    if note not in seen:
+                        seen.add(note)
+                        notes.append(note)
             if notes:
                 lines.append("")
                 lines.append("• Radios not serving clients (not a fault):")
@@ -3350,10 +3376,18 @@ class ApWlcApBroadcastWlans(_ApWlanCheck):
                          else in_tag_nonfab).append(prof)
                     data["tag_fabric_profiles"] = in_tag_fab
                     data["tag_non_fabric_profiles"] = in_tag_nonfab
-                    lines.append(f"    Fabric SSIDs      "
-                                 f"{', '.join(in_tag_fab) or '—'}")
-                    lines.append(f"    Non-fabric SSIDs  "
-                                 f"{', '.join(in_tag_nonfab) or '—'}")
+                    # All-fabric is the healthy case and the common one.
+                    # Spelling out five profile names and an em-dash to
+                    # say so buries the exception, which is a tag that
+                    # carries something NOT fabric-enabled -- that is the
+                    # line worth reading, so only it names names.
+                    if in_tag_nonfab:
+                        lines.append(f"    {len(in_tag_fab)} fabric, "
+                                     f"{len(in_tag_nonfab)} not: "
+                                     f"{', '.join(in_tag_nonfab)}")
+                    else:
+                        lines.append(f"    {len(in_tag_fab)} WLANs, "
+                                     f"all fabric-enabled")
                 else:
                     in_tag_fab = None
                     lines.append(f"    WLANs in tag      "

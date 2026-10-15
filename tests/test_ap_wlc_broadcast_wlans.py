@@ -45,12 +45,21 @@ def test_the_name_says_what_it_is_about():
         "AP Broadcasted WLANs (Fabric and Non Fabric) — WLCv")
 
 
-def test_every_broadcast_wlan_is_reported_with_its_bssid():
+def test_every_on_air_wlan_is_reported_with_its_bssid():
+    """On-air rows keep the full detail: the BSSID is what a capture is
+    filtered on, so it has to be there for the SSIDs carrying traffic."""
     r, _ = _run()
     assert "3891.b70f.2600" in r.message
-    assert "3891.b70f.260f" in r.message
-    # The operational state, which the dot11 commands did not carry.
-    assert "Enabled" in r.message and "Disabled" in r.message
+
+
+def test_off_air_wlans_are_summarised_per_radio_not_listed():
+    """Four Disabled rows on one silent radio say one thing, not four.
+    The SSID names stay; the per-BSSID detail does not, because a BSSID
+    that carries nothing is not something anyone filters a capture on."""
+    r, _ = _run()
+    assert "Not on air — 5ghz-HE" in r.message
+    assert "MX Enterprise" in r.message.split("Not on air")[1]
+    assert "3891.b70f.260f" not in r.message
 
 
 # --------------------------------------------------------------------------
@@ -60,21 +69,29 @@ def test_every_broadcast_wlan_is_reported_with_its_bssid():
 
 def test_the_ssids_are_grouped_into_fabric_and_non_fabric():
     r, _ = _run(fabric=_fabric_without_open())
-    assert "Fabric SSIDs" in r.message
-    assert "Non-fabric SSIDs" in r.message
+    assert "On air — fabric SSIDs" in r.message
+    assert "On air — non-fabric SSIDs" in r.message
     # MX Open is the one that is not fabric-enabled, so it heads the
     # non-fabric group and nothing else does.
-    non = r.message.split("Non-fabric SSIDs")[1].split("•")[0]
+    non = r.message.split("On air — non-fabric SSIDs")[1].split("Not on air")[0]
     assert "MX Open" in non
     assert "MX Enterprise" not in non
 
 
-def test_every_on_air_row_appears_exactly_once_across_the_two_groups():
-    """Regrouping must not drop or duplicate a BSSID."""
+def test_every_on_air_row_appears_exactly_once_across_the_groups():
+    """Regrouping must not drop or duplicate a live BSSID."""
     r, _ = _run(fabric=_fabric_without_open())
-    body = r.message.split("Fabric SSIDs")[1]
+    body = r.message[r.message.index("On air — "):]
     for row in r.data["ap_wlan_rows"]:
-        assert body.count(row["bssid"]) == 1, row["bssid"]
+        if row["state"].lower() == "enabled":
+            assert body.count(row["bssid"]) == 1, row["bssid"]
+
+
+def test_no_wlan_is_lost_between_the_on_air_and_off_air_groups():
+    """Every SSID the AP carries is named somewhere, live or not."""
+    r, _ = _run(fabric=_fabric_without_open())
+    for row in r.data["ap_wlan_rows"]:
+        assert row["ssid"] in r.message, row["ssid"]
 
 
 def test_each_row_still_carries_its_band():
@@ -88,7 +105,7 @@ def test_the_groups_are_not_claimed_when_fabric_membership_was_not_read():
     """The precedent. Every row would fall under Non-fabric, stating as a
     finding something no command ever reported."""
     r, _ = _run(fabric=None)
-    assert "Non-fabric SSIDs" not in r.message
+    assert "On air — non-fabric SSIDs" not in r.message
     assert "not grouped by it" in r.message
     # Falls back to the per-radio listing, which is the honest view here.
     assert "24ghz-HE: 5 of 5 broadcasting" in r.message
@@ -297,3 +314,13 @@ def test_the_policy_tag_is_still_reported():
 
 def test_the_radio_role_note_is_still_reported():
     assert "not a fault" in _messages()
+
+
+def test_one_note_per_role_not_per_slot():
+    """A C9130 has several 5GHz slots, so matching a dark band on its
+    number alone hit all of them and printed the same sentence three times
+    for one silent radio."""
+    r, _ = _run()
+    block = r.message.split("not serving clients")[1]
+    sniffer = [ln for ln in block.splitlines() if "Sniffer" in ln]
+    assert len(sniffer) == 1, block

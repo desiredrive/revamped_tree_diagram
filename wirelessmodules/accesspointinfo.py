@@ -880,8 +880,13 @@ def parse_wireless_tag_policy_detailed(text):
             continue
         wlan = ln[:pol_at].strip()
         pol = ln[pol_at:].strip()
-        if wlan:
-            out["maps"].append({"wlan_profile": wlan, "policy_name": pol})
+        # The table ends where the two-column shape does. Without this the
+        # loop runs to the end of the buffer and swallows whatever follows
+        # -- the device prompt ("WLCv#") came through as a WLAN profile and
+        # was then reported as a non-fabric WLAN the tag carries.
+        if not wlan or not pol:
+            break
+        out["maps"].append({"wlan_profile": wlan, "policy_name": pol})
     return out
 
 
