@@ -222,8 +222,16 @@ def get_catc_api(dnac, api_url: str, service):
                 try:
                     # Execute the API call
                     response_js = get_transport().http_get(dnac, api_url, service)
-                    # Log to file
-                    to_file = f"Catalyst Center API: {api_url}\n{json.dumps(response_js, indent=2)}"
+                    # Log to file. Compact, not indented: the API
+                    # responses were 29% of the log by line count (1976 of
+                    # 6752 on a single AP run, median 25 lines a call),
+                    # which buried the device CLI output the log exists to
+                    # carry. The payload is unchanged -- same JSON, same
+                    # keys, one line -- so anything parsing or grepping the
+                    # log still finds it, and `python -m json.tool` or `jq`
+                    # re-expands a line when one needs reading.
+                    to_file = (f"Catalyst Center API: {api_url}\n"
+                               + json.dumps(response_js, separators=(",", ":")))
                     append_to_logging_file(to_file)
 
                     # 3. Check for Rate Limit or Concurrency Rejection
