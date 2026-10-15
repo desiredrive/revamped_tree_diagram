@@ -253,9 +253,16 @@ class ApRadioMacRegistration(Check):
         data = {"cp": self.cp_hostname, "registered": True, "state": state,
                 "auth_failures": auth, "etrs": etrs, "locators_up": up,
                 "metadata": meta, "command_form": form}
-        if faults:
+        # Only the ⚠ bullets grade. The ℹ ones record what a command did
+        # not report, which is a statement about the release rather than
+        # about the registration -- warning on those calls a healthy AP
+        # faulty because a border is terse.
+        if any(f.lstrip().startswith("⚠") for f in faults):
             return CheckResult(
                 CheckStatus.WARN, "\n".join(lines + [""] + faults), data=data)
+        if faults:
+            return CheckResult(
+                CheckStatus.OK, "\n".join(lines + [""] + faults), data=data)
         return CheckResult(
             CheckStatus.OK,
             f"The AP's radio MAC {self.radio_mac} is registered on "
@@ -360,12 +367,25 @@ class ApRadioMacRegistration(Check):
                 f"{meta.get('device_ap_ip')}. The two disagree, so one of "
                 f"them is carrying a stale registration.")
         length = rec.get("wlc_data_length")
-        if not length:
+        # Absent and zero are different statements. This device printed the
+        # AP bit but no length line at all, so the payload was never
+        # reported -- the same silence the `wlc_fields_present` branch
+        # above already declines to grade, just one field finer. A border
+        # can print the bit and withhold the payload while its peer prints
+        # both for the same registration, which is a fact about the two
+        # releases and not about the AP.
+        if length is None:
             faults.append(
-                "  ⚠ The registration carries no WLC metadata (data "
-                "length 0 or absent). The controller registered the radio "
-                "MAC without the AP's address, SGT and VNID, so the control "
-                "plane cannot resolve the AP's identity from it.")
+                "  ℹ This control plane reports the WLC AP bit but no "
+                "metadata payload, so the AP's address, SGT and VNID "
+                "could not be read from it and were not checked. The "
+                "registration itself is unaffected.")
+        elif not length:
+            faults.append(
+                "  ⚠ The registration carries a WLC metadata length of 0. "
+                "The controller registered the radio MAC without the AP's "
+                "address, SGT and VNID, so the control plane cannot "
+                "resolve the AP's identity from it.")
         elif meta.get("all_zero"):
             faults.append(
                 f"  ⚠ The WLC metadata is {length} bytes of zeros. The "

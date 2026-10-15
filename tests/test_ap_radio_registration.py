@@ -584,8 +584,36 @@ def test_a_genuinely_empty_payload_is_still_a_fault(monkeypatch):
                   "      WLC data length: 0\n", REGISTERED)
     r, _ctx = _check_with_edge(monkeypatch, "", registered=rec)
     assert r.status is CheckStatus.WARN
-    assert "carries no WLC metadata" in r.message
+    assert "WLC metadata length of 0" in r.message
     assert "does not report the WLC metadata section" not in r.message
+    # Not the absent-payload note: the device did report the section.
+    assert "no metadata payload" not in r.message
+
+
+def test_an_unreported_payload_length_is_not_a_fault(monkeypatch):
+    """Border2's case. The device prints the AP bit and then stops -- no
+    length line at all -- while its peer prints both for the same
+    registration. Absent is not zero: nothing was read, so there is
+    nothing to grade."""
+    import re as _re
+    rec = _re.sub(r"      WLC data length: 34\n(?:        [0-9A-F ]+\n)+",
+                  "", REGISTERED)
+    r, _ctx = _check_with_edge(monkeypatch, "", registered=rec)
+    assert r.status is CheckStatus.OK
+    assert "no metadata payload" in r.message
+    assert "⚠" not in r.message
+
+
+def test_an_info_note_alone_never_warns(monkeypatch):
+    """The ℹ bullets record what a command did not say. Grading on them
+    marks a healthy AP faulty because a border is terse."""
+    import re as _re
+    rec = _re.sub(r"      WLC AP bit: Set\n", "", REGISTERED)
+    rec = _re.sub(r"      WLC data length: 34\n(?:        [0-9A-F ]+\n)+",
+                  "", rec)
+    r, _ctx = _check_with_edge(monkeypatch, "", registered=rec)
+    assert r.status is CheckStatus.OK
+    assert "ℹ" in r.message
 
 
 # --------------------------------------------------------------------------
