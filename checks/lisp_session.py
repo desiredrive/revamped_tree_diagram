@@ -532,6 +532,15 @@ class LispPerMapServerSession(_SessionCheck):
         # map-server at once. Each check only ever knows about its own.
         ctx.state.setdefault(
             t.key("lisp_session_states"), {})[self.map_server] = state
+        # The canvas draws this session as an edge at discovery time, before
+        # any session has been read, so the edge starts life with a bare
+        # "LISP Session" label. Now that the state is known, hand the UI the
+        # node it hangs off and let it say so. Keyed by node id rather than
+        # address on purpose: the edge peers with the RLOC while the node
+        # carries the management IP, and those differ.
+        if self.target_node_id:
+            data["lisp_session_state"] = [
+                {"node": self.target_node_id, "state": state}]
 
         if state.lower() != "up":
             # WARN, not FAIL: a down session is a finding about the fabric, and
@@ -903,6 +912,12 @@ class LispAuthenticationKey(_SessionCheck):
             data={"cp": self.cp_hostname})
 
 
+# A long-lived TCP session accumulates a few retransmissions in normal
+# operation, so a non-zero counter is not on its own a fault. Only a sustained
+# count indicates real loss on the path between the control plane and the ETR.
+RETRANSMIT_WARN_THRESHOLD = 50
+
+
 class LispTcpSocket(_SessionCheck):
     """The TCP socket carrying the LISP session, from the control plane side.
 
@@ -968,14 +983,16 @@ class LispTcpSocket(_SessionCheck):
                 f"control plane.",
                 data={"cp": self.cp_hostname, "sockets": 0})
 
-        lines, problems = [], []
+        lines, problems, counts = [], [], []
         for s in sockets:
             local = f"{getattr(s, 'local_host', '?')}:{getattr(s, 'local_port', '?')}"
             foreign = f"{getattr(s, 'foreign_host', '?')}:{getattr(s, 'foreign_port', '?')}"
             lines.append(f"• {local} → {foreign}, MSS {getattr(s, 'mss', '?')}")
-            # Same three counters the CLI parser warns on. Any non-zero value
-            # means segments had to be sent again -- packet loss on the path
-            # between this CP and the ETR.
+            # Same three counters the CLI parser warns on. A handful of
+            # retransmissions is normal on a long-lived TCP session and says
+            # nothing about fabric health -- warning on any non-zero value
+            # complained about healthy sockets showing 1. Only a sustained
+            # count means real loss on the path between this CP and the ETR.
             for attr, label in (
                     ("retransmitqueue", "segments waiting in the retransmit queue"),
                     ("retransmitcounter", "retransmissions"),
@@ -984,8 +1001,12 @@ class LispTcpSocket(_SessionCheck):
                     n = int(getattr(s, attr, 0) or 0)
                 except (TypeError, ValueError):
                     n = 0
-                if n:
+                if n > RETRANSMIT_WARN_THRESHOLD:
                     problems.append(f"{n} {label} on {local} → {foreign}")
+                elif n:
+                    # Below the threshold: reported as context next to the
+                    # socket, not as a finding.
+                    counts.append(f"{n} {label} on {local} → {foreign}")
 
         detail = "\n".join(lines)
         if problems:
@@ -996,6 +1017,16 @@ class LispTcpSocket(_SessionCheck):
                 f"and re-sent:\n\n" + "\n".join(f"• {p}" for p in problems)
                 + f"\n\n{detail}",
                 data={"cp": self.cp_hostname, "problems": problems})
+
+        if counts:
+            return CheckResult(
+                CheckStatus.OK,
+                f"{self.cp_hostname} holds the LISP socket to {etr_loopback}. "
+                f"Retransmissions are present but well under the "
+                f"{RETRANSMIT_WARN_THRESHOLD}-segment threshold, which is "
+                f"normal for a long-lived session:\n\n"
+                + "\n".join(f"• {c}" for c in counts) + f"\n\n{detail}",
+                data={"cp": self.cp_hostname, "retransmits": counts})
 
         return CheckResult(
             CheckStatus.OK,

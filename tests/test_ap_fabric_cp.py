@@ -321,3 +321,111 @@ def test_parsers_are_safe_on_junk():
         assert summary["control_planes"] == []
         assert summary["vnids"] == []
         assert parse_ap_fabric_fields(junk)["rloc"] == ""
+
+
+# --------------------------------------------------------------------------
+# Fabric status on the canvas, and the RLOC against the edge's Loopback0.
+# The RLOC is the address the fabric reaches this AP through, and the AP sits
+# behind the edge -- so the edge's Lo0 is what it has to be.
+# --------------------------------------------------------------------------
+
+
+def test_a_fabric_enabled_ap_is_marked_for_the_fabric_colour(patched):
+    """Fabric Status: Enabled is what every other fabric node's blue means,
+    so the AP carries the same marker rather than a wireless-only one."""
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(_ctx())
+    assert r.data["mark_fabric_ap"] == ["ap"]
+
+
+def test_a_non_fabric_ap_is_never_marked(patched, monkeypatch):
+    """The disabled path returns before the marker is built. Marking it would
+    paint a non-fabric AP as a fabric one."""
+    import radkit_cli
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    monkeypatch.setattr(
+        radkit_cli, "get_any_single_output",
+        lambda h, c, s, **k: AP_CONFIG_GENERAL.replace(
+            "Fabric status                                   : Enabled",
+            "Fabric status                                   : Disabled"))
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(_ctx())
+    assert not (r.data or {}).get("mark_fabric_ap")
+
+
+def test_the_rloc_matching_the_edge_loopback_passes(patched):
+    """172.19.1.68 is Edge2's Loopback0, which is what the lab controller
+    really reports for this AP."""
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    ctx = _ctx()
+    ctx.state["xtr_loopback"] = "172.19.1.68"
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.OK
+    assert r.data["rloc_matches_edge_loopback"] is True
+
+
+def test_an_rloc_that_is_not_the_edge_loopback_warns(patched):
+    """The controller is pointing the fabric at a different box: registrations
+    resolve to a locator that does not lead to this AP's edge."""
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    ctx = _ctx()
+    ctx.state["xtr_loopback"] = "172.19.1.99"
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.WARN
+    assert r.data["rloc_matches_edge_loopback"] is False
+    assert "172.19.1.99" in r.message and "172.19.1.68" in r.message
+    # A fabric fault, not a tool one: the run continues.
+    assert not ctx.state.get("ap_stop")
+
+
+def test_an_unresolvable_edge_loopback_is_not_reported_as_a_match(patched):
+    """The AP chain runs neither CpLoopback nor RlocDefinition, so
+    xtr_loopback is unset unless this check resolves it. With no uuid to
+    resolve it from, the comparison cannot happen -- and must not come back
+    as a pass, which is a verdict the check never reached.
+    """
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    ctx = _ctx()
+    assert "xtr_loopback" not in ctx.state
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
+    assert r.data["rloc_matches_edge_loopback"] is None
+    assert "not compared" in r.message
+
+
+def test_the_edge_loopback_is_resolved_when_the_chain_never_set_it(patched,
+                                                                   monkeypatch):
+    """The AP chain leaves xtr_loopback unset, so the check resolves it from
+    Catalyst Center the way checks.profile and checks.lisp_session do.
+    Without this the comparison silently never ran."""
+    import checks.lisp
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    monkeypatch.setattr(checks.lisp, "_query_loopback0",
+                        lambda ctx: ("172.19.1.68", "255.255.255.255", None))
+    ctx = _ctx()
+    ctx.state.update({"xtr_uuid": "uuid-1", "catc_name": "mxc-dnac5"})
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.OK
+    assert r.data["rloc_matches_edge_loopback"] is True
+    # Cached for everything downstream, as the other two sites do.
+    assert ctx.state["xtr_loopback"] == "172.19.1.68"
+
+
+def test_a_resolved_loopback_that_differs_still_warns(patched, monkeypatch):
+    """The mismatch path, reached through the resolution rather than a
+    pre-set value -- which is how it will actually be reached in the AP
+    chain."""
+    import checks.lisp
+    from checks.ap_wlc import ApWlcFabricControlPlane
+
+    monkeypatch.setattr(checks.lisp, "_query_loopback0",
+                        lambda ctx: ("172.19.1.99", None, None))
+    ctx = _ctx()
+    ctx.state.update({"xtr_uuid": "uuid-1", "catc_name": "mxc-dnac5"})
+    r = ApWlcFabricControlPlane(WLC, "wlc0").run_ap(ctx)
+    assert r.status is CheckStatus.WARN
+    assert r.data["rloc_matches_edge_loopback"] is False

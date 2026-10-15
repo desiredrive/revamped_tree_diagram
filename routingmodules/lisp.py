@@ -843,6 +843,26 @@ def parse_show_lisp_iid_ethernet_database_wlc(output: str) -> Dict[str, Any]:
     if metadata_hex_parts:
         res["entry"]["metadata_hex"] = " ".join(metadata_hex_parts).replace("  ", " ").strip()
 
+    # The device's OWN decode, where this release prints one:
+    #
+    #   Metadata:         IPv4 address: 172.19.5.10
+    #                     Client SGT: 0
+    #                     Client association time: 0
+    #
+    # Most IOS-XE versions do not, which is why the hex is parsed at all.
+    # Where it IS present it is ground truth -- the device reading its own
+    # structure -- and it beats any fixed-offset decode here.
+    m = re.search(r"^Metadata:\s*IPv4 address:\s*(\d+\.\d+\.\d+\.\d+)",
+                  output, re.M)
+    if m:
+        res["entry"]["metadata_native_ip"] = m.group(1)
+    m = re.search(r"^\s*Client SGT:\s*(\d+)\s*$", output, re.M)
+    if m:
+        res["entry"]["metadata_native_sgt"] = int(m.group(1))
+    m = re.search(r"^\s*Client association time:\s*(\d+)\s*$", output, re.M)
+    if m:
+        res["entry"]["metadata_native_assoc_time"] = int(m.group(1))
+
     return res
 
 def parse_show_l2lisp_statistics(output: str) -> Dict[str, Any]:
@@ -2376,10 +2396,32 @@ class LISPLocalDB:
         self.tunnel_update = entry.get("tunnel_update")
         self.source_ms = entry.get("source_ms")
         self.rloc = entry.get("rloc")
+        # Parsed by the parser but never surfaced here until now: a short
+        # uptime on this entry is how a flapping AP shows up on the edge.
+        self.up_time = entry.get("up_time")
         self.metadata_hex = entry.get("metadata_hex")
+        # Prefer the device's own decode where this release prints one, and
+        # fall back to the fixed-offset read where it does not -- most
+        # IOS-XE versions have no `Metadata:` block.
+        #
+        # This matters most for the SGT. The fixed offsets were derived by
+        # observation from a single payload, and the only payload available
+        # to check them against carries SGT 0, so a non-zero SGT has never
+        # been verified against the device. Where the device decodes it
+        # itself, that question does not arise.
         ap_ip_metadata, sgt_metadata = extract_ip_and_sgt_fixed_positions(self.metadata_hex)
-        self.ap_ip_metadata = ap_ip_metadata
-        self.sgt_metadata = sgt_metadata
+        native_ip = entry.get("metadata_native_ip")
+        native_sgt = entry.get("metadata_native_sgt")
+        self.ap_ip_metadata = native_ip or ap_ip_metadata
+        self.sgt_metadata = native_sgt if native_sgt is not None else sgt_metadata
+        # Which source answered, and whether they agree where both did. A
+        # disagreement means the fixed offsets are wrong for this release --
+        # worth surfacing rather than silently preferring one.
+        self.metadata_source = "device" if native_sgt is not None else "decoded"
+        self.metadata_agrees = (
+            None if native_sgt is None or sgt_metadata is None
+            else native_sgt == sgt_metadata)
+        self.assoc_time_metadata = entry.get("metadata_native_assoc_time")
 
 class L2LISPControlPlane:
     def __init__(self, device):

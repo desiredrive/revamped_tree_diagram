@@ -751,12 +751,14 @@ for (const [status, badge] of Object.entries(STATUS_BADGE)) {
 
 // Access Point: Cisco-style rounded blue square with a smaller rounded
 // rectangle window and a top LED dot.
-function apIconSvg() {
+// `bodyFill` so a fabric AP can wear the same light blue every other fabric
+// node does, the way wlcIconSvg already takes one.
+function apIconSvg(bodyFill) {
   return (
     "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'>" +
-    // Rounded blue body.
+    // Rounded body.
     "<rect x='14' y='14' width='72' height='72' rx='14' ry='14' " +
-      "fill='#1d4ed8' stroke='#0c1e5e' stroke-width='3'/>" +
+      "fill='" + (bodyFill || '#1d4ed8') + "' stroke='#0c1e5e' stroke-width='3'/>" +
     // Inner rounded white window (the AP's recessed face).
     "<rect x='34' y='30' width='32' height='44' rx='8' ry='8' " +
       "fill='none' stroke='#ffffff' stroke-width='3'/>" +
@@ -768,6 +770,11 @@ function apIconSvg() {
 }
 const AP_ICON_URL =
   "data:image/svg+xml;utf8," + encodeURIComponent(apIconSvg());
+// Used once `show ap name <ap> config general` reports Fabric Status:
+// Enabled -- the same FABRIC_ROLE_FILL the fabric WLC and the fabric role
+// icons use, so "this device is in the fabric" reads identically everywhere.
+const AP_FABRIC_ICON_URL =
+  "data:image/svg+xml;utf8," + encodeURIComponent(apIconSvg(FABRIC_ROLE_FILL));
 
 const ROLE_ICON = {
   endpoint: ENDPOINT_ICON_URL,
@@ -920,6 +927,8 @@ function showTopology(payload) {
           'text-margin-y': 10,
           'font-size': '11px',
       }},
+      { selector: 'node[role = "access-point"][fabric = "yes"]', style: {
+          'background-image': AP_FABRIC_ICON_URL } },
       { selector: 'edge', style: {
           'line-color': '#94a3b8',
           'width': 2,
@@ -958,7 +967,7 @@ function showTopology(payload) {
       // hops it crosses are drawn as their own edges. Matched on the label
       // because these edges are built from a node's `connect_to` rather than
       // an `add_edges` spec, so there is no flag to carry.
-      { selector: 'edge[label = "LISP Session"]', style: {
+      { selector: 'edge[label ^= "LISP Session"]', style: {
           // Bowed like the CAPWAP tunnel, but in the opposite direction: both
           // can hang off the same node, and two curves bowed the same way
           // would sit on top of each other.
@@ -973,6 +982,33 @@ function showTopology(payload) {
           // Upright, like the CAPWAP label: autorotate from the base rule
           // would tilt it to the steepest part of the bow.
           'text-rotation': 'none',
+      }},
+      // A session that is not Up, in a darker blue than the live one. The
+      // state rides on its own data flag rather than the label text so the
+      // match does not depend on how the label happens to be worded.
+      { selector: 'edge[sessionState = "down"]', style: {
+          'line-color': '#1e3a5f',
+          'color': '#15293f',
+      }},
+      // The VXLAN access tunnel, drawn only when it is up. Cyan, to match
+      // the fabric-node colouring. Drawn as a straight line running
+      // parallel to the physical Edge-to-AP port and offset below it, not
+      // as a curve: the tunnel follows that cable, so the two belong
+      // alongside each other. `segments` with both bend points at the same
+      // distance gives a straight run displaced from the direct path --
+      // a bezier would bow away from the port it is meant to parallel.
+      { selector: 'edge[accessTunnel = "true"]', style: {
+          'curve-style': 'segments',
+          'segment-distances': [26, 26],
+          'segment-weights': [0.08, 0.92],
+          'line-style': 'dashed',
+          'line-dash-pattern': [8, 4],
+          'line-color': '#06b6d4',
+          'width': 3,
+          'color': '#0e7490',
+          'font-size': '10px',
+          'text-rotation': 'none',
+          'text-margin-y': 12,
       }},
       { selector: 'edge[capwap = "true"]', style: {
           // Bowed away from the physical path so the tunnel reads as going
@@ -1523,7 +1559,14 @@ const ROLE_OFFSET = {
   'underlay-switch':  { dx: -340, dy:  -80 },
   'underlay-unknown': { dx: -340, dy:  -80 },
   fabric:          { dx: -440, dy:  200 },
-  wlc:             { dx:    0, dy: -320 },
+  // Mirrored across the border arc from the Edge: the Edge sits one gap to
+  // the LEFT of the borders, the controller the same gap to the RIGHT. The
+  // borders' own horizontal reach is BORDER_ARC_RADIUS * cos(30 deg) ~= 329,
+  // so clearing the arc by that same distance again puts the controller at
+  // ~710. Its LISP-session links then come back to the control planes over
+  // the short side, instead of crossing the fabric as they did when it was
+  // parked above the arc.
+  wlc:             { dx:  710, dy:    0 },
   // The AP hangs straight off the Edge on the horizontal, so the link that
   // matters most in this scenario reads as one clean line rather than a
   // diagonal competing with the fabric nodes above and below it.
@@ -1709,7 +1752,11 @@ function addNodes(nodes) {
     // Arc-placed borders are already spread so they cannot overlap each
     // other; letting the stagger push them down would undo the even spacing
     // that is the whole point of the fan.
-    const onArc = role === 'border' && borderTotal > 0;
+    // The controller is likewise placed deliberately: mirrored across the arc
+    // from the Edge. A DHCP server sits at dx 580 to its 710, inside the
+    // 200px collision box, so without this the controller gets walked down
+    // out of the symmetry it was placed in.
+    const onArc = (role === 'border' && borderTotal > 0) || role === 'wlc';
     let guard = 0;
     while (!onArc && guard++ < 40 && [...occupied].some(([ox, oy]) =>
              Math.abs(ox - x) < 200 && Math.abs(oy - y) < STAGGER_Y)) {
@@ -1782,6 +1829,11 @@ function addEdges(edges) {
         // overlay between the AP and its controller, not a cable, and the
         // hops it crosses are already on the canvas as their own edges.
         capwap: spec.capwap ? 'true' : undefined,
+        // The VXLAN access tunnel between the edge and the AP. Like CAPWAP
+        // it is an overlay, not a cable, so it is drawn alongside the wired
+        // link rather than replacing it -- both exist at once between the
+        // same two nodes, which is why it bows the other way.
+        accessTunnel: spec.access_tunnel ? 'true' : undefined,
       },
     });
   });
@@ -2048,6 +2100,15 @@ function handleEvent(msg) {
       if (Array.isArray(msg.mark_fabric_wlc)) {
         msg.mark_fabric_wlc.forEach(id => markWlcFabric(id));
       }
+      // An AP whose `config general` reports Fabric Status: Enabled wears the
+      // same fabric blue. Separate from mark_fabric_wlc because that one also
+      // rewrites the WLC role tag, which does not apply to an AP.
+      if (Array.isArray(msg.mark_fabric_ap)) {
+        msg.mark_fabric_ap.forEach(id => {
+          const n = cy && cy.getElementById(id);
+          if (n && !n.empty()) n.data('fabric', 'yes');
+        });
+      }
       if (Array.isArray(msg.relabel_nodes)) {
         msg.relabel_nodes.forEach(spec => {
           if (!spec || !spec.id) return;
@@ -2057,6 +2118,25 @@ function handleEvent(msg) {
             updateNode(spec.id, { baseLabel: spec.label });
             applyNodeLabel(spec.id);
           }
+        });
+      }
+      // The LISP session edges are drawn at discovery time, before any
+      // session has been read, so they start as a bare "LISP Session". Once
+      // the session check knows the state, say so on the edge and darken the
+      // ones that are not Up. Matched by the control-plane node the edge
+      // hangs off rather than by address: the session peers with the RLOC
+      // while the node carries its management IP, and those differ.
+      if (Array.isArray(msg.lisp_session_state)) {
+        msg.lisp_session_state.forEach(spec => {
+          if (!spec || !spec.node || !cy) return;
+          const node = cy.getElementById(spec.node);
+          if (!node || node.empty()) return;
+          const up = String(spec.state || '').toLowerCase() === 'up';
+          node.connectedEdges().forEach(e => {
+            if (!String(e.data('label') || '').startsWith('LISP Session')) return;
+            e.data('label', 'LISP Session - ' + (up ? 'UP' : 'DOWN'));
+            e.data('sessionState', up ? 'up' : 'down');
+          });
         });
       }
       if (Array.isArray(msg.add_nodes)) {
