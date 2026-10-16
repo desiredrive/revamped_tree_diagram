@@ -2306,13 +2306,17 @@ function handleEvent(msg) {
           const id = resolveNodeId(spec.id) || spec.id;
           const n = cy.getElementById(id);
           if (n.empty()) return;
-          updateNode(id, { tags: spec.tags });
-          applyNodeLabel(id);
           // An AP given fabric SSIDs is on air with them -- that is what
-          // the check emits these for -- so it gets the mark beside it,
-          // carrying the SSID names in its own label.
+          // the check emits these for -- so the mark beside it carries the
+          // names in its own label, and the AP's label does NOT: putting
+          // them in both printed every SSID twice, once under the mark and
+          // again in the AP's own [AP, MX CWA, ...] block. The anchor keeps
+          // only its role tag.
           if (spec.broadcasting && spec.tags.length) {
             attachWifiMark(id, spec.tags);
+          } else {
+            updateNode(id, { tags: spec.tags });
+            applyNodeLabel(id);
           }
         });
       }
