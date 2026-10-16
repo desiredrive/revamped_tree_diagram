@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDA Pathfinder Field Guide</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: single reading column, full-bleed screenshots, console-tinted neutrals. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #16202c;
+  --muted: #5c6a7a;
+  --rule: #d9dfe7;
+  --accent: #1667d4;
+  --ok: #1a8043;
+  --warn: #c2600a;
+  --fail: #cc2b2b;
+  --code-bg: #eef1f5;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e141b;
+    --surface: #161e28;
+    --fg: #e3e9f0;
+    --muted: #94a3b4;
+    --rule: #28323f;
+    --accent: #5fa3f5;
+    --ok: #3fbe6d;
+    --warn: #f0923a;
+    --fail: #f2655f;
+    --code-bg: #1b2531;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e141b;
+  --surface: #161e28;
+  --fg: #e3e9f0;
+  --muted: #94a3b4;
+  --rule: #28323f;
+  --accent: #5fa3f5;
+  --ok: #3fbe6d;
+  --warn: #f0923a;
+  --fail: #f2655f;
+  --code-bg: #1b2531;
+  color-scheme: dark;
+}
+
+img { max-width: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.6;
+  margin: 0;
+}
+.wrap {
+  max-width: 860px;
+  margin: 0 auto;
+  padding-inline: 20px;
+  padding-block: 0 72px;
+}
+h1, h2, h3 { text-wrap: balance; line-height: 1.25; }
+h1 { font-size: clamp(1.9rem, 5vw, 2.6rem); font-weight: 700; margin: 0 0 8px; letter-spacing: -0.02em; }
+h2 {
+  font-size: 1.4rem; font-weight: 600; margin: 56px 0 4px;
+  padding-top: 20px; border-top: 1px solid var(--rule); letter-spacing: -0.01em;
+}
+h3 { font-size: 1.05rem; font-weight: 600; margin: 32px 0 6px; }
+p { margin: 0 0 14px; }
+a { color: var(--accent); }
+code {
+  font-family: var(--font-mono); font-size: 0.875em;
+  background: var(--code-bg); padding: 1px 5px; border-radius: 3px;
+}
+.eyebrow {
+  font-size: 0.72rem; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+}
+.lede { font-size: 1.1rem; color: var(--muted); margin-bottom: 0; }
+header.page { padding-block: 56px 0; }
+
+figure { margin: 22px 0; }
+figure img {
+  max-width: 100%; display: block; width: 100%;
+  border: 1px solid var(--rule); border-radius: 6px;
+}
+figcaption { font-size: 0.85rem; color: var(--muted); margin-top: 8px; }
+
+.note {
+  background: var(--surface); border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 5px 5px 0; padding: 14px 16px; margin: 20px 0;
+  font-size: 0.94rem;
+}
+.note strong { font-weight: 600; }
+
+.tbl { overflow-x: auto; margin: 18px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; font-size: 0.74rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+td.cmd { font-family: var(--font-mono); font-size: 0.82rem; white-space: nowrap; }
+
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: baseline; }
+.dot-ok { background: #22c55e; } .dot-warn { background: #f97316; }
+.dot-fail { background: #ef4444; } .dot-skip { background: #94a3b8; }
+.dot-pend { background: #cbd5e1; } .dot-run { background: #eab308; }
+
+ol.steps { padding-left: 22px; }
+ol.steps > li { margin-bottom: 10px; }
+ul.tight { padding-left: 22px; margin: 0 0 14px; }
+ul.tight li { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+
+
+<div class="wrap">
+<header class="page">
+  <p class="eyebrow">Cisco TAC · SD-Access</p>
+  <h1>SDA Pathfinder Field Guide</h1>
+  <p class="lede">How to run the AP Onboarding workflow, read the topology it draws, and find the command output behind every finding.</p>
+</header>
+
+<h2>What this tool does</h2>
+<p>SDA Pathfinder answers one question per workflow by reading live state off the fabric and grading it. The AP Onboarding workflow answers: <em>why is this access point not joining, or not serving the SSIDs it should?</em></p>
+<p>It logs into the devices through RADKit, runs around forty read-only <code>show</code> commands across the fabric edge, the WLC and the control planes, and turns the output into individually graded checks. Nothing is ever configured. The result is a topology you click through, where each node carries the verdict for the checks that ran against it.</p>
+<p>The value over doing this by hand is sequencing. The checks run in dependency order and stop a chain when its precondition fails, so you get the first thing that actually broke instead of fifty downstream symptoms.</p>
+
+<h2>Before you start</h2>
+<ul class="tight">
+  <li>A RADKit service that can reach the fabric, and its service serial.</li>
+  <li>Your Cisco SSO credentials.</li>
+  <li>The three inputs the workflow needs: the <strong>fabric edge</strong> the AP is cabled to, the <strong>AP's Ethernet MAC</strong>, and, if the deployment uses an RSA Standalone Server, the <strong>Catalyst Center name</strong>.</li>
+</ul>
+<div class="note">
+  <strong>The MAC is the Ethernet MAC, not the radio MAC.</strong> This is the single most common input error. The radio MAC is what you see in the LISP database; the Ethernet MAC is what Catalyst Center and <code>show ap summary</code> index by, and it is what the tool expects. They differ, usually in the last octet.
+</div>
+
+<h2>Running a case</h2>
+
+<h3>1 · Pick the workflow</h3>
+<p>The landing page splits workflows by whether they need device access. The four RADKit-based ones read live state and need an SSO login. The off-line section is for replaying captured output and is not available yet.</p>
+<figure>
+  <img src="img/07-landing.png" alt="SDA Pathfinder landing page with four RADKit-based workflows and a greyed-out off-line section.">
+  <figcaption>Choose AP Onboarding. The other three workflows take different inputs and run different checks.</figcaption>
+</figure>
+
+<h3>2 · Log in</h3>
+<p>Enter your Cisco address, leave the domain on <code>PROD</code> unless you have been told otherwise, and use the SSO login method. The page tells you which workflow you are authenticating for.</p>
+<figure>
+  <img src="img/08-login.png" alt="RSA Login form with email, domain and login method fields.">
+  <figcaption>SSO opens a browser round-trip. The tool holds the session for the rest of your run.</figcaption>
+</figure>
+
+<h3>3 · Connect to the service</h3>
+<p>Enter the serial of the RADKit service that fronts the fabric you are troubleshooting. If you support several customers, this is the field that selects between them.</p>
+<figure>
+  <img src="img/09-connect.png" alt="Connect to RSA service form showing the logged-in user and a service serial field.">
+  <figcaption>The serial stays visible in the header during the run, so you can confirm which fabric you are looking at.</figcaption>
+</figure>
+
+<h3>4 · Give it the AP</h3>
+<figure>
+  <img src="img/10-form.png" alt="AP Onboarding form with XTR inventory management IP, optional Catalyst Center name, and access point MAC.">
+  <figcaption>Three inputs. Only the middle one is optional.</figcaption>
+</figure>
+<div class="tbl">
+<table>
+  <thead><tr><th>Field</th><th>What it is</th></tr></thead>
+  <tbody>
+    <tr><td><strong>XTR Inventory Management IP</strong></td><td>The management IP of the fabric edge the AP is physically cabled to. It must be an Edge node — a Border will not do, because the access tunnel and L2 LISP registration the tool checks live on the edge.</td></tr>
+    <tr><td><strong>Catalyst Center name</strong></td><td>Only needed when an RSA Standalone Server is in use. Leave it blank otherwise.</td></tr>
+    <tr><td><strong>Access Point MAC</strong></td><td>The AP's Ethernet MAC, in any common format.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Press Run. Checks begin streaming immediately; you do not wait for the whole run to finish before reading results.</p>
+
+<h2>Reading the topology</h2>
+<p>The canvas builds as the run proceeds. Devices appear once they are discovered, and links appear once the tool has evidence for them. An empty area is not a missing device — it is a device the tool has not reached yet.</p>
+<figure>
+  <img src="img/11-start.png" alt="Topology at the start of a run, showing the edge and WLC with no findings yet.">
+  <figcaption>Early in the run: the edge has passed its first checks, the WLC is still collecting, and the AP has not been located yet.</figcaption>
+</figure>
+
+<h3>Node badges</h3>
+<p>Every device carries one coloured dot in its top-right corner. It reflects the worst result among the checks that ran against that device, so a single amber check turns the node amber.</p>
+<div class="tbl">
+<table>
+  <thead><tr><th>Badge</th><th>Status</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><span class="dot dot-pend"></span></td><td>Pending</td><td>Queued, not started.</td></tr>
+    <tr><td><span class="dot dot-run"></span></td><td>Running</td><td>Executing now.</td></tr>
+    <tr><td><span class="dot dot-ok"></span></td><td>OK</td><td>Verification passed.</td></tr>
+    <tr><td><span class="dot dot-warn"></span></td><td>Warn</td><td>A real concern, but the tool could continue. Most fabric faults land here.</td></tr>
+    <tr><td><span class="dot dot-fail"></span></td><td>Fail</td><td>The check could not complete, and downstream checks may be unsafe. Later checks in that chain are skipped.</td></tr>
+    <tr><td><span class="dot dot-skip"></span></td><td>Skip</td><td>Not applicable to this run, or skipped because something upstream failed.</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="note">
+  <strong>Warn is the interesting status, not Fail.</strong> A fabric problem is graded Warn: the tool read the device fine, and what it read was wrong. Fail means the tool itself could not proceed — an unreadable command, an unreachable device. When triaging, read the Warns first.
+</div>
+
+<h3>Node labels and roles</h3>
+<p>Each node is labelled with its hostname and its fabric roles in brackets. A device holding several roles shows all of them, and a combined Border plus Control Plane carries a <code>B+C</code> glyph on its icon. Roles are promoted during the run as evidence arrives: the WLC starts as <code>[WLC]</code> and becomes <code>[WLC, Fabric WLC]</code> once the tool confirms it is fabric-enabled.</p>
+<figure>
+  <img src="img/12-ap-found.png" alt="Topology with the AP discovered, showing model, version and IP, and the WLC promoted to Fabric WLC.">
+  <figcaption>The AP has been located on <code>Te1/0/14</code> and labelled with model, software version and IP. The WLC is now <code>[WLC, Fabric WLC]</code>. Its expanded Warn states the facts it read, then what they mean for onboarding.</figcaption>
+</figure>
+
+<h3>Clicking a node</h3>
+<p>Click any device to open its findings panel. The tally in the panel header is scoped to that node, not to the whole run, so the numbers change as you click around. The panel lists every check that ran against the device; click a row to expand its full output.</p>
+<figure>
+  <img src="img/13-edge.png" alt="Edge node selected, showing AP Physical Path to WLC expanded with an output-drops finding.">
+  <figcaption>The edge, scoped to 25 ok · 1 warn. The expanded finding names the exact interface and the drop count.</figcaption>
+</figure>
+<p>Findings are written to be read on their own. They name the device, the interface and the measured value, so you can paste one into a case note without rewriting it. A graded finding states what was read first, then what it means — the WLC Platform example above lists the platform, uptime and redundancy state, then explains that HA is configured but not operating as a pair, that onboarding is unaffected, and what would break on a failover.</p>
+
+<h3>The fabric SSID mark</h3>
+<p>When the AP is on air with fabric SSIDs, a green WiFi mark appears beside it, labelled with the SSID names. This is the fastest answer to "is this AP actually serving the fabric WLANs" — if the mark is absent, it is not, whatever the WLC configuration says.</p>
+<figure>
+  <img src="img/16-ssids.png" alt="AP with a green WiFi mark listing five fabric SSIDs, and an expanded AP History finding showing flaps.">
+  <figcaption>Five fabric SSIDs on air. The AP History finding below shows the tool grading a flap pattern rather than a single disconnect.</figcaption>
+</figure>
+
+<h3>Edges between nodes</h3>
+<p>Links are labelled with what they represent. Solid lines are physical; dotted lines are protocol relationships the tool verified.</p>
+<ul class="tight">
+  <li><strong>Interface name</strong> (<code>Te1/0/14</code>) — the physical cable from the AP to its edge.</li>
+  <li><strong>Ac0 · VXLAN</strong> — the access tunnel carrying the AP's client traffic.</li>
+  <li><strong>CAPWAP Control</strong> — the AP's control session to the WLC, drawn across the fabric path it actually takes.</li>
+  <li><strong>LISP Session</strong> — an edge or WLC registered with a control plane.</li>
+  <li><strong>IP Underlay</strong> — underlay reachability between fabric nodes.</li>
+</ul>
+<figure>
+  <img src="img/15-full.png" alt="Full topology with both borders as Border/CP, LISP session and IP underlay edges, and the WLC check list.">
+  <figcaption>The complete picture: both borders as <code>[Border, CP]</code>, LISP sessions fanned from the edge, and the WLC's sixteen checks in the panel.</figcaption>
+</figure>
+
+<h2>Getting the evidence out</h2>
+<div class="tbl">
+<table>
+  <thead><tr><th>Button</th><th>What you get</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Download Log</strong></td><td><code>collection_logfile.txt</code> — the raw command output, every command the run issued and everything the devices returned. This is what you attach to a case or read when you disagree with a verdict.</td></tr>
+    <tr><td><strong>Download Checks</strong></td><td>A PDF of the graded checks and their findings. Suitable for a case note or a customer summary.</td></tr>
+    <tr><td><strong>Reset View</strong></td><td>Re-lays out the canvas. Useful after dragging nodes around.</td></tr>
+    <tr><td><strong>Run Again</strong></td><td>Re-runs the same inputs. Enabled once a run finishes.</td></tr>
+    <tr><td><strong>Stop</strong></td><td>Halts a run in progress. Checks already completed keep their results.</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="note">
+  <strong>Download the log before you close the tab.</strong> Logs are tied to your session. If the server restarts, or you come back to an old tab, the log is gone and you will have to re-run the case.
+</div>
+<p>The build version and commit are shown in the top-right of the topology header. Quote them when reporting a problem with the tool itself.</p>
+
+<h2>A triage order that works</h2>
+<ol class="steps">
+  <li><strong>Check the AP appeared at all.</strong> No AP node means the Ethernet MAC did not match anything on the WLC — re-check the MAC before anything else.</li>
+  <li><strong>Read the Warns, not the Fails.</strong> Fails are usually the tool being blocked; Warns are the fabric being wrong.</li>
+  <li><strong>Work outward from the AP.</strong> AP, then edge, then control planes, then WLC. A broken access tunnel makes the WLC's view meaningless.</li>
+  <li><strong>Check for the green SSID mark.</strong> Present means the AP is genuinely on air with the fabric WLANs; absent means it is not, regardless of what the policy tag claims.</li>
+  <li><strong>Open the log for anything you doubt.</strong> Every verdict traces back to command output you can read yourself.</li>
+</ol>
+
+<h2>Appendix · Commands the workflow runs</h2>
+<p>All read-only. No configuration is ever sent to a device. Placeholders are shown in angle brackets. Catalyst Center API calls are not listed here.</p>
+
+<h3>On the WLC (Catalyst 9800)</h3>
+<div class="tbl">
+<table>
+  <thead><tr><th>Command</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td class="cmd">show ap summary</td><td>Locate the AP by Ethernet MAC; name, model, IP, state</td></tr>
+    <tr><td class="cmd">show ap name &lt;ap-name&gt; config general</td><td>Uptime, tags, mode, CAPWAP state</td></tr>
+    <tr><td class="cmd">show ap name &lt;ap-name&gt; config slot &lt;slot&gt;</td><td>Per-radio state, role and admin status</td></tr>
+    <tr><td class="cmd">show ap uptime</td><td>AP uptime and last reboot</td></tr>
+    <tr><td class="cmd">show ap crash-file</td><td>Crash records for the AP</td></tr>
+    <tr><td class="cmd">show ap wlan summary</td><td>What the AP is actually broadcasting</td></tr>
+    <tr><td class="cmd">show wlan summary</td><td>Every WLAN the controller offers</td></tr>
+    <tr><td class="cmd">show fabric wlan summary</td><td>Which WLANs are fabric-enabled</td></tr>
+    <tr><td class="cmd">show wireless tag policy detailed &lt;policy-tag&gt;</td><td>WLANs the AP's policy tag entitles</td></tr>
+    <tr><td class="cmd">show wireless fabric summary</td><td>Controller fabric state and its control planes</td></tr>
+    <tr><td class="cmd">show wireless dtls connections</td><td>AP DTLS session to the WLC</td></tr>
+    <tr><td class="cmd">show wireless country configured</td><td>Regulatory domain</td></tr>
+    <tr><td class="cmd">show wireless stats ap discovery</td><td>AP discovery and join attempts</td></tr>
+    <tr><td class="cmd">show wireless stats ap history</td><td>Join and disjoin history, for the flap check</td></tr>
+    <tr><td class="cmd">show crypto pki certificates &lt;trustpoint&gt;</td><td>WLC trustpoint validity</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>On the fabric edge</h3>
+<div class="tbl">
+<table>
+  <thead><tr><th>Command</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td class="cmd">show interface &lt;port&gt;</td><td>The AP's switchport: state, errors, counters</td></tr>
+    <tr><td class="cmd">show run | include device classifier</td><td>Device classifier enabled for AP onboarding</td></tr>
+    <tr><td class="cmd">show access-tunnel summary</td><td>VXLAN access tunnel to the AP</td></tr>
+    <tr><td class="cmd">show access-tunnel statistics</td><td>Tunnel counters</td></tr>
+    <tr><td class="cmd">show l2lisp statistics</td><td>L2 LISP activity on the edge</td></tr>
+    <tr><td class="cmd">show idb all</td><td>Interface descriptor blocks</td></tr>
+    <tr><td class="cmd">show switch</td><td>Stack membership</td></tr>
+    <tr><td class="cmd">show logging</td><td>Syslog around the onboarding window</td></tr>
+    <tr><td class="cmd">show ip cef &lt;ap-ip&gt; internal</td><td>Forwarding entry for the AP's address</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>LISP, on the edge and the control planes</h3>
+<div class="tbl">
+<table>
+  <thead><tr><th>Command</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; ethernet database</td><td>L2 EID database</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; ethernet database &lt;mac&gt;</td><td>The AP's L2 registration</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; ethernet database wlc &lt;mac&gt;</td><td>Radio MAC registration and WLC metadata</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; ethernet server &lt;radio-mac&gt;</td><td>Radio MAC as seen by the map-server</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; ipv4</td><td>L3 instance state</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; ipv4 database &lt;ap-ip&gt;/32</td><td>The AP's L3 registration</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; dynamic-eid &lt;ap-ip&gt;</td><td>Dynamic-EID entry</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;iid&gt; &lt;af&gt; statistics</td><td>Map-register and map-reply counters</td></tr>
+    <tr><td class="cmd">show lisp instance-id &lt;vnid&gt; ethernet | i EID table</td><td>VNID to EID-table mapping</td></tr>
+    <tr><td class="cmd">show lisp eid-table vlan &lt;vlan&gt; dynamic-eid summary</td><td>Dynamic-EID by VLAN</td></tr>
+    <tr><td class="cmd">show lisp service ipv4</td><td>LISP session state to the control planes</td></tr>
+    <tr><td class="cmd">show lisp vrf</td><td>VRF to instance mapping</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+</body>
+</html>
