@@ -286,6 +286,10 @@ class cts_rules():
         if ctsrbacperm_op is not None:
             ctsrbacpath = ctsrbacperm_op['indexes']
             matches = ["#"]
+            # Bound up front: every assignment below sits inside a condition,
+            # so a pair whose policy is an action with no SGACL name would
+            # otherwise reach `self.rbacl = rbacl` with nothing assigned.
+            rbacl = None
             for i in ctsrbacpath:
                 if type(i) is int:
                     index = i
@@ -304,8 +308,22 @@ class cts_rules():
                         self.dgtname = None
                     rbacls = ctsrbacpath[index]['policy_groups']
                     filtered_rbacl = [item for item in rbacls if "#" not in item]
-                    self.isdownloaded = len(filtered_rbacl[0]) >= 3 and filtered_rbacl[0][-3] == "-" and filtered_rbacl[0][-2:].isdigit()
-                    self.rawrbacl = filtered_rbacl[0]
+                    # The list can be empty. A pair whose only policy is an
+                    # action -- "Deny IP-00" -- carries no SGACL name, and the
+                    # parser picks up the device prompt as the sole entry,
+                    # which the "#" filter then removes. Indexing [0] here
+                    # raised IndexError and lost the verdict entirely; the
+                    # action is read further down and is the answer in that
+                    # case.
+                    if filtered_rbacl:
+                        first = filtered_rbacl[0]
+                        self.isdownloaded = (len(first) >= 3
+                                             and first[-3] == "-"
+                                             and first[-2:].isdigit())
+                        self.rawrbacl = first
+                    else:
+                        self.isdownloaded = False
+                        self.rawrbacl = None
                     self.isdefaultrule = False
                     try:
                         if ctsrbacpath[index]['action_policy']:

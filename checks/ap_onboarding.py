@@ -3532,6 +3532,111 @@ def _ap_tracking_entries(ctx, hostname, mac):
     return v4, v6
 
 
+def _ap_ip_churn_warning(old_ip, new_ip):
+    """The text for an AP whose address changed mid-run.
+
+    An AP that releases and re-acquires an address is normally an AP that
+    cannot reach its controller: it keeps restarting the join, and each
+    restart takes the DHCP client with it. Everything downstream -- the SGT,
+    the SGACL verdict, the CEF entry -- is being read against a moving
+    target, so the churn matters more than whatever this check concludes.
+    """
+    return (f"⚠ The AP's IP changed during this run: it held {old_ip} and "
+            f"now holds {new_ip}.\n\n"
+            f"  The AP is releasing its address and receiving a new one, "
+            f"which usually means it cannot communicate with the Wireless "
+            f"LAN Controller — the join restarts and takes the DHCP client "
+            f"with it. Stabilising the IP should be the priority: the "
+            f"findings below were read against an address that is still "
+            f"moving, and policy keyed on the old address no longer applies.")
+
+
+def _ap_current_ip(ctx, hostname, mac):
+    """Re-read the AP's IPv4 from SISF, right now.
+
+    A fabric AP can pick up a new address between checks -- the sgt-map and
+    CEF then describe an address the AP no longer holds, and the SGT resolves
+    against nothing. Anything keyed on the AP's address has to ask the
+    device again rather than trust what an earlier check recorded.
+
+    Returns None when device-tracking has no usable IPv4, which leaves the
+    caller to fall back to the recorded address rather than lose the check.
+    """
+    if not mac:
+        return None
+    try:
+        v4, _v6 = _ap_tracking_entries(ctx, hostname, mac)
+    except BaseException:
+        # Best-effort refresh: a failed read must not sink the check that
+        # merely wanted a fresher address than the one already in state.
+        return None
+    for entry in v4:
+        addr = (entry.get("network_layer_address") or "").strip()
+        if addr:
+            return addr
+    return None
+
+
+def _ap_wlc_egress_interfaces(ctx, mgmt_ip):
+    """The interfaces the Edge forwards out of to reach this WLC.
+
+    Taken from the CEF entry the path checks already resolved rather than
+    asking the device again: that entry is what the forwarding plane uses,
+    and re-reading it here would only invite the two to disagree.
+
+    A prefix can resolve onto several interfaces -- ECMP, or the members of
+    a port-channel -- so this returns all of them.
+    """
+    entry = (ctx.state.get("ap_wlc_cef") or {}).get(mgmt_ip) or {}
+    out = []
+    # `pairs` keeps (nexthop, oif) together and `oifs` is the flattened
+    # list of the same interfaces; either answers this question, but pairs
+    # is preferred so an entry that only recorded pairs still resolves.
+    for _hop, oif in entry.get("pairs") or []:
+        oif = (oif or "").strip()
+        if oif and oif not in out:
+            out.append(oif)
+    for oif in entry.get("oifs") or []:
+        oif = (oif or "").strip()
+        if oif and oif not in out:
+            out.append(oif)
+    return out
+
+
+def _ap_egress_enforces(ctx, hostname, interfaces, vlan):
+    """Whether TrustSec enforcement is live on any egress toward the WLC.
+
+    Ports enforce by default; `no cts role-based enforcement` under an
+    interface is what turns it off. So the question is only whether that
+    line is absent somewhere on the path -- and one such interface is
+    enough, because RBACLs are global rather than per-interface. A policy
+    that can be applied on any egress can drop the traffic.
+
+    Returns (enforcing, disabled_on) so the caller can name the interfaces
+    that opted out when explaining a skip.
+    """
+    from securitymodules.ciscotrustsec import cts_endpoint_info
+
+    disabled_on = []
+    enforcing = False
+    for intf in interfaces:
+        probe = cts_endpoint_info(None, None, hostname)
+        try:
+            probe.cts_enforcement(vlan, intf, ctx.service)
+        except BaseException:
+            # An unreadable interface is not evidence that enforcement is
+            # off. Skipping the reverse evaluation on that basis would hide
+            # a real deny behind a failed read, so it counts as enforcing
+            # and the pair gets evaluated.
+            enforcing = True
+            continue
+        if getattr(probe, "ctsportenabled", True):
+            enforcing = True
+        else:
+            disabled_on.append(intf)
+    return enforcing, disabled_on
+
+
 def _ap_snooping_binding(ctx, hostname, vlan, mac):
     """The AP's DHCP snooping binding, or None.
 
@@ -4833,10 +4938,23 @@ class ApTrustSecPolicy(_ApCheck):
     def run_ap(self, ctx: RunContext) -> CheckResult:
         hostname = ctx.state.get("xtr_hostname")
         ap_ip = ctx.state.get("ap_ip")
+        # Re-read the address instead of trusting the one recorded earlier: an
+        # AP that has changed IP since then leaves both the sgt-map and CEF
+        # describing an address it no longer holds, and the SGT comes back 0
+        # for a host that is in fact classified.
+        fresh_ip = _ap_current_ip(ctx, hostname, normalize_mac(ctx.payload.get("mac")))
+        prior_ip = ap_ip
+        ip_changed = bool(fresh_ip and ap_ip and fresh_ip != ap_ip)
+        if fresh_ip:
+            ap_ip = fresh_ip
         svi_ip = ctx.state.get("ap_svi_address")
         vlan = ctx.state.get("ap_vlan")
         wlcs = ctx.state.get("ap_wlc_candidates") or []
         data = {"ap_ip": ap_ip, "vlan": vlan}
+        if ip_changed:
+            data["ap_ip_changed_from"] = prior_ip
+            # Later checks should key on the address the AP actually holds.
+            ctx.state["ap_ip"] = ap_ip
 
         if not ap_ip:
             return CheckResult(
@@ -4846,6 +4964,9 @@ class ApTrustSecPolicy(_ApCheck):
                 data=data)
 
         sections, denies = [], []
+        if ip_changed:
+            sections.append(_ap_ip_churn_warning(
+                data.get("ap_ip_changed_from"), ap_ip))
         try:
             from securitymodules.ciscotrustsec import (
                 cts_endpoint_info, cts_rules)
@@ -4864,18 +4985,33 @@ class ApTrustSecPolicy(_ApCheck):
                 why = ("TrustSec enforcement is disabled globally"
                        if not glob else
                        f"VLAN {vlan} is not in the CTS enforcement vlan-list")
-                return CheckResult(
-                    CheckStatus.OK,
-                    f"No SGACL is enforced on the AP's traffic: {why} on "
-                    f"{hostname}. Any policy configured for the AP's groups "
-                    f"is not applied, so it cannot be dropping traffic.",
-                    data=data)
+                body = (f"No SGACL is enforced on the AP's traffic: {why} on "
+                        f"{hostname}. Any policy configured for the AP's "
+                        f"groups is not applied, so it cannot be dropping "
+                        f"traffic.")
+                # A churning address outranks this verdict: the policy being
+                # inert is good news, but an AP that cannot hold an address
+                # is the thing to act on, so the warning is not dropped with
+                # the rest of `sections` on this early return.
+                if ip_changed:
+                    return CheckResult(
+                        CheckStatus.WARN,
+                        "\n\n".join(sections + [body]), data=data)
+                return CheckResult(CheckStatus.OK, body, data=data)
 
             # Destination is always the AP: the Edge enforces on egress.
             dst = cts_endpoint_info(ap_ip, "default", hostname)
             dst.cts_sgt_mapping(ctx.service)
             dgt = getattr(dst, "cefsgt", 0)
             data["ap_sgt"] = dgt
+            # One lookup per run. The WLC-direction check takes this value
+            # rather than asking the device again: it is the same AP in the
+            # same run, and the second query is where the answer gets lost
+            # when the AP is churning its address. Published unconditionally
+            # -- gating this on a non-zero SGT just sent the other check back
+            # to the device in exactly the case the reuse exists to cover.
+            ctx.state["ap_sgt"] = dgt
+            ctx.state["ap_sgt_ip"] = ap_ip
 
             sources = []
             for wlc_host, mgmt_ip, _node in wlcs:
@@ -5023,9 +5159,20 @@ class ApWlcTrustSecPolicy(_ApCheck):
     def run_ap(self, ctx: RunContext) -> CheckResult:
         hostname = ctx.state.get("xtr_hostname")
         ap_ip = ctx.state.get("ap_ip")
+        # Same reason as the AP-side check: resolve the address now, because an
+        # AP that has moved leaves the sgt-map and CEF describing one it no
+        # longer holds.
+        fresh_ip = _ap_current_ip(ctx, hostname, normalize_mac(ctx.payload.get("mac")))
+        prior_ip = ap_ip
+        ip_changed = bool(fresh_ip and ap_ip and fresh_ip != ap_ip)
+        if fresh_ip:
+            ap_ip = fresh_ip
         vlan = ctx.state.get("ap_vlan")
         wlcs = ctx.state.get("ap_wlc_candidates") or []
         data = {"ap_ip": ap_ip, "vlan": vlan}
+        if ip_changed:
+            data["ap_ip_changed_from"] = prior_ip
+            ctx.state["ap_ip"] = ap_ip
 
         if not ap_ip:
             return CheckResult(
@@ -5040,6 +5187,9 @@ class ApWlcTrustSecPolicy(_ApCheck):
                 data=data)
 
         sections, denies = [], []
+        if ip_changed:
+            sections.append(_ap_ip_churn_warning(
+                data.get("ap_ip_changed_from"), ap_ip))
         try:
             from securitymodules.ciscotrustsec import (
                 cts_endpoint_info, cts_rules)
@@ -5056,19 +5206,50 @@ class ApWlcTrustSecPolicy(_ApCheck):
                 why = ("TrustSec enforcement is disabled globally"
                        if not glob else
                        f"VLAN {vlan} is not in the CTS enforcement vlan-list")
-                return CheckResult(
-                    CheckStatus.OK,
-                    f"No SGACL is enforced on the AP's traffic to the "
-                    f"controller: {why} on {hostname}. Any policy configured "
-                    f"for these groups is not applied, so it cannot be "
-                    f"dropping traffic.",
-                    data=data)
+                body = (f"No SGACL is enforced on the AP's traffic to the "
+                        f"controller: {why} on {hostname}. Any policy "
+                        f"configured for these groups is not applied, so it "
+                        f"cannot be dropping traffic.")
+                # See the AP-side check: a churning address outranks an inert
+                # policy, so the warning survives this early return.
+                if ip_changed:
+                    return CheckResult(
+                        CheckStatus.WARN,
+                        "\n\n".join(sections + [body]), data=data)
+                return CheckResult(CheckStatus.OK, body, data=data)
 
             # Source is always the AP here: this is the outbound direction.
-            src = cts_endpoint_info(ap_ip, "default", hostname)
-            src.cts_sgt_mapping(ctx.service)
-            sgt = getattr(src, "cefsgt", 0)
+            # The AP-side check already resolved this SGT, so reuse it rather
+            # than ask the device again: it is the same AP in the same run,
+            # and the second lookup is where the answer gets lost -- a
+            # churning AP moves between the two, and the repeat query
+            # resolves against an address it no longer holds and returns 0.
+            sgt = ctx.state.get("ap_sgt")
+            sgt_from = "the AP-side check"
+            if sgt is None:
+                # Only when the AP-side check never ran. A resolved 0 is an
+                # answer, not a miss -- re-querying it here is what produced
+                # a second lookup in the one case the reuse is for.
+                src = cts_endpoint_info(ap_ip, "default", hostname)
+                src.cts_sgt_mapping(ctx.service)
+                sgt = getattr(src, "cefsgt", 0)
+                sgt_from = "this check"
+            else:
+                # Reused, so say which address it was read against when that
+                # is no longer the one the AP holds. The group is still the
+                # right answer -- an AP keeps its SGT across a DHCP lease --
+                # but the reader should not be told it was read just now.
+                read_at = ctx.state.get("ap_sgt_ip")
+                if read_at and ap_ip and read_at != ap_ip:
+                    data["ap_sgt_read_at"] = read_at
+                    sections.append(
+                        f"The AP's SGT ({sgt}) is the one resolved earlier "
+                        f"in this run, against {read_at}. The AP now holds "
+                        f"{ap_ip}; its group is carried across the change, "
+                        f"so the pairs below are still the right ones to "
+                        f"evaluate.")
             data["ap_sgt"] = sgt
+            data["ap_sgt_source"] = sgt_from
 
             # What the AP needs to send: the CAPWAP join and its own DHCP
             # discover. Ports are the mirror of the AP-side check's.
@@ -5079,6 +5260,34 @@ class ApWlcTrustSecPolicy(_ApCheck):
             ]
 
             for wlc_host, mgmt_ip, _node in wlcs:
+                where = f"the WLC {wlc_host} ({mgmt_ip})"
+                # Enforcement is a property of the egress, so it is asked
+                # per WLC rather than once: two controllers can leave the
+                # Edge by different interfaces. `no cts role-based
+                # enforcement` on every egress toward this one means no
+                # SGACL can act on the traffic, and the pair is not worth
+                # evaluating.
+                egress = _ap_wlc_egress_interfaces(ctx, mgmt_ip)
+                if egress:
+                    enforcing, disabled_on = _ap_egress_enforces(
+                        ctx, hostname, egress, vlan)
+                    data.setdefault("egress", {})[str(mgmt_ip)] = {
+                        "interfaces": egress,
+                        "enforcing": enforcing,
+                        "disabled_on": disabled_on,
+                    }
+                    if not enforcing:
+                        sections.append(
+                            f"To {where}:\n\n"
+                            f"  Not evaluated — TrustSec enforcement is "
+                            f"disabled on the egress toward this "
+                            f"controller ("
+                            + ", ".join(disabled_on or egress)
+                            + "). No SGACL can be applied to the AP's "
+                            f"traffic on this path, so no policy here can "
+                            f"be dropping it.")
+                        continue
+
                 dst = cts_endpoint_info(mgmt_ip, "default", hostname)
                 dst.cts_sgt_mapping(ctx.service)
                 dgt = getattr(dst, "cefsgt", 0)
@@ -5088,7 +5297,6 @@ class ApWlcTrustSecPolicy(_ApCheck):
                 rbacl = getattr(rules, "rbacl", None)
                 default = bool(getattr(rules, "isdefaultrule", False))
                 pair = f"SGT {sgt} → SGT {dgt}"
-                where = f"the WLC {wlc_host} ({mgmt_ip})"
                 data[str(mgmt_ip)] = {"sgt": dgt, "rbacl": rbacl,
                                       "is_default": default}
 
