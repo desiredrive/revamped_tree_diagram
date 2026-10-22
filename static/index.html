@@ -21,6 +21,9 @@
       <span class="radkit-state">Not connected</span>
       <span class="radkit-detail"></span>
     </span>
+    <!-- Only shown once there is a session to end. Logging out also makes
+         RADKit forget the identity, so the next login prompts for real. -->
+    <button type="button" id="logoutBtn" class="logout-btn" hidden>Log out</button>
   </div>
 
   <header class="masthead">

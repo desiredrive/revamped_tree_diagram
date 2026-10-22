@@ -219,6 +219,57 @@ function setRadkitStatus(state, label, detail) {
   const d = radkitBadge.querySelector('.radkit-detail');
   if (s) s.textContent = label;
   if (d) d.textContent = detail || '';
+  // The button is only meaningful once there is a session to end. Driven from
+  // here because this is the one place every state transition passes through.
+  const lb = document.getElementById('logoutBtn');
+  if (lb) lb.hidden = !currentSession;
+}
+
+// ---- Log out --------------------------------------------------------------
+// Ends the session AND makes RADKit forget the identity, so the next login is
+// a real one. That second part is the whole point: dropping only our own
+// session leaves the enrolment in place and the next login walks straight
+// through without ever prompting.
+const logoutBtn = document.getElementById('logoutBtn');
+
+function setLoggedOutUI() {
+  currentSession = null;
+  serviceReady = false;
+  clearSession();
+  setRunInFlight(false);
+  if (logoutBtn) logoutBtn.hidden = true;
+  loginForm.style.display = 'none';
+  serviceForm.style.display = 'none';
+  pickerPane.style.display = 'block';
+  setHeroVisible(true);
+  setRadkitStatus('dead', 'Logged out', 'log in to run a validation');
+}
+
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', async () => {
+    if (!confirm('Log out? RADKit will forget this identity, so the next '
+                 + 'login will ask you to authenticate again.')) return;
+    const sid = currentSession;
+    logoutBtn.disabled = true;
+    logoutBtn.textContent = 'Logging out…';
+    try {
+      // Tear the stream down first: terminating the session server-side ends
+      // the stream anyway, and a live EventSource would otherwise spend the
+      // call reconnecting to a session that is going away.
+      if (currentEventSource) {
+        try { currentEventSource.close(); } catch (e) {}
+        currentEventSource = null;
+      }
+      if (sid) await fetch('/logout/' + sid, { method: 'POST' });
+    } catch (e) {
+      // The session is being discarded locally regardless -- a failed call
+      // must not strand the user on a screen they cannot leave.
+    } finally {
+      logoutBtn.disabled = false;
+      logoutBtn.textContent = 'Log out';
+      setLoggedOutUI();
+    }
+  });
 }
 
 function showServiceForm(sid) {
@@ -2045,6 +2096,10 @@ async function startRun(payload) {
       if (r.status === 404) {
         es.close();
         clearSession();
+        // Drop the in-memory handle too, not just the stored copy: the badge's
+        // Log out button keys off it, and an expired session has nothing left
+        // to log out of.
+        currentSession = null;
         setRunInFlight(false);
         setRadkitStatus('dead', 'Session expired', 'log in again');
         showBanner('Session ended — the server restarted. Log in again.');
@@ -2396,6 +2451,10 @@ function reattachEventStream() {
       if (r.status === 404) {
         es.close();
         clearSession();
+        // Drop the in-memory handle too, not just the stored copy: the badge's
+        // Log out button keys off it, and an expired session has nothing left
+        // to log out of.
+        currentSession = null;
         setRunInFlight(false);
         setRadkitStatus('dead', 'Session expired', 'log in again');
         showBanner('Session ended — the server restarted. Log in again.');

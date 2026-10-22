@@ -606,3 +606,24 @@ button:hover { background: #1d4ed8; }
 .radkit-badge.is-partial .radkit-state { color: #fde047; }
 .radkit-badge.is-dead .radkit-dot { background: #ef4444; }
 .radkit-badge.is-dead .radkit-state { color: #fca5a5; }
+
+/* Sits inside the badge, so it stays quiet until hovered -- it ends the
+   session and forces a fresh authentication, which is not something to
+   invite with a bright button. */
+.logout-btn {
+  margin-left: 0.5rem;
+  padding: 0.15rem 0.45rem;
+  font: inherit;
+  font-size: 0.65rem;
+  color: #94a3b8;
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.logout-btn:hover:not(:disabled) {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.5);
+}
+.logout-btn:disabled { opacity: 0.5; cursor: default; }
+.logout-btn[hidden] { display: none; }

@@ -115,6 +115,32 @@ def _do_login(sess: Session) -> None:
         sess.status = "ready"
 
 
+def _do_radkit_logout(sess: Session) -> None:
+    """Forget the RADKit identity for this session's domain.
+
+    Runs on the worker thread because RSA's sync API is thread-bound -- the
+    same reason every other client call is queued rather than made inline in
+    the HTTP handler.
+
+    Without this, "log out" would only drop our own session: RADKit keeps the
+    enrolled identity, so the next login walks straight through to `ready`
+    without ever prompting. Clearing it is what makes the next login a real
+    one.
+    """
+    client = sess.client
+    if client is None:
+        return
+    try:
+        client.logout(domain=sess.domain)
+    except Exception as e:
+        # Best-effort: the session is being torn down regardless, and a failure
+        # here must not keep the worker (and its RSA connection) alive.
+        _emit(sess, {
+            "type": "log",
+            "message": f"RADKit logout failed: {type(e).__name__}: {e}",
+        })
+
+
 def _do_connect_service(sess: Session, payload: dict) -> None:
     serial = payload["serial"]
     with sess.lock:
@@ -170,6 +196,7 @@ def _do_run_scenario(sess: Session, payload: dict) -> None:
 # and receives (sess, payload). Add new commands here (e.g. "connect_service").
 COMMANDS = {
     "login": lambda sess, _payload: _do_login(sess),
+    "radkit_logout": lambda sess, _payload: _do_radkit_logout(sess),
     "connect_service": _do_connect_service,
     "run_scenario": _do_run_scenario,
 }
@@ -346,6 +373,42 @@ def login_status(sid: str):
             "sso_url": sess.sso_url,
             "error": sess.error,
         }
+
+
+@app.post("/logout")
+@app.post("/logout/{sid}")
+def logout(sid: str = None):
+    """End the session and forget the RADKit identity behind it.
+
+    Two steps, and the order matters. The RADKit logout has to run on the
+    worker thread (RSA's sync API is thread-bound), so it is queued as a
+    command and given a moment to drain -- `terminate_session` would otherwise
+    join the worker out from under it and the identity would survive.
+
+    Forgetting the identity is the point: without it, RADKit still holds the
+    enrolment and the next login walks straight through to `ready` with no
+    prompt, which is not what a logout button promises.
+    """
+    sess = sessions.get(sid) if sid else None
+    if sess is None:
+        # A refresh or a double-click can land here after the session is gone.
+        # Nothing to do, and nothing wrong.
+        return {"status": "unknown-session"}
+
+    # Stop any in-flight run first so the worker is not busy for 30-60s inside
+    # a RADKit call when we queue the logout behind it.
+    sess.cancel_run.set()
+    sess.commands.put(("radkit_logout", None))
+
+    # Let the queued logout actually run. The worker is single-threaded, so
+    # this is a bounded wait on it reaching the front of the queue, not a
+    # guarantee -- terminate_session cleans up either way.
+    deadline = time.time() + 15.0
+    while time.time() < deadline and not sess.commands.empty():
+        time.sleep(0.1)
+
+    terminate_session(sess)
+    return {"status": "logged-out"}
 
 
 class ServiceRequest(BaseModel):
