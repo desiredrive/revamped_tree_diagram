@@ -72,21 +72,47 @@ class UmcastMsdpSummary(_PerRpMsdp):
                 f"    ip msdp originator-id LoopbackN\n"
                 f"  on each anycast RP, then re-run this check.",
             )
-        rows = [
-            f"  - Peer {p.get('peer_address')}\n"
-            f"      AS: {p.get('as')}\n"
-            f"      Uptime: {p.get('uptime')}\n"
-            f"      SA count: {p.get('sa_count')}\n"
-            f"      Reset count: {p.get('reset_count')}"
-            for p in peers
-        ]
+        # Peers carry a `state_source` flag. 'operational' = state came
+        # from `show ip msdp peer` (our DNS-safe primary). 'config' =
+        # configured via `show run` but NOT seen in the operational
+        # output (peer block down, or peer process down on the device).
+        # Operational fields available from `show ip msdp peer`:
+        #   connection_state, mesh_group, connection_source.
+        # Note: SA / uptime / reset counts are not in `show ip msdp peer`
+        # and we deliberately don't run `show ip msdp summary` (DNS-bound).
+        def _fmt(v):
+            return "(unknown)" if v is None else str(v)
+        rows = []
+        config_only = 0
+        for p in peers:
+            if p.get('state_source') == 'config':
+                config_only += 1
+                rows.append(
+                    f"  - Peer {p.get('peer_address')} "
+                    f"(configured but no operational state — peer block "
+                    f"likely down on this device)"
+                )
+            else:
+                rows.append(
+                    f"  - Peer {p.get('peer_address')}\n"
+                    f"      State: {_fmt(p.get('connection_state'))}\n"
+                    f"      Mesh-group: {_fmt(p.get('mesh_group'))}\n"
+                    f"      Connect-source: {_fmt(p.get('connection_source'))}"
+                )
         body_lines = [
             f"• Device: {host}",
-            f"• MSDP peers: {len(peers)}",
+            f"• MSDP peers configured: {len(peers)}",
             f"• Originator-id: {getattr(msdp, 'originatorid', None)}",
             f"• RPF rfc3618: {getattr(msdp, 'rfc3618', False)}",
             "• Peer list:",
         ] + rows
+        if config_only:
+            body_lines.append(
+                f"• Note: {config_only} peer(s) are present in the running "
+                f"config but did not appear in `show ip msdp peer` output — "
+                f"verify the peer process is up and the TCP session has "
+                f"established."
+            )
         return CheckResult(CheckStatus.OK, "\n".join(body_lines))
 
 

@@ -301,15 +301,33 @@ class MSDP:
         self.vrf_mode = vrf_mode
 
     def msdpsummary(self, service):
-        msdpsummarycmd = "show ip msdp {} summary".format(self.vrf_mode)
-        msdpsummaryop = get_any_single_output(self.hostname,msdpsummarycmd,service)
-        self.peers = parse_msdp_summary(msdpsummaryop)
-        msdpglobalconfigcmd = "show run | i ip msdp"
-        msdpglobalconfigop = get_any_single_output(self.hostname,msdpglobalconfigcmd,service)
+        """Discover MSDP peers + global MSDP knobs.
 
+        Primary source is the operational ``show ip msdp peer`` — that
+        command is NOT bound by DNS reverse-resolution, so it returns
+        full per-peer state (connection_state, mesh_group, …) cleanly
+        even on a device whose resolver is broken. We deliberately do
+        NOT use ``show ip msdp summary``, which reverse-resolves every
+        peer's IP into a name and stalls on broken DNS.
+
+        ``show running-config | include ip msdp`` is read in any case
+        because the global knobs we care about (originator-id, RPF
+        rfc3618 mode) are config-only — they're not in the operational
+        output. It also doubles as a fallback peer list if the
+        operational show returned nothing (peer process down, parser
+        miss on a non-IOS-XE variant, …) so the anycast-RP "MSDP not
+        configured" failure mode is still detectable.
+        """
+        # ----- 1) Global MSDP config (originator-id, rfc3618, fallback peers) -
+        msdpglobalconfigcmd = "show run | i ip msdp"
+        msdpglobalconfigop = get_any_single_output(
+            self.hostname, msdpglobalconfigcmd, service,
+        )
         self.rfc3618 = False
         self.originatorid = None
+        config_peer_ips = []
         if msdpglobalconfigop is not None:
+            seen = set()
             for line in msdpglobalconfigop.splitlines():
                 if "rpf rfc3618" in line:
                     self.rfc3618 = True
@@ -317,6 +335,72 @@ class MSDP:
                     match = re.search(r"originator-id\s+(\S+)", line)
                     if match:
                         self.originatorid = match.group(1)
+                # `ip msdp peer <ip> ...` and `ip msdp mesh-group <name> <ip>`
+                m = re.search(
+                    r"^\s*ip msdp (?:peer|mesh-group\s+\S+)\s+"
+                    r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})",
+                    line,
+                )
+                if m and m.group(1) not in seen:
+                    seen.add(m.group(1))
+                    config_peer_ips.append(m.group(1))
+
+        # ----- 2) Operational peer state (DNS-SAFE) -----------------------
+        # `show ip msdp peer` returns full per-peer detail (state, mesh
+        # group, connection source, SA filters) without reverse-DNS.
+        msdpdetailcmd = "show ip msdp {} peer".format(self.vrf_mode)
+        msdpdetailop = get_any_single_output(
+            self.hostname, msdpdetailcmd, service,
+        )
+        oper_peers = parse_msdp_peer_detail(msdpdetailop) or []
+        oper_by_ip = {p['peer_ip']: p for p in oper_peers if p.get('peer_ip')}
+
+        # ----- 3) Build the unified peers list --------------------------
+        # Use the operational set as truth; if it's empty (peer process down,
+        # parser miss), fall back to the config-derived peer list with state
+        # = None so the existence-of-MSDP gate still answers correctly.
+        peers = []
+        if oper_peers:
+            for op in oper_peers:
+                ip = op.get('peer_ip')
+                if not ip:
+                    continue
+                peers.append({
+                    'peer_address': ip,
+                    'as': None,
+                    'uptime': None,
+                    'reset_count': None,
+                    'sa_count': None,
+                    'peer_name': None,
+                    'connection_state': op.get('connection_state'),
+                    'mesh_group': op.get('mesh_group'),
+                    'connection_source': op.get('connection_source'),
+                    'state_source': 'operational',
+                })
+            # Surface any config-only peers (configured but not in `show ip
+            # msdp peer` output — usually means the peer block hasn't formed).
+            oper_ips = {p['peer_address'] for p in peers}
+            for ip in config_peer_ips:
+                if ip not in oper_ips:
+                    peers.append({
+                        'peer_address': ip,
+                        'as': None, 'uptime': None, 'reset_count': None,
+                        'sa_count': None, 'peer_name': None,
+                        'connection_state': None, 'mesh_group': None,
+                        'connection_source': None,
+                        'state_source': 'config',
+                    })
+        else:
+            for ip in config_peer_ips:
+                peers.append({
+                    'peer_address': ip,
+                    'as': None, 'uptime': None, 'reset_count': None,
+                    'sa_count': None, 'peer_name': None,
+                    'connection_state': None, 'mesh_group': None,
+                    'connection_source': None,
+                    'state_source': 'config',
+                })
+        self.peers = peers
 
     def msdppeer(self,  service):
         msdpsummarycmd = "show ip msdp {} peer".format(self.vrf_mode)

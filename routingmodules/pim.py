@@ -333,12 +333,19 @@ class PimConfiguration:
         #Identify the RPF neighbor for a source.
         #
         # `show ip rpf` reverse-resolves both the queried IP and the RPF
-        # neighbor. On a customer box with `ip domain lookup` enabled and no
-        # reachable resolver, each lookup blocks ~15–30 s, which trips RADKit's
-        # default exec timeout and makes radkit_genie.parse() raise
-        # "cannot parse requests which are still being processed". Bump the
-        # exec timeout for this command alone so two slow reverse-DNS lookups
-        # have time to complete.
+        # neighbor. On a customer box with `ip domain lookup` enabled and
+        # no reachable resolver, each lookup blocks 15–60 s; in the typical
+        # broken-DNS case (server unreachable, silent) the two lookups
+        # together take ~60–180 s. We give the exec a 180 s window so that
+        # case completes naturally and RPF data is captured.
+        #
+        # The truly pathological case (resolver loops past 180 s) still
+        # times out and the device session stays busy for another minute
+        # or two — IOS-XE does not honor Ctrl-C while in the resolver, so
+        # RADKit's reset_after can't free it. That cascade is contained at
+        # the chain level: `UmcastRpfToRp` is scheduled LAST per-device in
+        # `build_underlay_multicast_chain`, so even when it hangs past
+        # 180 s only its own result is lost — every other check ran first.
         self.rpfip = ip
         rpf_cmd = "show ip rpf {} {}".format(vrf_mode,ip)
         rpf_op = radkit_cli.get_single_output_genie(
@@ -410,11 +417,31 @@ class PimConfiguration:
                 self.ssmenabled = False
 
     def ip_pim_statistics(self,service):
+        # Set the defaults BEFORE the RADKit call. If that helper raises
+        # (e.g. service.inventory entry missing, RADKit exec error), we still
+        # leave the object with every counter set to None — callers reach
+        # in directly (no getattr) and would otherwise crash with
+        # AttributeError. None is the sentinel for "unknown".
+        self.totalpimpackets = None
+        self.pimchecksum_errors = None
+        self.pimformat_errors = None
+        self.pimqueuedrops = None
+        self.pimregisters = None
+        self.pimregisterstops = None
+        self.pimjoinprunes = None
+        self.pimhellos = None
+        self.pimasserts = None
         #Statistics from show ip traffic:
         iptraffic_cmd = "show ip traffic"
-        iptraffic_op = radkit_cli.get_single_output_genie(self.hostname,iptraffic_cmd,service)
-
-        if iptraffic_op is not None:
+        try:
+            iptraffic_op = radkit_cli.get_single_output_genie(
+                self.hostname, iptraffic_cmd, service,
+            )
+        except Exception:
+            return
+        if iptraffic_op is None:
+            return
+        try:
             path = iptraffic_op['pimv2_statistics']
             self.totalpimpackets = path['pimv2_total']
             self.pimchecksum_errors = path['pimv2_checksum_errors']
@@ -425,3 +452,7 @@ class PimConfiguration:
             self.pimjoinprunes = path['pimv2_join_prunes']
             self.pimhellos = path['pimv2_hellos']
             self.pimasserts = path['pimv2_asserts']
+        except (KeyError, TypeError):
+            # Genie parser returned a partial / unexpected shape — leave the
+            # defaults set above and let the caller handle the unknown case.
+            pass

@@ -136,6 +136,18 @@ class _UmcastBase(Check):
 def build_underlay_multicast_chain(side: str = "fhr") -> list:
     """Return the ordered list of multicast checks for the given side."""
     from checks.underlay_multicast_gates import build_pim_gates_for_side
+    # NOTE on RPF ordering: `UmcastRpfToRp` issues `show ip rpf <rp>` which
+    # reverse-resolves both the RP and the RPF neighbor. On a fabric node
+    # with `ip domain lookup` enabled and no reachable resolver, each lookup
+    # blocks 15–30 s, and IOS-XE does **not** honor Ctrl-C while the kernel
+    # is in the resolver — `reset_after=True` in RADKit cannot free the CLI.
+    # Any command that follows on the same device is queued behind the
+    # still-running show and returns empty (PIM stats, mroute, IGMP, ACLs,
+    # …), cascading the failure across the whole chain.
+    #
+    # We can't fix the customer device, so RPF is scheduled LAST per-device.
+    # If it wedges, only its own result is missing — every other check has
+    # already completed against a clean prompt.
     return [
         UmcastDeviceProfile(side),
         *build_pim_gates_for_side(side),
@@ -147,11 +159,12 @@ def build_underlay_multicast_chain(side: str = "fhr") -> list:
         UmcastSsmRange(side),
         UmcastMcastRange(side),
         UmcastRpIdentification(side),
-        UmcastRpfToRp(side),
         UmcastPimStatistics(side),
         UmcastIgmpVerifications(side),
         UmcastLocalStarG(side),
         UmcastFloodingAcls(side),
+        # RPF goes last — see comment above.
+        UmcastRpfToRp(side),
     ]
 
 
@@ -569,10 +582,10 @@ class UmcastRpfToRp(_UmcastBase):
     running_note = (
         "Note: `show ip rpf` on IOS-XE reverse-resolves both the queried RP "
         "and the RPF neighbor. If the device has `ip domain lookup` enabled "
-        "but no reachable resolver, each lookup can stall ~15–30 s, making "
-        "this check take a long time to complete. To avoid the delay, either "
-        "fix DNS reachability / mappings, or disable resolution on every "
-        "fabric node with `no ip domain lookup`."
+        "but no reachable resolver, each lookup can stall ~15–60 s — this "
+        "check uses a 180 s window so that completes and full RPF data is "
+        "still captured. To make it instant, configure a reachable DNS "
+        "server, or run `no ip domain lookup` on the fabric node."
     )
 
     def run(self, ctx: RunContext) -> CheckResult:
@@ -589,10 +602,40 @@ class UmcastRpfToRp(_UmcastBase):
             return _wrap_fail(self.name, e)
         rpf = getattr(umd, "rpfinformation", None)
         host = umd.profiled_device.hostname
+        # `pim_rpf_neighbor` only assigns rpfinterface / rpfneighborip when the
+        # genie parse succeeded; on timeout / DNS hang / parse failure it sets
+        # rpffailure=True instead. Surface that as a clean FAIL with the
+        # actionable cause (DNS resolution timeout) and remediation.
+        if rpf is None or getattr(rpf, "rpffailure", False) or \
+                not getattr(rpf, "rpfinterface", None):
+            return CheckResult(
+                CheckStatus.FAIL,
+                f"• Device: {host}\n"
+                f"• RP: {rp}\n"
+                f"• RPF information could not be captured — `show ip rpf "
+                f"{rp}` did not return a parseable result within the "
+                f"180 s window.\n"
+                f"• Most likely cause: DNS resolution timeout. `show ip rpf` "
+                f"reverse-resolves both the queried RP and the RPF neighbor; "
+                f"on a device with `ip domain lookup` enabled but no "
+                f"reachable resolver, each lookup blocks 15–60 s and the "
+                f"show takes longer than the exec window.\n"
+                f"• This check is scheduled last on each device, so only "
+                f"the RPF result is missing — every other multicast check "
+                f"on {host} ran before it.\n"
+                f"• Fix (pick one) for full RPF data:\n"
+                f"    - Configure a reachable DNS server, e.g.\n"
+                f"        ip name-server <reachable-ip>\n"
+                f"        ip domain lookup source-interface Loopback0\n"
+                f"      so reverse lookups complete in milliseconds.\n"
+                f"    - Or run `no ip domain lookup` on the fabric nodes "
+                f"for the fastest resolution (recommended for lab / TAC runs).\n"
+                f"  Then re-run this scenario.",
+            )
         body = (
             f"• Device: {host}\n"
             f"• RP: {rp}\n"
-            f"• RPF neighbor: {getattr(rpf, 'rpfneighbor', '?')}\n"
+            f"• RPF neighbor: {getattr(rpf, 'rpfneighborip', '?')}\n"
             f"• RPF interface: {getattr(rpf, 'rpfinterface', '?')}"
         )
         return CheckResult(CheckStatus.OK, body)
@@ -615,9 +658,24 @@ class UmcastPimStatistics(_UmcastBase):
             return _wrap_fail(self.name, e)
         st = getattr(umd, "pimstatistics", None)
         host = umd.profiled_device.hostname
-        cks = int(getattr(st, "pimchecksum_errors", 0) or 0)
-        fmt = int(getattr(st, "pimformat_errors", 0) or 0)
-        drp = int(getattr(st, "pimqueuedrops", 0) or 0)
+        # Each counter is None when `show ip traffic` didn't return / parse;
+        # treat that as "unknown" so the body doesn't claim a misleading 0.
+        cks = getattr(st, "pimchecksum_errors", None)
+        fmt = getattr(st, "pimformat_errors", None)
+        drp = getattr(st, "pimqueuedrops", None)
+        if cks is None and fmt is None and drp is None:
+            return CheckResult(
+                CheckStatus.WARN,
+                f"• Device: {host}\n"
+                f"• PIM statistics unavailable — `show ip traffic` did not "
+                f"return parseable output.\n"
+                f"• Re-run the scenario, or capture `show ip traffic` "
+                f"manually on {host} and verify PIM checksum / format "
+                f"errors and queue drops are 0.",
+            )
+        cks = int(cks or 0)
+        fmt = int(fmt or 0)
+        drp = int(drp or 0)
         body = (
             f"• Device: {host}\n"
             f"• PIM checksum errors: {cks}\n"

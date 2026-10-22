@@ -470,11 +470,13 @@ class UnderlayMulticastDevice:
         pimstatistics = PimConfiguration(None,hostname)
         pimstatistics.ip_pim_statistics(service)
         self.pimstatistics = pimstatistics
-        if pimstatistics.pimchecksum_errors != 0:
+        # ip_pim_statistics may leave counters as None when `show ip traffic`
+        # doesn't return / parse — guard each comparison so we never crash.
+        if pimstatistics.pimchecksum_errors:
             print ("WARNING!: PIM Checksum Errors found on device: {} verify if these are increasing with \"show ip traffic\" ".format(hostname))
-        if pimstatistics.pimformat_errors != 0:
+        if pimstatistics.pimformat_errors:
             print("WARNING!: PIM Format Errors found on device: {} verify if these are increasing with \"show ip traffic\" ".format(hostname))
-        if pimstatistics.pimqueuedrops != 0:
+        if pimstatistics.pimqueuedrops:
             print("WARNING!: PIM Queue Drops found on device: {} verify if these are increasing with \"show ip traffic\" ".format(hostname))
 
     def igmp_verifications(self,service):
